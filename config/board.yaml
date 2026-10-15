@@ -1,0 +1,7 @@
+# 标定板规格(全局)
+board:
+  board_type: "chessboard"
+  cols: 11                             # 内部角点列数
+  rows: 8                              # 内部角点行数,11×8 = 88 个内部角点
+  square_size_mm: 25.0                 # 方格物理边长(只影响外参平移尺度,不影响内参)
+  unit: "mm"
