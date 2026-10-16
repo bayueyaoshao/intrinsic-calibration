@@ -117,7 +117,7 @@ def _scan_split(split_dir: Path, split: str, warnings: list[str]) -> list[ImageR
     return records
 
 
-def scan_dirs(train_dir: Path, test_dir: Path) -> ScanResult:
+def scan_dataset_dirs(train_dir: Path, test_dir: Path) -> ScanResult:
     """按配置给的两个目录扫描(train_dir 每姿态一个子目录,test_dir 平铺),
     返回记录 + 警告清单。目录路径来自 calibration.yaml 的 data.train / data.test。"""
     warnings: list[str] = []
@@ -134,7 +134,7 @@ def scan_dirs(train_dir: Path, test_dir: Path) -> ScanResult:
 def scan_dataset_detailed(root: Path) -> ScanResult:
     """扫描 input_data 根目录(下含 train/ 与 test/),返回记录 + 警告清单。"""
     root = Path(root)
-    return scan_dirs(root / "train", root / "test")
+    return scan_dataset_dirs(root / "train", root / "test")
 
 
 def scan_dataset(root: Path) -> list[ImageRecord]:

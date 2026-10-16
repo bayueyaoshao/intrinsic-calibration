@@ -19,7 +19,7 @@ import cv2
 import typer
 
 from calib.io.config import load_board, load_calibration
-from calib.io.dataset import scan_dirs, verify_consistent_resolution
+from calib.io.dataset import scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import write_manifest
 
 app = typer.Typer(
@@ -66,7 +66,7 @@ def ingest() -> None:
     cfg = load_calibration(CALIBRATION_PATH)
 
     # 数据目录来自配置(相对当前工作目录),换数据集只改 calibration.yaml
-    scan = scan_dirs(train_dir=Path(cfg.data.train), test_dir=Path(cfg.data.test))
+    scan = scan_dataset_dirs(train_dir=Path(cfg.data.train), test_dir=Path(cfg.data.test))
     resolution = verify_consistent_resolution(scan.records)
 
     run_dir = write_manifest(
