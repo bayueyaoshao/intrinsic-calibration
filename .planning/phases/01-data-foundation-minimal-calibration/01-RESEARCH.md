@@ -655,7 +655,7 @@ def load_board(path) -> tuple[int, int, float]:
 | A7 | 拼图抽样:每姿态 1 张 + 全部存疑 + 指标最差 N 张,拼图 ≤ ~200 格可读 | Claude's Discretion 建议 | 无:布局是明示的自由裁量区 |
 | A8 | 方格像素边长在本数据 15–25px 量级(窗口 w≈6–11) | Pattern 3 | 低:PROJECT.md 既有估计;首帧实测即定,推导公式对任意值成立 |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **经典检测器在本数据的成功率**
    - What we know: 棋盘占比小、集中中部、广角桶形畸变——经典路线的已知弱区;SB 通常更稳
