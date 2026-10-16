@@ -21,13 +21,14 @@ import cv2
 import numpy as np
 import typer
 
-from calib.corners.artifacts import CANONICAL_RULE_VERSION, save_corners
+from calib.corners.artifacts import CANONICAL_RULE_VERSION, load_corners, save_corners
 from calib.corners.canonical import burst_consistency
 from calib.corners.detect import detect_classic, detect_sb
 from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import latest_run_dir, write_manifest
-from calib.util.lineage import make_lineage
+from calib.solve.baseline import DETECTORS, run_baselines, save_calibration
+from calib.util.lineage import make_lineage, sha256_file
 
 app = typer.Typer(
     name="calib",
@@ -317,9 +318,98 @@ def noise() -> None:
     _not_implemented(3, "测噪声底")
 
 
-@app.command(help="④ 求解相机内参:多类相机模型并排求解,以 OpenCV 结果为对照基准")
+def _manifest_path_for(corners_run: Path) -> Path:
+    """定位与角点产物同一轮的数据清单 manifest.json。
+
+    优先用角点 meta 里记录的上游清单路径(血缘链闭合:标定对齐的正是
+    角点当时用的那份清单,即便之后又跑过新的 ingest 也不串轮);
+    记录缺失或文件不在了,才退回最新一轮 ingest 产物。
+    """
+    meta_path = corners_run / "corners_train_classic.meta.json"
+    if meta_path.is_file():
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        recorded = (meta.get("lineage", {}).get("upstream", {})
+                    .get("manifest.json", {}).get("path"))
+        if recorded and Path(recorded).is_file():
+            return Path(recorded)
+    return latest_run_dir(OUTPUT_ROOT, "ingest") / "manifest.json"
+
+
+@app.command(help="④ 求解相机内参:两颗检测器的角点 × 针孔/鱼眼两类模型 = 4 个基线并排出结果")
 def calibrate() -> None:
-    _not_implemented(4, "求解相机内参")
+    """流水线第④步:在 train 角点上跑 2×2 = 4 个基线标定(D-10)。
+
+    步骤:读配置 → 找最新一轮 corners 产物,读两份 train 角点
+    (test 65 张留给后续阶段的独立评分,本步不碰)→ 按人工剔除清单
+    逻辑剔除(D-03)→ 四组合循环求解 → 每组合写 calibration.json 与
+    residuals.npz → 汇总写 comparison.json → 打印中文对比表。
+    """
+    started = datetime.now(UTC)
+    board = load_board(BOARD_PATH)
+    cfg = load_calibration(CALIBRATION_PATH)
+
+    corners_run = latest_run_dir(OUTPUT_ROOT, "corners")
+    with open(_manifest_path_for(corners_run), encoding="utf-8") as f:
+        manifest = json.load(f)
+    width, height = manifest["summary"]["resolution"]
+
+    corners_train = {
+        detector: load_corners(corners_run / f"corners_train_{detector}.npz")
+        for detector in DETECTORS
+    }
+    typer.echo(f"开始基线标定:2×2 = 4 个组合(corners run:{corners_run.name},"
+               f"图像 {width}x{height})……")
+    outcome = run_baselines(corners_train, (int(width), int(height)), cfg, board)
+
+    round_id = f"run_{started.strftime('%Y%m%d_%H%M%S')}"
+    run_dir = OUTPUT_ROOT / "calibration" / round_id
+
+    # 每组合各写产物;血缘里记下它消费的那份角点文件路径与指纹(T-03-01),
+    # 以及本轮实际被人工剔除的照片名单(T-03-02,谁剔了什么可审计)
+    comparison = []
+    for detector in DETECTORS:
+        npz_path = corners_run / f"corners_train_{detector}.npz"
+        for model in ("pinhole", "fisheye"):
+            name = f"baseline_{detector}_{model}"
+            result = outcome["baselines"][name]
+            lineage = make_lineage(
+                config_files={"board.yaml": BOARD_PATH,
+                              "calibration.yaml": CALIBRATION_PATH},
+                upstream={npz_path.name: npz_path},
+                round_id=round_id,
+            )
+            lineage["corners_file"] = str(npz_path)
+            lineage["corners_sha256"] = sha256_file(npz_path)
+            lineage["excluded_images"] = outcome["excluded_images"]
+            save_calibration(run_dir, name, result, lineage)
+            comparison.append({
+                "name": name,
+                "n_views": len(result["image_ids"]),
+                "rms_overall": result["rms_overall"],
+                "converged": result["converged"],
+                "failure_note": result["failure_note"],
+            })
+
+    comparison_path = run_dir / "comparison.json"
+    with open(comparison_path, "w", encoding="utf-8") as f:
+        json.dump(comparison, f, ensure_ascii=False, indent=2)
+
+    # 中文对比表:四组合并排,一眼看出哪组最优、哪组失败(D-10 的直接答案)
+    typer.echo("基线标定完成,2×2 = 4 个组合并排已写盘。")
+    typer.echo(f"  {'组合':<28}{'视图数':<8}{'整体RMS(像素)':<16}{'收敛':<6}")
+    for row in comparison:
+        rms_text = f"{row['rms_overall']:.4f}" if row["rms_overall"] is not None else "—"
+        flag = "是" if row["converged"] else f"否({row['failure_note'][:24]}……)"
+        typer.echo(f"  {row['name']:<28}{row['n_views']:<8}{rms_text:<16}{flag}")
+    typer.echo("  白话:鱼眼(fisheye)模型假设镜头按'等距投影'成像——入射角越大,"
+               "成像点离中心按角度均匀拉开;普通广角镜头往往不合这个假设,"
+               "求解可能不收敛或误差很大,这属预期内的正常发现,记录下来不中断。")
+    if outcome["excluded_images"]:
+        typer.echo(f"  人工剔除清单生效:本轮剔除 {len(outcome['excluded_images'])} 张"
+                   f"(名单已记进每个产物的血缘)")
+    typer.echo(f"  标定产物:{run_dir}")
+    typer.echo(f"  对比摘要:{comparison_path}")
 
 
 @app.command(help="⑤ 算理论精度极限:标定前预测这批数据最好能做到什么程度,并检查摆拍位置是否有缺陷(Fisher 信息/CRLB)")
@@ -351,7 +441,9 @@ def run_all() -> None:
     typer.echo("")
     corners()
     typer.echo("")
-    typer.echo("后续阶段(噪声/内参/理论极限/考试/归因/报告)由后续版本实现,"
+    calibrate()
+    typer.echo("")
+    typer.echo("后续阶段(噪声/理论极限/考试/归因/报告)由后续版本实现,"
                "run-all 到此为止。")
 
 
