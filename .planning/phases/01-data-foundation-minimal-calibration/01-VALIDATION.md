@@ -48,7 +48,7 @@ created: 2026-10-16
 | 1-03-02 | 03 | 3 | COR-01(最小标定) | T-03-01, T-03-02 | lineage 含 corners sha256;剔除名单落盘可审计 | unit + CLI | `uv run calib calibrate && uv run pytest tests/ -q -m "not integration"` | ❌ W0 | ⬜ pending |
 | 1-03-03 | 03 | 3 | IO-01(血缘链) | T-03-01 | 冒烟断言血缘哈希闭合(manifest→corners→calibration) | integration | `uv run pytest tests/test_smoke_realdata.py -q -m integration` | ❌ W0 | ⬜ pending |
 | 1-04-01 | 04 | 4 | IO-02 | T-04-01 | 坏图中文报错;FAST_CHECK 仅预筛 | unit | `uv run pytest tests/test_io_precheck.py -q` | ❌ W0 | ⬜ pending |
-| 1-04-02 | 04 | 4 | IO-02, IO-01 | T-04-02 | precheck.py 无删除路径(grep 断言);判定仅标记 | unit | `uv run pytest tests/test_io_precheck.py -q && ! grep -qE "remove\|unlink\|delete" src/calib/io/precheck.py` | ❌ W0 | ⬜ pending |
+| 1-04-02 | 04 | 4 | IO-02, IO-01 | T-04-02 | precheck.py 与 suspects.py 无删除路径(锚定调用式 grep);判定仅标记 | unit | `uv run pytest tests/test_io_precheck.py -q && ! grep -qE "(os\.remove\|\.unlink(\|shutil\.rmtree\|\bdel )" src/calib/io/precheck.py src/calib/visualization/suspects.py` | ❌ W0 | ⬜ pending |
 | 1-04-03 | 04 | 4 | IO-02 | T-04-02 | 存疑副本数 == 存疑数;跨轮 diff 三桶 | CLI | `uv run calib ingest && uv run calib ingest`(断言脚本见 01-04 Task 3) | ❌ W0 | ⬜ pending |
 | 1-05-01 | 05 | 5 | COR-01(可视化) | T-05-01 | 副本另存,原图永不被修改 | unit | `uv run pytest tests/test_visualization.py -q` | ❌ W0 | ⬜ pending |
 | 1-05-02 | 05 | 5 | COR-01(可视化) | T-05-02 | 拼图零新依赖;quality 90 控制体积 | unit | `uv run pytest tests/test_visualization.py -q` | ❌ W0 | ⬜ pending |
