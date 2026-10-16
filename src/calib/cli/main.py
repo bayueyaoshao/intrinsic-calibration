@@ -13,14 +13,21 @@
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import cv2
+import numpy as np
 import typer
 
+from calib.corners.artifacts import CANONICAL_RULE_VERSION, save_corners
+from calib.corners.canonical import burst_consistency
+from calib.corners.detect import detect_classic, detect_sb
 from calib.io.config import load_board, load_calibration
-from calib.io.dataset import scan_dataset_dirs, verify_consistent_resolution
-from calib.io.manifest import write_manifest
+from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
+from calib.io.manifest import latest_run_dir, write_manifest
+from calib.util.lineage import make_lineage
 
 app = typer.Typer(
     name="calib",
@@ -98,9 +105,211 @@ def ingest() -> None:
     typer.echo(f"  数据清单:{run_dir / 'manifest.json'}")
 
 
+def _stats_block(values: np.ndarray) -> dict | None:
+    """检出帧的统计(min/中位数/max);一个都没检出时返回 None。"""
+    if values.size == 0:
+        return None
+    return {
+        "min": float(np.min(values)),
+        "median": float(np.median(values)),
+        "max": float(np.max(values)),
+    }
+
+
+def _burst_failures_for(uv: np.ndarray, sq_px: np.ndarray, detected: np.ndarray,
+                        images: list[dict], detector: str,
+                        burst_cfg) -> tuple[list[dict], int]:
+    """对一个检测器的 train 角点按姿态分组做连拍一致性断言(D-09)。
+
+    返回 (失败清单, 检查了多少组)。test 每张独立、单张姿态不构成连拍,跳过。
+    断言失败不抛异常:失败组里逐帧与"连拍内逐点中位数参照"比偏差,
+    偏差超限的帧点名进清单(疑似镜像/翻转污染),供人工审阅,不自动剔除(D-01)。
+    """
+    groups: dict[str, list[int]] = {}
+    for i, rec in enumerate(images):
+        if rec["split"] == "train":
+            groups.setdefault(rec["pose_id"], []).append(i)
+
+    failures: list[dict] = []
+    for pose_id in sorted(groups):
+        idxs = groups[pose_id]
+        det_idxs = [i for i in idxs if detected[i]]
+        if len(det_idxs) < 2:
+            continue  # 连拍里可用的帧不足 2 张,没法比,跳过
+        uvs = uv[det_idxs]
+        sq = float(np.median(sq_px[det_idxs]))
+        result = burst_consistency(uvs, sq,
+                                   median_tol=burst_cfg.median_tol,
+                                   max_tol=burst_cfg.max_tol)
+        if result["ok"]:
+            continue
+        reference = np.median(uvs, axis=0)
+        deviation = np.linalg.norm(uvs - reference, axis=2).max(axis=1)
+        suspect_local = [j for j in range(len(det_idxs))
+                         if deviation[j] > result["threshold_px"][1]]
+        suspect_idxs = [det_idxs[j] for j in suspect_local] or det_idxs
+        failures.append({
+            "detector": detector,
+            "split": "train",
+            "pose_id": pose_id,
+            "suspect_image_ids": [images[i]["image_id"] for i in suspect_idxs],
+            "spread_median_px": result["spread_median_px"],
+            "spread_max_px": result["spread_max_px"],
+            "threshold_px": result["threshold_px"],
+            "note": "同编号角点在连拍内跳位,疑似排序被镜像/翻转污染;"
+                    "已点名存疑供人工审阅,未剔除(D-01)。",
+        })
+    return failures, sum(1 for g in groups.values()
+                         if sum(1 for i in g if detected[i]) >= 2)
+
+
 @app.command(help="② 找棋盘角点:经典与新款两个检测器并跑、各存一份,亚像素窗口按实测方格边长比例推导")
 def corners() -> None:
-    _not_implemented(2, "找棋盘角点")
+    """流水线第②步:在数据清单登记的全部照片上找角点。
+
+    步骤:读配置 → 找最新一轮 ingest 产物读照片清单 → 逐张读图,
+    经典与新款(SB)两颗检测器各跑一次(D-07)→ 各自规范化、按姿态分组
+    做连拍一致性断言(D-09)→ 写 4 份角点 npz(train/test × classic/sb)
+    与检测质量摘要 → 打印中文汇总。
+    """
+    started = datetime.now(UTC)
+    board = load_board(BOARD_PATH)
+    cfg = load_calibration(CALIBRATION_PATH)
+
+    # 上游产物:最新一轮入库清单(文件是唯一真相源,阶段间只靠文件通信)
+    ingest_run = latest_run_dir(OUTPUT_ROOT, "ingest")
+    with open(ingest_run / "manifest.json", encoding="utf-8") as f:
+        manifest = json.load(f)
+    images: list[dict] = manifest["images"]
+
+    timestamp = started.strftime("%Y%m%d_%H%M%S")
+    round_id = f"run_{timestamp}"
+    out_dir = OUTPUT_ROOT / "corners" / round_id
+    lineage = make_lineage(
+        config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH},
+        upstream={"manifest.json": ingest_run / "manifest.json"},
+        round_id=round_id,
+    )
+
+    n = len(images)
+    detectors = {"classic": detect_classic, "sb": detect_sb}
+    arrays = {
+        name: {
+            "uv": np.full((n, board.cols * board.rows, 2), np.nan),
+            "sq_px": np.full(n, np.nan),
+            "win_size": np.full(n, np.nan),
+            "detected": np.zeros(n, dtype=bool),
+        }
+        for name in detectors
+    }
+
+    typer.echo(f"开始找角点:共 {n} 张照片 × 2 颗检测器(经典较慢,请稍等)……")
+    for i, rec in enumerate(images):
+        gray = imread_checked(Path(rec["path"]))
+        for name, detect in detectors.items():
+            result = detect(gray, board.cols, board.rows, cfg.corners)
+            if result is None:
+                continue  # 本帧该检测器未检出:照常占一行(NaN/False),不消失
+            slot = arrays[name]
+            slot["uv"][i] = result["uv"]
+            slot["sq_px"][i] = result["sq_px"]
+            slot["win_size"][i] = result["win_size"]
+            slot["detected"][i] = True
+        if (i + 1) % 100 == 0:
+            typer.echo(f"  已处理 {i + 1}/{n} 张……")
+
+    # 连拍一致性断言:两颗检测器各自做(同姿态分组,test 每张独立跳过)
+    burst_failures: list[dict] = []
+    groups_checked: dict[str, int] = {}
+    for name in detectors:
+        slot = arrays[name]
+        fails, checked = _burst_failures_for(
+            slot["uv"], slot["sq_px"], slot["detected"], images, name,
+            cfg.corners.burst_check)
+        burst_failures.extend(fails)
+        groups_checked[name] = checked
+
+    # 落盘:4 份 npz(train/test × classic/sb)+ 检测质量摘要
+    meta_extra = {
+        "classic_flags": list(cfg.corners.classic_flags),
+        "sb_flags": cfg.corners.sb_flags,
+        "subpix": {
+            "window_granularity": cfg.corners.subpix.window_granularity,
+            "min_win": cfg.corners.subpix.min_win,
+            "max_iter": cfg.corners.subpix.max_iter,
+            "epsilon": cfg.corners.subpix.epsilon,
+        },
+        "burst_check": {
+            "median_tol": cfg.corners.burst_check.median_tol,
+            "max_tol": cfg.corners.burst_check.max_tol,
+        },
+    }
+    for split in ("train", "test"):
+        rows = [i for i, rec in enumerate(images) if rec["split"] == split]
+        for name in detectors:
+            slot = arrays[name]
+            save_corners(
+                out_dir, split, name,
+                image_ids=[images[i]["image_id"] for i in rows],
+                uv=slot["uv"][rows], sq_px=slot["sq_px"][rows],
+                win_size=slot["win_size"][rows], detected=slot["detected"][rows],
+                lineage=lineage, meta_extra=meta_extra,
+            )
+
+    # 检测质量摘要:分 划分 × 检测器 的成功率与方格/窗口统计 + 存疑帧清单
+    detection: dict[str, dict] = {}
+    for split in ("train", "test"):
+        rows = np.array([i for i, rec in enumerate(images) if rec["split"] == split])
+        detection[split] = {}
+        for name in detectors:
+            slot = arrays[name]
+            ok = slot["detected"][rows]
+            n_det = int(ok.sum())
+            detection[split][name] = {
+                "n_images": int(rows.size),
+                "n_detected": n_det,
+                "success_rate": (n_det / rows.size) if rows.size else None,
+                "sq_px": _stats_block(slot["sq_px"][rows][ok]),
+                "win_size": _stats_block(slot["win_size"][rows][ok].astype(float)),
+            }
+
+    summary = {
+        "lineage": lineage,
+        "board": {"cols": board.cols, "rows": board.rows},
+        "canonical_rule": CANONICAL_RULE_VERSION,
+        "detection": detection,
+        "burst_check": {
+            "n_groups_checked": groups_checked,
+            "n_failures": len(burst_failures),
+            "failures": burst_failures,
+        },
+    }
+    summary_path = out_dir / "detection_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    # 中文汇总:两颗检测器成功率对比表 + 方格/窗口量级 + 断言结论 + 产物位置
+    typer.echo("找角点完成,4 份角点文件与质量摘要已写盘。")
+    typer.echo("  检出成功率对比(检出 / 总数):")
+    typer.echo(f"    {'划分':<6}{'经典 classic':<22}{'新款 sb':<22}")
+    for split in ("train", "test"):
+        cells = []
+        for name in ("classic", "sb"):
+            stat = detection[split][name]
+            rate = stat["success_rate"]
+            cells.append(f"{stat['n_detected']}/{stat['n_images']}"
+                         f" ({rate * 100:.1f}%)" if rate is not None else "无照片")
+        typer.echo(f"    {split:<6}{cells[0]:<22}{cells[1]:<22}")
+    for name in ("classic", "sb"):
+        sq = detection["train"][name]["sq_px"] or detection["test"][name]["sq_px"]
+        if sq:
+            typer.echo(f"  {name} 方格像素边长(检出帧):中位数 {sq['median']:.1f}px"
+                       f"(范围 {sq['min']:.1f} ~ {sq['max']:.1f})")
+    typer.echo(f"  连拍一致性断言:每颗检测器检查 {groups_checked.get('classic', 0)} 组,"
+               f"失败 {len(burst_failures)} 组"
+               + ("(存疑帧已列入质量摘要,供人工审阅)" if burst_failures else ""))
+    typer.echo(f"  角点产物:{out_dir}")
+    typer.echo(f"  质量摘要:{summary_path}")
 
 
 @app.command(help="③ 测噪声底:同一拍摄位置的连拍相减,实测这批数据天生的噪声水平")
@@ -140,7 +349,9 @@ def run_all() -> None:
     typer.echo("")
     ingest()
     typer.echo("")
-    typer.echo("后续阶段(角点/噪声/内参/理论极限/考试/归因/报告)由后续版本实现,"
+    corners()
+    typer.echo("")
+    typer.echo("后续阶段(噪声/内参/理论极限/考试/归因/报告)由后续版本实现,"
                "run-all 到此为止。")
 
 
