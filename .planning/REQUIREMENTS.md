@@ -28,7 +28,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 模型 (MOD)
 
 - [ ] **MOD-01**: CameraModel 抽象(投影/反投影/雅可比/参数布局/初值策略)+ 注册机制;models/noise/evaluation 共享同一投影与雅可比实现(单一数学源)
-- [ ] **MOD-02**: 四类模型实现:M1 针孔+k1k2p1p2、M2 +k3、M3 有理 k1–k6p1p2、M4 鱼眼 KB4;附 OpenCV 投影一致性(parity)与数值雅可比校验测试
+- [ ] **MOD-02**: 四类模型实现:M1 针孔+k1k2p1p2、M2 +k3、M3 有理 k1–k6p1p2、M4 鱼眼 KB4;附"与 OpenCV 投影结果一致"的比对测试和数值雅可比校验测试
 
 ### 求解 (SOL)
 
@@ -37,10 +37,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### 评估 (EVAL)
 
-- [ ] **EVA-01**: 按姿态切分 train/val(结构性防泄漏,GroupKFold 语义)+ K 折交叉验证
+- [ ] **EVA-01**: 按姿态切分训练/验证(同一姿态的所有照片只进同一边,结构性防数据泄漏)+ K 折交叉验证
 - [ ] **EVA-02**: 模型选择只看 held-out 泛化误差(辅以 BIC、参数可辨识性);选定后全量数据重训出最终内参
-- [ ] **EVA-03**: 重复索引切片实验(切片数取全体姿态最少重复数)——纯噪声传播,经验参数不确定度 + CRLB 实证校验
-- [ ] **EVA-04**: bootstrap ×N 参数稳定性(与切片实验对比分离"噪声"与"位姿抽样"两种因素)
+- [ ] **EVA-03**: 重复张分组实验——每姿态各取第 i 张连拍组成一组(组数取全体姿态的最少重复张数),各组独立完整标定后对比内参差异,得到纯噪声传播的经验参数不确定度,并用于 CRLB 理论预测的实证校验
+- [ ] **EVA-04**: bootstrap ×N 参数稳定性(与重复张分组实验对比,分离"噪声"与"位姿抽样"两种因素)
 - [ ] **EVA-05**: 留一姿态 ×N——问题姿态定位与解的脆弱性检查
 
 ### 分析 (ANA)
@@ -65,7 +65,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### 可复用性 (REU)
 
-- [ ] **REU-01**: 数据契约弹性——姿态数/每姿态重复张数/测试集张数全部数据驱动,不硬编码;重复数不齐时:切片按最少重复数截断、聚合按张数加权、单张姿态退化单帧噪声估计,均不影响标定正确性
+- [ ] **REU-01**: 数据契约弹性——姿态数/每姿态重复张数/测试集张数全部数据驱动,不硬编码;重复数不齐时:分组数按最少重复数截断、聚合按张数加权、单张姿态退化单帧噪声估计,均不影响标定正确性
 - [ ] **REU-02**: 换数据集零代码——新数据符合目录契约放入后,仅调整 config 即可 run-all 一键完成标定+分析+报告
 - [ ] **REU-03**: 换棋盘规格零代码——board.yaml 是棋盘参数唯一来源;角点参数扫描范围随实测方格边长自适应
 
@@ -106,13 +106,44 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (待路线图生成后填充) | | |
+| IO-01 | Phase 1 | Pending |
+| IO-02 | Phase 1 | Pending |
+| IO-03 | Phase 1 | Pending |
+| COR-01 | Phase 1 | Pending |
+| MOD-01 | Phase 2 | Pending |
+| MOD-02 | Phase 2 | Pending |
+| SOL-01 | Phase 2 | Pending |
+| ITER-01 | Phase 2 | Pending |
+| NOI-01 | Phase 3 | Pending |
+| NOI-02 | Phase 3 | Pending |
+| NOI-03 | Phase 3 | Pending |
+| EVA-01 | Phase 4 | Pending |
+| EVA-02 | Phase 4 | Pending |
+| EVA-03 | Phase 4 | Pending |
+| EVA-04 | Phase 4 | Pending |
+| EVA-05 | Phase 4 | Pending |
+| SOL-02 | Phase 4 | Pending |
+| ANA-01 | Phase 5 | Pending |
+| ANA-02 | Phase 5 | Pending |
+| ANA-03 | Phase 5 | Pending |
+| ANA-04 | Phase 5 | Pending |
+| COR-02 | Phase 5 | Pending |
+| COR-03 | Phase 5 | Pending |
+| REP-01 | Phase 6 | Pending |
+| REP-02 | Phase 6 | Pending |
+| REP-03 | Phase 6 | Pending |
+| ITER-02 | Phase 6 | Pending |
+| ITER-03 | Phase 6 | Pending |
+| ITER-04 | Phase 6 | Pending |
+| REU-01 | Phase 6 | Pending |
+| REU-02 | Phase 6 | Pending |
+| REU-03 | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 32 total
-- Mapped to phases: 0
-- Unmapped: 32 ⚠️ (roadmap pending)
+- Mapped to phases: 32 ✓ (100%)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-10-16*
-*Last updated: 2026-10-16 after initial definition*
+*Last updated: 2026-10-16 after roadmap creation (phase mappings added)*
