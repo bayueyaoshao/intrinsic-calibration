@@ -14,7 +14,7 @@ import numpy as np
 
 from calib.io.config import CornersConfig, PrecheckConfig
 from calib.io.dataset import scan_dataset
-from calib.io.manifest import write_manifest
+from calib.io.manifest import write_manifest, write_round_diff
 from calib.io.precheck import (
     board_roi,
     compute_metrics,
@@ -291,3 +291,67 @@ def test_write_suspect_originals_copies_only_suspects_and_keeps_source(tmp_path,
     for p, (content, mtime) in zip(paths, before):
         assert p.read_bytes() == content      # 源内容不变
         assert p.stat().st_mtime_ns == mtime  # 源修改时间不变(只读源,只复制)
+
+
+# ------------------------------------------------------------- 跨轮对比表
+
+def test_write_round_diff_three_buckets(tmp_path):
+    """跨轮对比表(D-04):新增/解除/持续三桶按 image_id 对齐,写人类可读文本。"""
+    stage = tmp_path / "ingest"
+    prev_dir = stage / "run_20260101_000000"
+    curr_dir = stage / "run_20260101_010000"
+    for d, verdicts in (
+        (prev_dir, {"A": "ok", "B": "suspect", "C": "suspect", "D": "ok"}),
+        # A: ok→suspect 新增;B: suspect→ok 解除;C: 持续;D: 一直 ok
+        (curr_dir, {"A": "suspect", "B": "ok", "C": "suspect", "D": "ok"}),
+    ):
+        d.mkdir(parents=True)
+        manifest = {"images": [
+            {"image_id": k, "precheck": {
+                "verdict": v,
+                "suspect_sources": ["global:blur"] if v == "suspect" else []}}
+             for k, v in verdicts.items()]}
+        (d / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    diff_path, counts = write_round_diff(curr_dir, stage)
+    text = diff_path.read_text(encoding="utf-8")
+    assert diff_path.name == "suspect_diff_vs_run_20260101_000000.txt"
+    # 三个小节标题一个不少(grep 断言同款)
+    for title in ("新增存疑", "解除存疑", "持续存疑"):
+        assert title in text
+    assert counts == {"new_suspect": 1, "resolved": 1, "persistent": 1}
+    # 逐桶点名与来源记录
+    assert "- A  本轮来源:global:blur" in text
+    assert "- B" in text
+    assert "- C  本轮来源:global:blur" in text
+
+
+def test_write_round_diff_first_round_note(tmp_path):
+    """首轮运行(无上轮):写一行说明,不崩溃,计数为 None。"""
+    stage = tmp_path / "ingest"
+    curr_dir = stage / "run_20260101_000000"
+    curr_dir.mkdir(parents=True)
+    manifest = {"images": [{"image_id": "A", "precheck": {"verdict": "ok", "suspect_sources": []}}]}
+    (curr_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    diff_path, counts = write_round_diff(curr_dir, stage)
+    text = diff_path.read_text(encoding="utf-8")
+    assert "首轮运行,无上轮可比" in text
+    assert counts is None
+
+
+def test_write_round_diff_identical_rounds_is_empty_diff(tmp_path):
+    """两轮完全一致(回归场景):新增 0 / 解除 0 / 持续 = 全部存疑数——空 diff 即回归验证。"""
+    stage = tmp_path / "ingest"
+    verdicts = {"A": "suspect", "B": "suspect", "C": "ok", "D": "ok"}
+    for name in ("run_20260101_000000", "run_20260101_010000"):
+        d = stage / name
+        d.mkdir(parents=True)
+        manifest = {"images": [
+            {"image_id": k, "precheck": {
+                "verdict": v, "suspect_sources": ["pose_relative:blur"] if v == "suspect" else []}}
+             for k, v in verdicts.items()]}
+        (d / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    _, counts = write_round_diff(stage / "run_20260101_010000", stage)
+    assert counts == {"new_suspect": 0, "resolved": 0, "persistent": 2}

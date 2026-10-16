@@ -210,3 +210,93 @@ def latest_run_dir(output_root: Path, stage: str) -> Path:
             f"请先运行对应的上游命令。"
         )
     return runs[-1]
+
+
+# ---------------------------------------------------------------- 跨轮对比表
+
+def write_round_diff(current_run_dir: Path, output_root: Path) -> tuple[Path, dict | None]:
+    """跨轮存疑对比表(D-04):本轮 vs 上一轮,按 image_id 对齐两轮的判定结论。
+
+    人工调完 config 阈值或剔除清单后重跑 ingest,这份表直接回答
+    "这轮比上轮多疑了哪些、少疑了哪些、哪些一直悬着"——人工审阅不用凭记忆。
+
+    三桶定义(verdict 按 image_id 逐张对齐):
+    - 新增存疑:上轮 ok → 本轮 suspect
+    - 解除存疑:上轮 suspect → 本轮 ok
+    - 持续存疑:两轮都 suspect
+
+    写人类可读文本表到 current_run_dir/suspect_diff_vs_<上轮时间戳>.txt;
+    首轮运行(找不到上一轮)也照写一个文件,内容说明"无上轮可比"。
+    返回 (文件路径, 三桶计数 dict);首轮返回 (文件路径, None)。
+    """
+    current_run_dir = Path(current_run_dir)
+    stage_dir = Path(output_root)
+    runs = sorted(p for p in stage_dir.iterdir()
+                  if p.is_dir() and p.name.startswith("run_")) if stage_dir.is_dir() else []
+    try:
+        pos = runs.index(current_run_dir)
+    except ValueError:
+        pos = len(runs) - 1  # 兜底:当前目录不在枚举结果里(极少见),按最新处理
+    prev_dir = runs[pos - 1] if pos > 0 else None
+
+    def _load_verdicts(run_dir: Path) -> dict[str, dict]:
+        with open(run_dir / "manifest.json", encoding="utf-8") as f:
+            manifest = json.load(f)
+        return {img["image_id"]: img.get("precheck", {}) for img in manifest["images"]}
+
+    if prev_dir is None:
+        diff_path = current_run_dir / "suspect_diff_vs_首轮.txt"
+        with open(diff_path, "w", encoding="utf-8") as f:
+            f.write("首轮运行,无上轮可比。\n")
+            f.write(f"本轮运行目录:{current_run_dir.name}\n")
+        return diff_path, None
+
+    current = _load_verdicts(current_run_dir)
+    previous = _load_verdicts(prev_dir)
+    new_suspect = sorted(i for i in current
+                         if i in previous
+                         and previous[i].get("verdict") != "suspect"
+                         and current[i].get("verdict") == "suspect")
+    resolved = sorted(i for i in current
+                      if i in previous
+                      and previous[i].get("verdict") == "suspect"
+                      and current[i].get("verdict") != "suspect")
+    persistent = sorted(i for i in current
+                        if i in previous
+                        and previous[i].get("verdict") == "suspect"
+                        and current[i].get("verdict") == "suspect")
+    counts = {"new_suspect": len(new_suspect), "resolved": len(resolved),
+              "persistent": len(persistent)}
+
+    def _sources_of(image_id: str) -> str:
+        sources = current[image_id].get("suspect_sources", [])
+        return ",".join(sources) if sources else "(无来源记录)"
+
+    lines = [
+        f"存疑对比表:本轮 {current_run_dir.name} vs 上轮 {prev_dir.name}",
+        "对齐方式:按 image_id 逐张对齐两轮的判定结论(verdict)。",
+        (f"统计:新增存疑 {counts['new_suspect']} 张 / "
+         f"解除存疑 {counts['resolved']} 张 / 持续存疑 {counts['persistent']} 张"
+         f"(本轮存疑共 {sum(1 for v in current.values() if v.get('verdict') == 'suspect')} 张)"),
+        "",
+        "## 新增存疑(上轮 ok → 本轮 suspect)",
+    ]
+    lines += [f"- {i}  本轮来源:{_sources_of(i)}" for i in new_suspect] or ["(无)"]
+    lines += ["", "## 解除存疑(上轮 suspect → 本轮 ok)"]
+    lines += [f"- {i}" for i in resolved] or ["(无)"]
+    lines += ["", "## 持续存疑(两轮都 suspect)"]
+    lines += [f"- {i}  本轮来源:{_sources_of(i)}" for i in persistent] or ["(无)"]
+
+    only_prev = sorted(set(previous) - set(current))
+    only_cur = sorted(set(current) - set(previous))
+    if only_prev or only_cur:
+        lines += ["", "(另有照片只在一轮出现,无法对齐)"]
+        if only_prev:
+            lines += [f"- 仅上轮:{'、'.join(only_prev)}"]
+        if only_cur:
+            lines += [f"- 仅本轮:{'、'.join(only_cur)}"]
+
+    diff_path = current_run_dir / f"suspect_diff_vs_{prev_dir.name}.txt"
+    with open(diff_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return diff_path, counts

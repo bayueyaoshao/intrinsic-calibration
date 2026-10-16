@@ -26,9 +26,25 @@ from calib.corners.canonical import burst_consistency
 from calib.corners.detect import detect_classic, detect_sb
 from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
-from calib.io.manifest import latest_run_dir, write_manifest
+from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
+from calib.io.precheck import compute_metrics, judge_suspects
 from calib.solve.baseline import DETECTORS, run_baselines, save_calibration
 from calib.util.lineage import make_lineage, sha256_file
+from calib.visualization.suspects import write_suspect_originals
+
+
+def manifest_suspect_counts(judged: list[dict]) -> dict:
+    """按来源前缀分桶统计存疑照片张数(控制台汇总用;同一来源族只计一张)。"""
+    counts = {"pose_relative": 0, "global": 0, "suspect_total": 0}
+    for j in judged:
+        if j.get("verdict") != "suspect":
+            continue
+        counts["suspect_total"] += 1
+        if any(s.startswith("pose_relative:") for s in j.get("suspect_sources", [])):
+            counts["pose_relative"] += 1
+        if any(s.startswith("global:") for s in j.get("suspect_sources", [])):
+            counts["global"] += 1
+    return counts
 
 app = typer.Typer(
     name="calib",
@@ -63,19 +79,40 @@ def _not_implemented(step: int, name: str) -> None:
     typer.echo(f"本命令对应流水线第{'①②③④⑤⑥⑦⑧'[step - 1]}步「{name}」,由后续阶段实现。")
 
 
-@app.command(help="① 照片入库体检:扫描 input_data,核对数据契约,产出带血缘指纹的数据清单 manifest.json(张数/姿态/分辨率全留痕)")
+@app.command(help="① 照片入库体检:全体检——模糊度/曝光/棋盘可见性逐张打分,存疑只标记不剔除(D-01),判定来源逐条写进 manifest,存疑原图另存副本,并生成与上一轮的存疑对比表")
 def ingest() -> None:
-    """流水线第①步:把 705 张(张数数据驱动)照片登记造册。
+    """流水线第①步:全体检 + 登记造册(一张照片都不漏、一张都不剔)。
 
     步骤:读配置 → 扫描 train/test 目录 → 逐张核对分辨率一致
-    → 写 output/ingest/run_<时间戳>/manifest.json → 打印中文汇总。
+    → 逐张算体检指标(棋盘框内模糊度、曝光裁剪比例、双检测器可见性探针)
+    → 双来源存疑判定(同姿态相对比较为主,全局分位线兜底,D-02)
+    → 写 manifest(每张照片带全部体检数字与判定来源,D-06)
+    → 存疑原图复制副本(拼图缩略图看不清细节)→ 跨轮存疑对比表(D-04)
+    → 打印中文汇总。
     """
-    board = load_board(BOARD_PATH)          # 棋盘规格(当前步骤只登记,角点检测用它)
+    board = load_board(BOARD_PATH)          # 棋盘规格(体检探针按它问"看没看见")
     cfg = load_calibration(CALIBRATION_PATH)
 
     # 数据目录来自配置(相对当前工作目录),换数据集只改 calibration.yaml
     scan = scan_dataset_dirs(train_dir=Path(cfg.data.train), test_dir=Path(cfg.data.test))
     resolution = verify_consistent_resolution(scan.records)
+
+    # ---- 逐张体检(双检测器探针是主要开销,705 张为分钟级)----
+    n_total = len(scan.records)
+    typer.echo(f"开始全体检:共 {n_total} 张照片 × 双检测器可见性探针(分钟级,请稍等)……")
+    metrics_list: list[dict] = []
+    for k, rec in enumerate(scan.records):
+        gray = imread_checked(rec.path)
+        entry = {"image_id": rec.image_id, "split": rec.split,
+                 "pose_id": rec.pose_id, "n_repeats": rec.n_repeats}
+        entry.update(compute_metrics(gray, board.cols, board.rows, cfg.corners))
+        metrics_list.append(entry)
+        if (k + 1) % 100 == 0:
+            typer.echo(f"  已体检 {k + 1}/{n_total} 张……")
+
+    # ---- 双来源判定(只标记,输入几张输出几张,D-01/D-02)----
+    judged = judge_suspects(metrics_list, cfg.ingest.precheck)
+    merged = [{**m, **j} for m, j in zip(metrics_list, judged)]
 
     run_dir = write_manifest(
         records=scan.records,
@@ -83,8 +120,18 @@ def ingest() -> None:
         warnings=scan.warnings,
         out_root=OUTPUT_ROOT / "ingest",
         config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH},
+        precheck_results=merged,
     )
 
+    # ---- 存疑原图副本(归可视化层)与跨轮对比表 ----
+    copied = write_suspect_originals(
+        [{"image_id": r.image_id, "path": r.path, "precheck": j}
+         for r, j in zip(scan.records, judged)],
+        run_dir,
+    )
+    diff_path, diff_counts = write_round_diff(run_dir, OUTPUT_ROOT / "ingest")
+
+    # ---- 中文汇总 ----
     train = sum(1 for r in scan.records if r.split == "train")
     test = sum(1 for r in scan.records if r.split == "test")
     poses = {r.pose_id for r in scan.records if r.split == "train"}
@@ -97,12 +144,31 @@ def ingest() -> None:
     for n in per_pose.values():
         dist[str(n)] = dist.get(str(n), 0) + 1
 
-    typer.echo("入库体检完成,数据清单已写盘。")
+    counts = manifest_suspect_counts(merged)
+    n_suspect = counts["suspect_total"]
+    typer.echo("入库体检完成,数据清单(带全部体检数字)已写盘。")
     typer.echo(f"  训练照片:{train} 张(姿态 {len(poses)} 个,每个姿态连拍张数分布 {dist})")
     typer.echo(f"  测试照片:{test} 张")
     typer.echo(f"  统一分辨率:{resolution[0]}x{resolution[1]}(宽x高)")
     typer.echo(f"  棋盘规格:{board.cols}x{board.rows} 内角点,方格 {board.square_size_mm}{board.unit}")
     typer.echo(f"  警告:{len(scan.warnings)} 条(全部已写进 manifest 留痕)")
+    typer.echo(f"  存疑照片:{n_suspect} 张(只标记不剔除,照常留在数据流中,D-01)")
+    typer.echo(f"    按来源分桶:同姿态相对比较 {counts['pose_relative']} 张,"
+               f"全局线兜底 {counts['global']} 张(判定来源逐条在 manifest)")
+    for split in ("train", "test"):
+        slot = [m for m in metrics_list if m["split"] == split]
+        if not slot:
+            continue
+        rate_c = sum(1 for m in slot if m["classic_ok"]) / len(slot)
+        rate_s = sum(1 for m in slot if m["sb_ok"]) / len(slot)
+        typer.echo(f"    棋盘可见性({split}):经典 classic {rate_c * 100:.1f}%,"
+                   f"新款 sb {rate_s * 100:.1f}%(探针只问看没看见,精化是角点阶段的事)")
+    typer.echo(f"  存疑原图副本:{len(copied)} 张 → {run_dir / 'suspect_originals'}")
+    if diff_counts is not None:
+        typer.echo(f"  跨轮对比(与上一轮):新增存疑 {diff_counts['new_suspect']} 张 / "
+                   f"解除存疑 {diff_counts['resolved']} 张 / "
+                   f"持续存疑 {diff_counts['persistent']} 张")
+    typer.echo(f"  跨轮对比表:{diff_path}")
     typer.echo(f"  数据清单:{run_dir / 'manifest.json'}")
 
 
