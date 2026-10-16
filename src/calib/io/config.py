@@ -100,9 +100,14 @@ class CornersConfig:
 
 @dataclass(frozen=True)
 class FisheyeConfig:
-    """鱼眼 KB4 模型的求解参数。flags=0 表示估计全部参数(含倾斜因子)。"""
+    """鱼眼 KB4 模型的求解参数。
 
-    flags: int = 0
+    flags 默认 2 = CALIB_RECOMPUTE_EXTRINSIC(每轮迭代都重算棋盘位姿):
+    实测不加它时 OpenCV 只按初始内参算一次位姿,会收敛到 RMS 上百像素的
+    假结果(哪怕数据完美符合 KB4);skew 倾斜因子仍被估计(未加 FIX_SKEW)。
+    """
+
+    flags: int = 2
     max_iter: int = 100
     epsilon: float = 1e-6
 
