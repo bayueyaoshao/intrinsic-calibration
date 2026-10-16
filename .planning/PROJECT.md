@@ -20,7 +20,7 @@
 
 <!-- Current scope. Building toward these. -->
 
-- [ ] 数据接入:按固定目录约定加载 `input_data/train/`(80 姿态 × 8 连拍)与 `input_data/test/`(65 张独立采集),含入库预检(模糊度/曝光/棋盘可见性)
+- [ ] 数据接入:按固定目录约定加载 `input_data/train/`(当前数据 80 姿态 × 8 连拍)与 `input_data/test/`(当前 65 张独立采集),含入库预检(模糊度/曝光/棋盘可见性);数据契约为弹性(姿态数/重复张数/测试张数数据驱动,详见 REQUIREMENTS REU-01)
 - [ ] 噪声底分析:利用同姿态 8 连拍实测时域噪声;缺失时退化为单帧估计(Immerkaer/平坦区域),报告中标注来源
 - [ ] Fisher 信息 / CRLB 可达精度预测:标定前预测每个内参的方差理论下界,并检测位姿分布退化(如 fx–cy 耦合)
 - [ ] 角点提取寻优:候选方法/参数在合成退化实验下对比定位误差,用数据证明当前条件最优
@@ -30,7 +30,11 @@
 - [ ] 四类评估实验:K 折 CV(按姿态)、重复索引切片 ×8(纯噪声→经验参数不确定度+CRLB 实证校验)、bootstrap ×N、留一姿态 ×80(问题姿态定位)
 - [ ] 误差预算与诊断:实际误差 vs CRLB、误差方向分解(按视图/图像区域/径向模式)、参数敏感度排序与应对建议
 - [ ] 报告输出:汇总各阶段证据,生成含可视化的报告(角点叠加、残差热图、CV 曲线、CRLB 对比、敏感度排序)
+- [ ] 迭代回环:阶段产物带血缘落盘、问题姿态剔除重标、跨运行对比、回环触发条件表内置
+- [ ] 可复用性:换数据集/换棋盘规格零代码(仅改 config),张数不齐不影响标定正确性
 - [ ] 交付形态:CLI 一条命令跑完整流水线 + 各阶段可独立调用的 Python 库接口 + 报告
+
+详细 32 条需求(REQ-ID)见 REQUIREMENTS.md。
 
 ### Out of Scope
 
@@ -53,7 +57,8 @@
 
 ## Constraints
 
-- **Tech stack**: Python + OpenCV + numpy/scipy — 统计分析/可视化/快速迭代需要,离线场景性能足够
+- **Tech stack**: Python 3.12 + OpenCV 4.x(锁 <5.0) + numpy/scipy — 统计分析/可视化/快速迭代需要,离线场景性能足够;OpenCV 5.0 刚发布,churn 风险与可审计数值目标冲突
+- **全局架构原则**: 阶段间仅通过带血缘的落盘产物通信(文件是唯一真相源),每阶段可独立运行/重跑/检查,输入输出契约显式 — 防止"分析无从下手"和迭代全量重跑
 - **数据契约(硬性)**: input_data 全部图像必须来自同一相机、相同拍摄参数环境 — 单相机标定项目的前提
 - **目录契约**: `input_data/train|test` 只读输入;`config/` 存放 board.yaml 与算法配置;运行产物写 `output/`(不进 git)
 - **模块布局**: src/calib/ 下 io / corners / noise / models / solve / evaluation / analysis / visualization / report,与流水线阶段一一对应
@@ -73,6 +78,10 @@
 | 共享投影/雅可比实现(models/noise/evaluation) | 理论界与实际求解必须严格可比 | — Pending |
 | 交付 CLI + Python 库 + 报告 | 兼顾易用性与实验/二次开发灵活性 | — Pending |
 | 可视化与报告分层:visualization 出图,report 组装 | 绘图原语被各阶段复用,职责不混 | — Pending |
+| 数据契约弹性:重复张数允许不齐(切片按最少重复数截断/聚合加权/单张退化) | 换数据即用,张数差异不阻塞标定 | — Pending |
+| 换数据集/换棋盘零代码,config 是唯一调整点 | 框架是可复用工具不是一次性脚本;角点窗口等参数比例化自适应是前提 | — Pending |
+| 流程图用 Mermaid 维护于 docs/pipeline.md,通俗文字表述 | agent+git 可维护、GitHub 原生渲染;阶段结构变化时收尾任务必须同步更新 | — Pending |
+| 锁 opencv-python <5.0 | OpenCV 5.0(2026-08)太新,calib3d churn 风险;本项目精度瓶颈不在求解器版本 | — Pending |
 
 ## Evolution
 
@@ -92,4 +101,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-15 after initialization*
+*Last updated: 2026-10-16 after requirements finalization*
