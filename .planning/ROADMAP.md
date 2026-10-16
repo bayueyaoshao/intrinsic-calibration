@@ -32,7 +32,7 @@
   4. 重复张数不齐或单张姿态不导致崩溃(数据驱动,无硬编码张数)
   5. 角点叠加可视化图(sampling + 最差若干视图)可人工核查角点是否偏移
 
-**Plans:** 1/5 plans executed
+**Plans:** 2/5 plans executed
 Plans:
 **Wave 1**
 
@@ -40,7 +40,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — 角点核心:双检测器 + 比例化窗口推导 + 排序规范化 + 连拍断言 + `calib corners`(COR-01, D-07/08/09)
+- [x] 01-02-PLAN.md — 角点核心:双检测器 + 比例化窗口推导 + 排序规范化 + 连拍断言 + `calib corners`(COR-01, D-07/08/09)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -138,7 +138,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 数据基座 + 最小完整标定流程 | 1/5 | In Progress|  |
+| 1. 数据基座 + 最小完整标定流程 | 2/5 | In Progress|  |
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 0/TBD | Not started | - |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 0/TBD | Not started | - |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
