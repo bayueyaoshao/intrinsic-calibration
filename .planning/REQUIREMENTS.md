@@ -11,7 +11,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **IO-01**: 按姿态 ID 数据模型加载 train(每姿态目录,重复张数 ≥1、允许不齐)与 test(独立采集),目录契约只读;manifest 记录姿态/重复索引/重复数分布
 - [x] **IO-02**: 入库预检——模糊度/曝光/棋盘可见性筛查,废帧剔除留痕;预检指标比例化(按棋盘占比等),不依赖绝对像素阈值
-- [ ] **IO-03**: 配置解析与校验(board.yaml + calibration.yaml);棋盘参数零硬编码,square_size 与内参解耦(改错只影响距离类指标并断言提醒)
+- [x] **IO-03**: 配置解析与校验(board.yaml + calibration.yaml);棋盘参数零硬编码,square_size 与内参解耦(改错只影响距离类指标并断言提醒)
 
 ### 角点 (COR)
 
@@ -106,10 +106,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| IO-01 | Phase 1 | Done(01-01 姿态数据模型与 manifest 写盘;01-04 体检复用其扫描记录) |
-| IO-02 | Phase 1 | Done(01-04 三指标比例化体检+双来源存疑判定;只标记不剔除,剔除清单机制归 ITER-02) |
-| IO-03 | Phase 1 | Pending |
-| COR-01 | Phase 1 | Done(01-02 检测与窗口推导;01-03 基线标定消费角点闭环) |
+| IO-01 | Phase 1 | Shipped (Phase 1)(01-01 姿态数据模型与 manifest 写盘;01-04 体检复用其扫描记录) |
+| IO-02 | Phase 1 | Shipped (Phase 1)(01-04 三指标比例化体检+双来源存疑判定;只标记不剔除,剔除清单机制归 ITER-02) |
+| IO-03 | Phase 1 | Shipped (Phase 1)(01-01 配置解析与校验,棋盘参数零硬编码、square_size 与内参解耦) |
+| COR-01 | Phase 1 | Shipped (Phase 1)(01-02 双检测器与比例化窗口推导;01-05 全量标记副本与拼图供人工核查) |
 | MOD-01 | Phase 2 | Pending |
 | MOD-02 | Phase 2 | Pending |
 | SOL-01 | Phase 2 | Pending |
@@ -146,4 +146,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-16*
-*Last updated: 2026-10-16 after roadmap creation (phase mappings added)*
+*Last updated: 2026-10-16 after Phase 1 execution complete (IO-01~03 / COR-01 shipped)*
