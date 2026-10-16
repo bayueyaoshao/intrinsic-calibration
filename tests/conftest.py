@@ -123,21 +123,36 @@ def make_chessboard_image():
 
         # 画图:把网格向外扩一圈(即多出一圈边框方格),从 -1 到 cols / rows 闭区间,
         # 相邻网格点围成的每一格就是一个方格;黑白交替,黑格填 0、白格与背景填 255。
+        # 先在 4 倍边长的大画布上画硬边棋盘,再用"区域平均"缩小回目标尺寸——
+        # 等效于真实镜头的光学模糊(抗锯齿),否则硬边的光栅化台阶会让角点
+        # 带上约半个像素的系统性画格偏差,污染"对真值误差 < 0.5px"这类断言。
+        supersample = 4
+        # 大画布的内参:焦距同比放大;主点按 OpenCV 缩小的像素中心映射平移——
+        # cv2.resize 缩小 SS 倍时,小图像素 i 取大图第 4i..4i+3 列的均值,
+        # 其中心在大图坐标 SS*i + (SS-1)/2 处,所以必须用
+        # c_big = SS*(c_small + 0.5) − 0.5 对齐,否则整幅图带 (SS−1)/2/SS ≈
+        # 0.375 像素的系统性偏移,污染一切"对真值误差"断言。
+        k_big = K.astype(numpy.float64).copy()
+        k_big[0, 0] *= supersample
+        k_big[1, 1] *= supersample
+        k_big[0, 2] = supersample * (k_big[0, 2] + 0.5) - 0.5
+        k_big[1, 2] = supersample * (k_big[1, 2] + 0.5) - 0.5
         gx = (numpy.arange(-1, cols + 1) - (cols - 1) / 2.0) * square_world
         gy = (numpy.arange(-1, rows + 1) - (rows - 1) / 2.0) * square_world
         grid_obj = numpy.zeros(((rows + 2) * (cols + 2), 3), dtype=numpy.float64)
         grid_obj[:, 0] = numpy.tile(gx, rows + 2)
         grid_obj[:, 1] = numpy.repeat(gy, cols + 2)
-        grid, _ = cv2.projectPoints(grid_obj, rvec, tvec, K, dist_coeffs)
+        grid, _ = cv2.projectPoints(grid_obj, rvec, tvec, k_big, dist_coeffs)
         grid = grid.reshape(rows + 2, cols + 2, 2).astype(numpy.float64)
 
-        img = numpy.full((height, width), 255, dtype=numpy.uint8)
+        big = numpy.full((height * supersample, width * supersample), 255, dtype=numpy.uint8)
         for j in range(rows + 1):
             for i in range(cols + 1):
                 quad = numpy.stack([grid[j, i], grid[j, i + 1],
                                     grid[j + 1, i + 1], grid[j + 1, i]])
                 if (i + j) % 2 == 0:
-                    _fill_quad(img, quad, 0)
+                    _fill_quad(big, quad, 0)
+        img = cv2.resize(big, (width, height), interpolation=cv2.INTER_AREA)
 
         if degrade == "blur":
             kernel = max(3, (round(square_px / 4) // 2) * 2 + 1)  # 奇数边长
