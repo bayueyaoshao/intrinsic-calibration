@@ -6,12 +6,14 @@
 3. 原图永不被改写(真实性承诺 T-05-01,逐字节比对);
 4. render_all 覆盖清单全部照片 × 两套目录,summary.json 计数与实际一致。
 
-拼图部分(Task 2 追加)验证尺寸量级与逐格索引文件。
+拼图部分验证:缩略拼贴尺寸量级正确;总览抽样规则(存疑全收 + 每姿态抽样
++ 最差若干)并集进逐格索引;零存疑时不产存疑拼图、索引如实记 0 格。
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -19,6 +21,7 @@ import numpy as np
 
 from calib.corners.artifacts import save_corners
 from calib.io.config import BoardSpec, CalibrationConfig
+from calib.visualization.mosaic import build_mosaic, write_mosaics
 from calib.visualization.overlay import render_all, render_marked
 
 # 测试统一用真实棋盘规格(11×8 内角点)
@@ -179,7 +182,6 @@ def test_render_all_uses_configured_jpeg_quality(tmp_path):
                      win_size=np.array([5.0]), detected=np.array([True]),
                      lineage={"round_id": "t"})
 
-    from dataclasses import replace
     cfg = replace(CalibrationConfig(), visualization=replace(
         CalibrationConfig().visualization, jpeg_quality=42))
     render_all(run_dir, manifest_path, BOARD, cfg)
@@ -187,3 +189,127 @@ def test_render_all_uses_configured_jpeg_quality(tmp_path):
     saved = json.loads(
         (run_dir / "marked_copies" / "summary.json").read_text(encoding="utf-8"))
     assert saved["jpeg_quality"] == 42
+
+
+# ---------------------------------------------------------------- 汇总拼图 mosaic
+
+def test_build_mosaic_size_and_file(tmp_path):
+    """3 张假图 × 每行 2 格:PNG 宽在 [cols×thumb, cols×(thumb+40)) 量级,
+    高 > 0,文件非空(精确值以标注条实现为准,只锁量级)。"""
+    items = [(_write_fake_image(tmp_path / f"m{k}.jpg", seed=10 + k),
+              f"pose{k:04d}#0 OK") for k in range(3)]
+    out = tmp_path / "mosaic.png"
+
+    build_mosaic(items, thumb_width=64, cols=2, out_path=out)
+
+    assert out.is_file() and out.stat().st_size > 0
+    img = cv2.imread(str(out))
+    assert img is not None
+    assert 2 * 64 <= img.shape[1] < 2 * (64 + 40)
+    assert img.shape[0] > 0
+
+
+def _mosaic_fixtures(tmp_path: Path):
+    """假数据场景:poseA 两张(img1 正常 / img2 存疑)+ poseB 一张(img3 正常)
+    + test 一张(img4 正常),全部检出,存疑原图副本就位。返回 (run_dir, 清单路径)。"""
+    paths = {f"img{i}": _write_fake_image(tmp_path / "src" / f"img{i}.jpg",
+                                          seed=20 + i, width=160, height=120)
+             for i in range(1, 5)}
+    images = [
+        {"image_id": "img1", "path": str(paths["img1"]), "split": "train",
+         "pose_id": "poseA", "repeat_idx": 0, "n_repeats": 2,
+         "precheck": {"verdict": "ok", "blur_norm": 1.0, "expo_hi": 0.0,
+                      "expo_lo": 0.0, "suspect_sources": []}},
+        {"image_id": "img2", "path": str(paths["img2"]), "split": "train",
+         "pose_id": "poseA", "repeat_idx": 1, "n_repeats": 2,
+         "precheck": {"verdict": "suspect", "blur_norm": 0.1, "expo_hi": 0.3,
+                      "expo_lo": 0.0, "suspect_sources": ["pose_relative:blur"]}},
+        {"image_id": "img3", "path": str(paths["img3"]), "split": "train",
+         "pose_id": "poseB", "repeat_idx": 0, "n_repeats": 1,
+         "precheck": {"verdict": "ok", "blur_norm": 1.2, "expo_hi": 0.0,
+                      "expo_lo": 0.0, "suspect_sources": []}},
+        {"image_id": "img4", "path": str(paths["img4"]), "split": "test",
+         "pose_id": "img4", "repeat_idx": 0, "n_repeats": 1,
+         "precheck": {"verdict": "ok", "blur_norm": 0.9, "expo_hi": 0.0,
+                      "expo_lo": 0.0, "suspect_sources": []}},
+    ]
+    manifest_path = _write_fake_manifest(images, tmp_path / "manifest.json")
+
+    run_dir = tmp_path / "corners" / "run_t"
+    uv = _grid_uv(160, 120)
+    for detector in ("classic", "sb"):
+        save_corners(run_dir, "train", detector, image_ids=["img1", "img2", "img3"],
+                     uv=np.stack([uv, uv, uv]),
+                     sq_px=np.full(3, 15.0), win_size=np.full(3, 4.0),
+                     detected=np.array([True, True, True]),
+                     lineage={"round_id": "t"})
+        save_corners(run_dir, "test", detector, image_ids=["img4"],
+                     uv=uv[np.newaxis], sq_px=np.array([15.0]),
+                     win_size=np.array([4.0]), detected=np.array([True]),
+                     lineage={"round_id": "t"})
+    # 存疑原图副本(suspect 拼图优先看这里的未标记原貌)
+    _write_fake_image(run_dir / "suspect_originals" / "img2.jpg", seed=99,
+                      width=160, height=120)
+    return run_dir, manifest_path
+
+
+def test_write_mosaics_overview_sampling_and_index(tmp_path):
+    """总览抽样(存疑全收 + 每姿态 1 张,worst_n=0 关掉最差通道):
+    并集 = {img1, img2, img3},干净的 test 单张不混入;
+    存疑拼图只含 img2;逐格索引含全部标签与指标值。"""
+    run_dir, manifest_path = _mosaic_fixtures(tmp_path)
+    cfg = replace(CalibrationConfig(), visualization=replace(
+        CalibrationConfig().visualization,
+        mosaic=replace(CalibrationConfig().visualization.mosaic, worst_n=0)))
+
+    info = write_mosaics(run_dir, manifest_path, cfg)
+
+    assert info["overview_cells"] == 3 and info["suspect_cells"] == 1
+    index = json.loads(
+        (run_dir / "mosaic" / "mosaic_index.json").read_text(encoding="utf-8"))
+    overview_ids = [c["image_id"] for c in index["overview"]["cells"]]
+    assert sorted(overview_ids) == ["img1", "img2", "img3"]
+    suspect_ids = [c["image_id"] for c in index["suspect"]["cells"]]
+    assert suspect_ids == ["img2"]
+    # 标签是 ASCII 缩写:存疑格 SUS、正常格 OK;索引带指标值可排序
+    by_id = {c["image_id"]: c for c in index["overview"]["cells"]}
+    assert by_id["img2"]["label"].endswith("SUS")
+    assert by_id["img1"]["label"].endswith("OK")
+    assert by_id["img2"]["blur_norm"] == 0.1
+    assert index["overview"]["n_cells"] == 3
+    # 两张拼图都在盘上且非空
+    for name in ("overview_mosaic.png", "suspect_mosaic.png"):
+        p = run_dir / "mosaic" / name
+        assert p.is_file() and p.stat().st_size > 0
+
+
+def test_write_mosaics_zero_suspect_writes_no_suspect_mosaic(tmp_path):
+    """零存疑数据:总览照常产出,存疑拼图不产文件、索引如实记 0 格(不崩)。"""
+    run_dir, manifest_path = _mosaic_fixtures(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for img in manifest["images"]:  # 全部改判正常
+        img["precheck"]["verdict"] = "ok"
+        img["precheck"]["suspect_sources"] = []
+    manifest_path = _write_fake_manifest(manifest["images"], manifest_path)
+
+    info = write_mosaics(run_dir, manifest_path, CalibrationConfig())
+
+    assert info["overview_cells"] > 0
+    assert info["suspect_cells"] == 0 and info["suspect_path"] is None
+    assert not (run_dir / "mosaic" / "suspect_mosaic.png").exists()
+    index = json.loads(
+        (run_dir / "mosaic" / "mosaic_index.json").read_text(encoding="utf-8"))
+    assert index["suspect"]["n_cells"] == 0
+
+
+def test_overview_fills_all_when_worst_n_covers_everything(tmp_path):
+    """默认 worst_n=20 覆盖全部 4 张假照片时,总览 = 全体(一个不落)。"""
+    run_dir, manifest_path = _mosaic_fixtures(tmp_path)
+
+    info = write_mosaics(run_dir, manifest_path, CalibrationConfig())
+
+    assert info["overview_cells"] == 4
+    index = json.loads(
+        (run_dir / "mosaic" / "mosaic_index.json").read_text(encoding="utf-8"))
+    assert sorted(c["image_id"] for c in index["overview"]["cells"]) == \
+        ["img1", "img2", "img3", "img4"]

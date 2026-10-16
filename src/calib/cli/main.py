@@ -30,6 +30,7 @@ from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
 from calib.solve.baseline import DETECTORS, run_baselines, save_calibration
 from calib.util.lineage import make_lineage, sha256_file
+from calib.visualization.mosaic import write_mosaics
 from calib.visualization.overlay import render_all
 from calib.visualization.suspects import write_suspect_originals
 
@@ -238,7 +239,8 @@ def corners() -> None:
     步骤:读配置 → 找最新一轮 ingest 产物读照片清单 → 逐张读图,
     经典与新款(SB)两颗检测器各跑一次(D-07)→ 各自规范化、按姿态分组
     做连拍一致性断言(D-09)→ 写 4 份角点 npz(train/test × classic/sb)
-    与检测质量摘要 → 全量标记副本(每张照片两套,D-06/D-07)→ 打印中文汇总。
+    与检测质量摘要 → 全量标记副本(每张照片两套,D-06/D-07)
+    → 汇总拼图两张 + 逐格索引(只是索引不是替代,D-06)→ 打印中文汇总。
     """
     started = datetime.now(UTC)
     board = load_board(BOARD_PATH)
@@ -360,6 +362,9 @@ def corners() -> None:
     # 未检出画 MISS 红框留痕;重跑 corners 即整目录重新生成,幂等
     copy_summary = render_all(out_dir, ingest_run / "manifest.json", board, cfg)
 
+    # 汇总拼图(D-06):总览 + 存疑两张 + 逐格索引,只是索引不是替代
+    mosaic_info = write_mosaics(out_dir, manifest, cfg)
+
     # 中文汇总:两颗检测器成功率对比表 + 方格/窗口量级 + 断言结论 + 产物位置
     typer.echo("找角点完成,4 份角点文件与质量摘要已写盘。")
     typer.echo("  检出成功率对比(检出 / 总数):")
@@ -386,6 +391,12 @@ def corners() -> None:
         typer.echo(f"    {name}:标记 {copy_summary[name]['marked']} 张 / "
                    f"MISS 红框 {copy_summary[name]['miss']} 张(未检出也留痕)")
     typer.echo(f"  标记副本目录:{out_dir / 'marked_copies'}")
+    typer.echo(f"  汇总拼图(mosaic/,只是索引不是替代,D-06):"
+               f"总览 {mosaic_info['overview_cells']} 格"
+               f"(常态抽样 + 最差 {cfg.visualization.mosaic.worst_n} + 全部存疑)"
+               f" / 存疑 {mosaic_info['suspect_cells']} 格(未标记原貌)")
+    typer.echo(f"  拼图与逐格索引:{out_dir / 'mosaic'}"
+               f"(格号对应关系在 mosaic_index.json,细节回单张副本放大看)")
     typer.echo(f"  角点产物:{out_dir}")
     typer.echo(f"  质量摘要:{summary_path}")
 
