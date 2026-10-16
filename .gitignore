@@ -1,1 +1,13 @@
 /input_data
+
+# 运行产物(唯一真相源是落盘文件,但不进 git)
+output/
+
+# Python 环境与缓存
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 注意:uv.lock 是锁文件,必须进 git,不要把它加进来
