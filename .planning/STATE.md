@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: planning
-last_updated: "2026-10-16T02:55:29.214Z"
+last_updated: "2026-10-16T02:55:55.253Z"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -63,6 +63,6 @@ progress:
 
 ## Session Continuity
 
-- **Last action:** Roadmap created (2026-10-16), 32/32 requirements mapped across 6 phases
+- **Last action:** Phase 1 context gathered (2026-10-16) — 4 个话题讨论完毕,CONTEXT.md 已提交
 - **Next action:** `/gsd-plan-phase 1`
-- **Notes for next session:** 数据已就位只读(input_data/train 80 姿态×8 连拍 + test 65 张);棋盘 11×8 内角点 25mm 在 config/board.yaml
+- **Notes for next session:** 先读 .planning/phases/01-data-foundation-minimal-calibration/01-CONTEXT.md(决定 D-01~D-13);首日待办:uv lock + 冒烟测试 opencv/numpy/scipy 三件套;数据只读已就位(80 姿态×8 连拍 + test 65 张)
