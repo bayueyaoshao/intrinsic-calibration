@@ -32,11 +32,11 @@
   4. 重复张数不齐或单张姿态不导致崩溃(数据驱动,无硬编码张数)
   5. 角点叠加可视化图(sampling + 最差若干视图)可人工核查角点是否偏移
 
-**Plans:** 5 plans
+**Plans:** 1/5 plans executed
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — 环境/包骨架/配置/姿态数据模型/CLI 九命令地图与 `calib ingest` 数据清单(行走骨架上)
+- [x] 01-01-PLAN.md — 环境/包骨架/配置/姿态数据模型/CLI 九命令地图与 `calib ingest` 数据清单(行走骨架上)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -138,7 +138,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 数据基座 + 最小完整标定流程 | 0/5 | Not started | - |
+| 1. 数据基座 + 最小完整标定流程 | 1/5 | In Progress|  |
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 0/TBD | Not started | - |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 0/TBD | Not started | - |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
