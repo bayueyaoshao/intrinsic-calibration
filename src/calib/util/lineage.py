@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -60,7 +60,7 @@ def make_lineage(
         round_id:     本轮运行标识,形如 "run_20260717_172523"。
     """
     return {
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created": datetime.now(UTC).isoformat(timespec="seconds"),
         "calib_version": _package_version(),
         "config_sha256": {
             name: sha256_file(path) for name, path in config_files.items()
