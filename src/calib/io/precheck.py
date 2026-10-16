@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 from calib.corners.window import estimate_sq_px
-from calib.io.config import CornersConfig
+from calib.io.config import CornersConfig, PrecheckConfig
 
 # 曝光裁剪的灰度界限(8 位灰度 0–255 的通用经验值,不是"像素多少"那种尺度依赖)
 HIGH_LIGHT_LIMIT = 250  # 灰度 >= 250 视为高光裁剪(烧白,层次丢失)
@@ -185,3 +185,108 @@ def compute_metrics(gray: np.ndarray, cols: int, rows: int, cfg: CornersConfig) 
         "roi_found": roi_found,
         "sq_px": sq_px,
     }
+
+
+# ---------------------------------------------------------------- 双来源判定
+
+def _to_float(value) -> float:
+    """把指标值安全转成浮点数:缺失(None)/无法转换/非有限值都归为 NaN,
+    让判定阶段统一按"缺失即跳过"处理,绝不让坏数字伪装成 0 混进统计。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return f if np.isfinite(f) else float("nan")
+
+
+def judge_suspects(per_image_metrics: list[dict], cfg: PrecheckConfig) -> list[dict]:
+    """双来源存疑判定(D-02):同姿态相对比较为主,全局分位线兜底,来源分别记录。
+
+    参数 per_image_metrics:每张照片一条 dict,至少含 image_id / pose_id /
+    n_repeats,以及指标键 blur_norm / expo_hi / expo_lo 与可见性键
+    classic_ok / sb_ok(即 compute_metrics 的返回再加照片档案信息)。
+
+    判定规则:
+    - 来源一(主)同姿态相对比较:n_repeats >= 2 的姿态组内,对 blur_norm /
+      expo_hi / expo_lo 各算稳健 z 分数——z = (x − 组内中位数) / (1.4826 × MAD)
+      (MAD = 中位数绝对差,即每个数离中位数多远,再取这些距离的中位数;
+      比均值/标准差更抗极端值干扰,1.4826 让 MAD 在正态假设下对齐标准差)。
+      |z| 超过 cfg.blur_z_threshold 记 "pose_relative:blur" 或
+      "pose_relative:exposure"。组内 MAD 为 0(全组指标相同)时跳过——
+      没有组内偏离可言,不误报。同姿态连拍棋盘大小位置几乎相同,
+      组内比较天然免疫"整批数据整体偏糊"的情况。
+    - 来源二(兜底)全局分位线:对每个指标取全体照片的分位数
+      (cfg.global_quantile_low/high,默认 1%/99%),越界记 "global:blur" /
+      "global:exposure"——单张姿态没有连拍可比,靠这条线兜住;
+      两颗检测器都看不见棋盘的记 "global:visibility"。
+    - verdict = "suspect" 当且仅当 suspect_sources 非空,否则 "ok"。
+
+    返回与输入等长、顺序一致的判定清单(每条含 image_id / suspect_sources /
+    verdict)。函数只做标记:输入几张,输出还是几张,不存在任何剔除动作(D-01)。
+    """
+    n = len(per_image_metrics)
+    pose_flags: list[set[str]] = [set() for _ in range(n)]
+    global_flags: list[set[str]] = [set() for _ in range(n)]
+
+    # --- 来源一:同姿态连拍内相对比较(主)---
+    groups: dict[str, list[int]] = {}
+    for i, m in enumerate(per_image_metrics):
+        if int(m.get("n_repeats", 1) or 1) >= 2:
+            groups.setdefault(str(m.get("pose_id")), []).append(i)
+
+    metric_tags = (("blur_norm", "blur"), ("expo_hi", "exposure"), ("expo_lo", "exposure"))
+    for idxs in groups.values():
+        for key, tag in metric_tags:
+            vals = np.array([_to_float(per_image_metrics[i].get(key)) for i in idxs])
+            valid = np.isfinite(vals)
+            if int(valid.sum()) < 2:
+                continue  # 有效值不足两张,组内比较无从谈起
+            median = float(np.median(vals[valid]))
+            mad = float(np.median(np.abs(vals[valid] - median)))
+            if mad == 0.0:
+                continue  # 全组指标相同:跳过该指标,不误报
+            scale = 1.4826 * mad
+            for j, i in enumerate(idxs):
+                if not valid[j]:
+                    continue
+                if abs((vals[j] - median) / scale) > cfg.blur_z_threshold:
+                    pose_flags[i].add(tag)
+
+    # --- 来源二:全局分位线兜底(含单张姿态)---
+    pools = {
+        key: np.array([_to_float(m.get(key)) for m in per_image_metrics])
+        for key, _ in metric_tags
+    }
+    for i, m in enumerate(per_image_metrics):
+        for key, tag in metric_tags:
+            pool = pools[key][np.isfinite(pools[key])]
+            x = _to_float(m.get(key))
+            if pool.size == 0 or not np.isfinite(x):
+                continue
+            low = float(np.quantile(pool, cfg.global_quantile_low))
+            high = float(np.quantile(pool, cfg.global_quantile_high))
+            if x < low or x > high:
+                global_flags[i].add(tag)
+        if not m.get("classic_ok") and not m.get("sb_ok"):
+            global_flags[i].add("visibility")
+
+    # --- 汇总:来源逐条列明(同姿态在前、全局在后,顺序固定可读)---
+    results: list[dict] = []
+    for i, m in enumerate(per_image_metrics):
+        sources: list[str] = []
+        if "blur" in pose_flags[i]:
+            sources.append("pose_relative:blur")
+        if "exposure" in pose_flags[i]:
+            sources.append("pose_relative:exposure")
+        if "blur" in global_flags[i]:
+            sources.append("global:blur")
+        if "exposure" in global_flags[i]:
+            sources.append("global:exposure")
+        if "visibility" in global_flags[i]:
+            sources.append("global:visibility")
+        results.append({
+            "image_id": m.get("image_id"),
+            "suspect_sources": sources,
+            "verdict": "suspect" if sources else "ok",
+        })
+    return results
