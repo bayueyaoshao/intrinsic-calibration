@@ -1,8 +1,13 @@
-"""pytest 公共夹具。
+"""pytest 公共夹具:角点/标定/体检三类测试的共同图像地基。
 
 make_tiny_jpg:生成一张小的随机灰度 JPEG,供数据模型/分辨率检查的测试用;
 附带属性 input_root 指向夹具数据根(input_data 目录)。
-(完整的合成棋盘投影夹具——带已知真值角点——由下一个计划建立。)
+
+make_chessboard_image:合成棋盘投影图——用已知的相机内参/畸变/位姿把
+11×8 内角点物点网格投影到像平面,得到**带真值坐标的角点**,再用相邻角点
+围成的四边形逐格填色画出黑白棋盘(透视变形自然形成,不做强行拉直)。
+因为相机与位姿全是已知的,每张测试图都自带"标准答案",角点检测、
+标定精度、体检指标的对错都能拿它来量。
 """
 
 from __future__ import annotations
@@ -29,4 +34,139 @@ def make_tiny_jpg(tmp_path: Path):
 
     # 附带数据根路径,测试直接取用,不用再猜目录
     _make.input_root = tmp_path / "input_data"  # type: ignore[attr-defined]
+    return _make
+
+
+def _fill_quad(img: numpy.ndarray, pts: numpy.ndarray, value: int) -> None:
+    """把一个四边形区域填成指定灰度值(纯 numpy 判断"点在四边形内")。
+
+    做法:取四边形的外接矩形,对矩形内每个像素判断它是否落在四边形内——
+    判断依据是"点在每条边的同一侧"(用叉积的符号,叉积就是两个向量张成
+    平行四边形的有向面积,同侧则符号一致)。透视/畸变下四边形会轻微变形,
+    这种逐点判断天然支持,不需要强行按矩形填。
+    """
+    height, width = img.shape[:2]
+    x0 = max(int(numpy.floor(pts[:, 0].min())), 0)
+    y0 = max(int(numpy.floor(pts[:, 1].min())), 0)
+    x1 = min(int(numpy.ceil(pts[:, 0].max())), width - 1)
+    y1 = min(int(numpy.ceil(pts[:, 1].max())), height - 1)
+    if x1 < x0 or y1 < y0:
+        return  # 整块落在画面外,跳过
+
+    xs = numpy.arange(x0, x1 + 1)
+    ys = numpy.arange(y0, y1 + 1)
+    xx, yy = numpy.meshgrid(xs, ys)
+    pixels = numpy.stack([xx.ravel(), yy.ravel()], axis=1).astype(numpy.float64)
+
+    signs = []
+    for k in range(4):
+        a = pts[k]
+        b = pts[(k + 1) % 4]
+        cross = (b[0] - a[0]) * (pixels[:, 1] - a[1]) - (b[1] - a[1]) * (pixels[:, 0] - a[0])
+        signs.append(cross)
+    side = numpy.stack(signs, axis=1)
+    inside = (side >= 0).all(axis=1) | (side <= 0).all(axis=1)
+    block = img[y0:y1 + 1, x0:x1 + 1]
+    block[inside.reshape(block.shape)] = value
+
+
+@pytest.fixture
+def make_chessboard_image():
+    """合成棋盘投影图工厂:make_chessboard_image(...) → (图像, 真值角点, 方格像素边长)。
+
+    参数(全部有默认值,测试只写关心的那一两项):
+        cols / rows:  内部角点的列数/行数(默认 11×8 = 88 个角点)
+        square_px:    期望的方格像素边长(通过反推物理方格尺寸来近似实现)
+        K:            3×3 相机内参矩阵;默认按 image_size 取中心为光心、焦距 800
+        dist_coeffs:  畸变系数(默认无畸变;合成图重点是"已知真值",有小畸变也行)
+        rvec / tvec:  棋盘相对相机的旋转/平移;默认棋盘正对相机、只带极轻微侧转
+        image_size:   图像尺寸 (高, 宽),与 numpy 数组形状同序
+        degrade:      退化变体:None / "blur"(高斯模糊)/ "noise"(加噪声)/
+                      "overexpose"(像素截断到 255 的过曝)
+
+    返回 (图像 uint8 (高,宽), 真值角点 (cols*rows, 2) float64, 方格像素边长约等于值)。
+    """
+
+    def _make(cols: int = 11, rows: int = 8, square_px: float = 20.0,
+              K: numpy.ndarray | None = None,
+              dist_coeffs: numpy.ndarray | None = None,
+              rvec: numpy.ndarray | None = None,
+              tvec: numpy.ndarray | None = None,
+              image_size: tuple[int, int] = (480, 640),
+              degrade: str | None = None):
+        height, width = image_size
+        if K is None:
+            K = numpy.array([[800.0, 0.0, width / 2.0],
+                             [0.0, 800.0, height / 2.0],
+                             [0.0, 0.0, 1.0]])
+        if dist_coeffs is None:
+            dist_coeffs = numpy.zeros(5)
+        if rvec is None:
+            rvec = numpy.array([0.0, 0.05, 0.0])  # 极轻微侧转:真实感,又不破坏方格均匀
+        if tvec is None:
+            tvec = numpy.array([0.0, 0.0, 800.0])  # 棋盘放在相机正前方 800(单位与物理方格一致)
+
+        # 反推物理方格边长,使投影后方格像素边长约等于 square_px:
+        # 像素尺寸 ≈ 焦距 × 物理尺寸 / 距离,倒过来即得物理尺寸。
+        focal_x = float(K[0, 0])
+        depth = float(tvec[2])
+        square_world = square_px * depth / focal_x
+
+        # 内部角点物点(行主序:行在外、列在内),棋盘中心对齐光轴
+        xs = (numpy.arange(cols) - (cols - 1) / 2.0) * square_world
+        ys = (numpy.arange(rows) - (rows - 1) / 2.0) * square_world
+        objp = numpy.zeros((rows * cols, 3), dtype=numpy.float64)
+        objp[:, 0] = numpy.tile(xs, rows)
+        objp[:, 1] = numpy.repeat(ys, cols)
+        corners, _ = cv2.projectPoints(objp, rvec, tvec, K, dist_coeffs)
+        corners = corners.reshape(-1, 2).astype(numpy.float64)
+
+        # 画图:把网格向外扩一圈(即多出一圈边框方格),从 -1 到 cols / rows 闭区间,
+        # 相邻网格点围成的每一格就是一个方格;黑白交替,黑格填 0、白格与背景填 255。
+        # 先在 4 倍边长的大画布上画硬边棋盘,再用"区域平均"缩小回目标尺寸——
+        # 等效于真实镜头的光学模糊(抗锯齿),否则硬边的光栅化台阶会让角点
+        # 带上约半个像素的系统性画格偏差,污染"对真值误差 < 0.5px"这类断言。
+        supersample = 4
+        # 大画布的内参:焦距同比放大;主点按 OpenCV 缩小的像素中心映射平移——
+        # cv2.resize 缩小 SS 倍时,小图像素 i 取大图第 4i..4i+3 列的均值,
+        # 其中心在大图坐标 SS*i + (SS-1)/2 处,所以必须用
+        # c_big = SS*(c_small + 0.5) − 0.5 对齐,否则整幅图带 (SS−1)/2/SS ≈
+        # 0.375 像素的系统性偏移,污染一切"对真值误差"断言。
+        k_big = K.astype(numpy.float64).copy()
+        k_big[0, 0] *= supersample
+        k_big[1, 1] *= supersample
+        k_big[0, 2] = supersample * (k_big[0, 2] + 0.5) - 0.5
+        k_big[1, 2] = supersample * (k_big[1, 2] + 0.5) - 0.5
+        gx = (numpy.arange(-1, cols + 1) - (cols - 1) / 2.0) * square_world
+        gy = (numpy.arange(-1, rows + 1) - (rows - 1) / 2.0) * square_world
+        grid_obj = numpy.zeros(((rows + 2) * (cols + 2), 3), dtype=numpy.float64)
+        grid_obj[:, 0] = numpy.tile(gx, rows + 2)
+        grid_obj[:, 1] = numpy.repeat(gy, cols + 2)
+        grid, _ = cv2.projectPoints(grid_obj, rvec, tvec, k_big, dist_coeffs)
+        grid = grid.reshape(rows + 2, cols + 2, 2).astype(numpy.float64)
+
+        big = numpy.full((height * supersample, width * supersample), 255, dtype=numpy.uint8)
+        for j in range(rows + 1):
+            for i in range(cols + 1):
+                quad = numpy.stack([grid[j, i], grid[j, i + 1],
+                                    grid[j + 1, i + 1], grid[j + 1, i]])
+                if (i + j) % 2 == 0:
+                    _fill_quad(big, quad, 0)
+        img = cv2.resize(big, (width, height), interpolation=cv2.INTER_AREA)
+
+        if degrade == "blur":
+            kernel = max(3, (round(square_px / 4) // 2) * 2 + 1)  # 奇数边长
+            img = cv2.GaussianBlur(img, (kernel, kernel), 0)
+        elif degrade == "noise":
+            rng = numpy.random.default_rng(42)
+            noisy = img.astype(numpy.float64) + rng.normal(0.0, 12.0, size=img.shape)
+            img = numpy.clip(noisy, 0, 255).astype(numpy.uint8)
+        elif degrade == "overexpose":
+            # 过曝:整体提亮后截断到 255,灰阶层次被"烧白"
+            img = numpy.minimum(img.astype(numpy.float64) + 120.0, 255.0).astype(numpy.uint8)
+        elif degrade is not None:
+            raise ValueError(f"未知的退化变体:{degrade!r}(支持 blur / noise / overexpose)")
+
+        return img, corners, float(square_px)
+
     return _make
