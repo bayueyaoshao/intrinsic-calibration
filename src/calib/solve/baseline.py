@@ -19,6 +19,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import cv2
 import numpy as np
 
@@ -241,13 +244,15 @@ def run_baselines(corners_train: dict[str, dict],
             else:
                 result = calibrate_fisheye(views, image_size, board,
                                            cfg.calibrate.fisheye)
-            # 附上落盘与残差回代需要的元信息(objp 是物点网格,不进 JSON)
+            # 附上落盘与残差回代需要的元信息(objp 是物点网格、views 是进标定的
+            # 实测角点,两者都只进残差计算,不进 JSON)
             result["detector"] = detector
             result["model"] = model
             result["image_ids"] = kept_ids
             result["image_size"] = tuple(image_size)
             result["n_points_per_view"] = board.cols * board.rows
             result["objp"] = objp
+            result["views"] = views
             baselines[name] = result
 
     return {
@@ -256,3 +261,80 @@ def run_baselines(corners_train: dict[str, dict],
         "excluded_images": sorted(set(excluded_seen)),
         "n_views": n_views,
     }
+
+
+def compute_residuals(result: dict) -> np.ndarray:
+    """逐帧回代算重投影残差:(N, 88, 2) float64,单位像素。
+
+    做法:用标定得到的内外参把物点"重画"一遍,重画位置减去实际检测位置。
+    投影函数与标定用的是同一套(针孔 → cv2.projectPoints,
+    鱼眼 → cv2.fisheye.projectPoints),残差与求解天然可比、不自相矛盾。
+    进标定的视图都是 88 点全检出的,正常不会有缺失;万一将来出现缺失点,
+    该位置按约定填 NaN(占位,不消失)。
+    """
+    if not result["converged"]:
+        raise ValueError("该组合未收敛,没有内外参可回代,不存在残差。")
+    n = result["n_points_per_view"]
+    objp = np.asarray(result["objp"], dtype=np.float64)
+    if objp.ndim == 2:
+        objp = objp.reshape(n, 1, 3)
+    project = (cv2.fisheye.projectPoints if result["model"] == "fisheye"
+               else cv2.projectPoints)
+    residuals = np.full((len(result["image_ids"]), n, 2), np.nan, dtype=np.float64)
+    for i, (rvec, tvec) in enumerate(zip(result["rvecs"], result["tvecs"])):
+        proj, _jacobian = project(objp, rvec, tvec, result["K"], result["D"])
+        observed = np.asarray(result["views"][i], dtype=np.float64).reshape(n, 2)
+        residuals[i] = proj.reshape(n, 2) - observed
+    return residuals
+
+
+def save_calibration(out_root: Path | str, name: str, result: dict,
+                     lineage: dict) -> Path:
+    """把一个基线组合的结果落盘:calibration.json(+收敛时)residuals.npz。
+
+    写到 <out_root>/<name>/ 下(out_root 是本轮运行目录 run_<时间戳>)。
+
+    失败组合的值语义(就此定死):converged=false、failure_note 非空(中文),
+    K / D / rms_overall / per_view_rms 一律写 JSON null——键一个不少,
+    上游对四个组合的读取逻辑可以一视同仁,不必先判断成败再挑键。
+    """
+    out_dir = Path(out_root) / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    converged = bool(result["converged"])
+    if converged:
+        per_view_dict = {image_id: float(rms) for image_id, rms
+                         in zip(result["image_ids"], result["per_view_rms"])}
+        payload = {
+            "rms_overall": float(result["rms_overall"]),
+            "K": np.asarray(result["K"], dtype=np.float64).tolist(),
+            "D": [float(x) for x in np.asarray(result["D"]).ravel()],
+            "per_view_rms": per_view_dict,
+        }
+    else:
+        payload = {"rms_overall": None, "K": None, "D": None, "per_view_rms": None}
+
+    document = {
+        "lineage": lineage,
+        "detector": result["detector"],
+        "model": result["model"],
+        "image_size": [int(result["image_size"][0]), int(result["image_size"][1])],
+        "n_views": len(result["image_ids"]),
+        "n_points_per_view": int(result["n_points_per_view"]),
+        "flags_used": int(result["flags_used"]),
+        "converged": converged,
+        "failure_note": result["failure_note"],
+        **payload,
+    }
+    json_path = out_dir / "calibration.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(document, f, ensure_ascii=False, indent=2)
+
+    if converged:
+        np.savez(
+            out_dir / "residuals.npz",
+            image_ids=np.asarray(result["image_ids"]),
+            residuals=compute_residuals(result),
+            per_view_rms=np.asarray(result["per_view_rms"], dtype=np.float64),
+        )
+    return out_dir
