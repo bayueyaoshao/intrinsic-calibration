@@ -30,6 +30,7 @@ from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
 from calib.solve.baseline import DETECTORS, run_baselines, save_calibration
 from calib.util.lineage import make_lineage, sha256_file
+from calib.visualization.overlay import render_all
 from calib.visualization.suspects import write_suspect_originals
 
 
@@ -237,7 +238,7 @@ def corners() -> None:
     步骤:读配置 → 找最新一轮 ingest 产物读照片清单 → 逐张读图,
     经典与新款(SB)两颗检测器各跑一次(D-07)→ 各自规范化、按姿态分组
     做连拍一致性断言(D-09)→ 写 4 份角点 npz(train/test × classic/sb)
-    与检测质量摘要 → 打印中文汇总。
+    与检测质量摘要 → 全量标记副本(每张照片两套,D-06/D-07)→ 打印中文汇总。
     """
     started = datetime.now(UTC)
     board = load_board(BOARD_PATH)
@@ -355,6 +356,10 @@ def corners() -> None:
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
+    # 全量标记副本(D-06/D-07):manifest 里每张照片、每颗检测器各一份,
+    # 未检出画 MISS 红框留痕;重跑 corners 即整目录重新生成,幂等
+    copy_summary = render_all(out_dir, ingest_run / "manifest.json", board, cfg)
+
     # 中文汇总:两颗检测器成功率对比表 + 方格/窗口量级 + 断言结论 + 产物位置
     typer.echo("找角点完成,4 份角点文件与质量摘要已写盘。")
     typer.echo("  检出成功率对比(检出 / 总数):")
@@ -375,6 +380,12 @@ def corners() -> None:
     typer.echo(f"  连拍一致性断言:每颗检测器检查 {groups_checked.get('classic', 0)} 组,"
                f"失败 {len(burst_failures)} 组"
                + ("(存疑帧已列入质量摘要,供人工审阅)" if burst_failures else ""))
+    typer.echo(f"  全量标记副本:{copy_summary['classic']['total']} 张 × 2 套"
+               f"(classic/sb 各一套,人工并排对比哪颗检测器贴得更准,D-06/D-07)")
+    for name in ("classic", "sb"):
+        typer.echo(f"    {name}:标记 {copy_summary[name]['marked']} 张 / "
+                   f"MISS 红框 {copy_summary[name]['miss']} 张(未检出也留痕)")
+    typer.echo(f"  标记副本目录:{out_dir / 'marked_copies'}")
     typer.echo(f"  角点产物:{out_dir}")
     typer.echo(f"  质量摘要:{summary_path}")
 
