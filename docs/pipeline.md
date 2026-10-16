@@ -12,7 +12,7 @@ flowchart TD
         CFG["配置文件<br/>棋盘格规格 + 算法选项"]
     end
 
-    ING["① 照片入库体检<br/>自动剔除模糊/过曝/找不到棋盘的废片"]
+    ING["① 照片入库体检<br/>逐张给模糊度/曝光/棋盘可见性打分,<br/>存疑只标记不剔除,原图另存副本供人工审"]
     COR["② 找棋盘角点<br/>每个角点定位到亚像素,并把方法调到当前数据下的最优"]
     NOI["③ 测噪声底<br/>同一位置8张连拍相减,实测噪声水平:<br/>这批数据天生最准能到多少"]
     CAL["④ 求解相机内参<br/>4种相机模型 × 多种优化方法,都试一遍"]
@@ -50,10 +50,10 @@ flowchart TD
 
 | 阶段 | 通俗名 | CLI 子命令 | 输入(只读) | 输出产物(`output/`) | 模块 | 需求 |
 |---|---|---|---|---|---|---|
-| ① | 照片入库体检 | `calib ingest` | input_data/, config/ | manifest.json | io/ | IO-01~03 |
-| ② | 找棋盘角点 | `calib corners` | manifest, 图像, 检测配置 | corners.npz, 检测质量摘要 | corners/ | COR-01~03 |
+| ① | 照片入库体检 | `calib ingest` | input_data/, config/ | manifest.json(每张带全部体检数字与判定来源), suspect_originals/(存疑原图副本), suspect_diff_vs_*.txt(跨轮存疑对比表) | io/ | IO-01~03 |
+| ② | 找棋盘角点 | `calib corners` | manifest, 图像, 检测配置 | corners_train/test_×classic/sb.npz(4 份角点), detection_summary.json(检测质量摘要), marked_copies/(全部照片的角点标记副本,classic/sb 两套), mosaic/(总览拼图 + 存疑拼图 + 逐格索引) | corners/ | COR-01~03 |
 | ③ | 测噪声底 | `calib noise` | corners.npz, 图像 | noise.json | noise/ | NOI-01~02 |
-| ④ | 求解相机内参 | `calib calibrate` | corners.npz, 模型/求解器配置 | calibration.json, residuals.npz | models/, solve/ | MOD-01~02, SOL-01~02 |
+| ④ | 求解相机内参 | `calib calibrate` | corners.npz, 模型/求解器配置 | baseline_<检测器>_<模型>/calibration.json + residuals.npz(逐帧残差), comparison.json(2×2 对比摘要) | models/, solve/ | MOD-01~02, SOL-01~02 |
 | ⑤ | 算理论精度极限 | `calib fisher` | corners.npz, noise.json, 标定结果 | crlb.json | noise/ | NOI-03 |
 | ⑥ | 防作弊考试 | `calib evaluate` | corners.npz, 实验配置 | experiments/*.json, 汇总表 | evaluation/ | EVA-01~05 |
 | ⑦ | 误差归因 | `calib analyze` | 任意上游产物 | analysis/*.json | analysis/ | ANA-01~04 |
