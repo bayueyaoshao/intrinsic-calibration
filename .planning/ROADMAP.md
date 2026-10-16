@@ -32,7 +32,7 @@
   4. 重复张数不齐或单张姿态不导致崩溃(数据驱动,无硬编码张数)
   5. 角点叠加可视化图(sampling + 最差若干视图)可人工核查角点是否偏移
 
-**Plans:** 2/5 plans executed
+**Plans:** 3/5 plans executed
 Plans:
 **Wave 1**
 
@@ -44,7 +44,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-03-PLAN.md — 2×2 基线标定 + `calib calibrate` + 真实数据端到端贯通 + SKELETON.md(行走骨架完整, D-10)
+- [x] 01-03-PLAN.md — 2×2 基线标定 + `calib calibrate` + 真实数据端到端贯通 + SKELETON.md(行走骨架完整, D-10)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -138,7 +138,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 数据基座 + 最小完整标定流程 | 2/5 | In Progress|  |
+| 1. 数据基座 + 最小完整标定流程 | 3/5 | In Progress|  |
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 0/TBD | Not started | - |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 0/TBD | Not started | - |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
