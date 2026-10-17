@@ -22,7 +22,12 @@ import numpy as np
 from calib.corners.artifacts import save_corners
 from calib.io.config import BoardSpec, CalibrationConfig
 from calib.visualization.mosaic import build_mosaic, write_mosaics
-from calib.visualization.overlay import render_all, render_marked, render_sb_failed_review
+from calib.visualization.overlay import (
+    render_all,
+    render_flagged_review,
+    render_marked,
+    render_sb_failed_review,
+)
 
 # 测试统一用真实棋盘规格(11×8 内角点)
 COLS, ROWS = 11, 8
@@ -270,6 +275,99 @@ def test_render_sb_failed_review_empty_list_creates_nothing(tmp_path):
 
     assert result is None
     assert not (run_dir / "review_sb_failed").exists()
+
+
+# ------------------------------------- 通用复核文件夹 render_flagged_review
+#
+# review_sb_failed 只管"SB 未检出"一类帧;存疑帧/连拍点名帧需要同一套
+# 文件夹结构但原因各不相同,所以抽出通用函数:文件夹名、中文说明、
+# 附加计数、逐帧 info 全部由调用方传,函数本身只负责"归拢成一个文件夹"。
+
+def test_render_flagged_review_two_frames(tmp_path, make_chessboard_image):
+    """2 帧复核清单(1 帧两颗检测器都检出 + 1 帧两颗都未检出):
+
+    original/ 存 2 张原图副本(保持原文件名,逐字节一致);marked_classic/
+    与 marked_sb/ 各 2 张标记图(未检出帧 = MISS 红框,检出帧 = 角点叠加);
+    summary.json:n_total 与按检测器的 marked/miss 计数正确、frames 数组
+    每条含 image_id 加调用方传入的 info(中文值原样落盘)、顶层含调用方
+    传入的 note 中文说明与 extra 计数字段;源文件逐字节不变。
+    """
+    # 检出帧:合成棋盘当原图,夹具自带的真值角点当两颗检测器的角点
+    board_img, truth_uv, _sq = make_chessboard_image()
+    ok_src = tmp_path / "src" / "ok_frame.jpg"
+    ok_src.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(ok_src), board_img):
+        raise RuntimeError("测试夹具写棋盘原图失败")
+    # 未检出帧:随机噪声图(两颗检测器都没有角点)
+    miss_src = _write_fake_image(tmp_path / "src" / "miss_frame.jpg", seed=7)
+    before = {p.name: p.read_bytes() for p in (ok_src, miss_src)}
+
+    run_dir = tmp_path / "corners" / "run_t"
+    frames = [
+        {"image_id": "ok_frame", "path": str(ok_src),
+         "uv_classic": truth_uv, "uv_sb": truth_uv, "note": "SUS EXPO",
+         "info": {"pose_id": "poseA", "repeat_idx": 0, "split": "train",
+                  "reason": "存疑原因:同姿态相对比较:曝光"}},
+        {"image_id": "miss_frame", "path": str(miss_src),
+         "uv_classic": None, "uv_sb": None, "note": "BURST FLAG",
+         "info": {"pose_id": "poseA", "repeat_idx": 1, "split": "train",
+                  "reason": "连拍断言失败:组内波动中位数 4.00px 超限"}},
+    ]
+    summary = render_flagged_review(
+        run_dir, "review_suspects", frames, BOARD, quality=90,
+        note="本文件夹由 calib corners 自动生成,汇总需人工复核的帧。",
+        extra={"pose_relative": 1, "global": 1, "suspect_total": 2})
+
+    review = run_dir / "review_suspects"
+    # 原图副本:保持原文件名与格式,内容逐字节一致(只读复制)
+    assert sorted(p.name for p in (review / "original").iterdir()) == \
+        ["miss_frame.jpg", "ok_frame.jpg"]
+    assert (review / "original" / "ok_frame.jpg").read_bytes() == before["ok_frame.jpg"]
+    assert (review / "original" / "miss_frame.jpg").read_bytes() == before["miss_frame.jpg"]
+    # 两套标记图:每颗检测器各 2 张,尺寸与各自原图一致
+    for detector in ("classic", "sb"):
+        marked = {}
+        for name in ("ok_frame", "miss_frame"):
+            img = cv2.imread(str(review / f"marked_{detector}" / f"{name}.jpg"))
+            assert img is not None and img.size > 0
+            marked[name] = img
+        assert marked["ok_frame"].shape[:2] == board_img.shape[:2]
+        assert marked["miss_frame"].shape[:2] == (IMG_H, IMG_W)
+        # 未检出帧 = MISS 红框(顶边整行接近纯红);检出帧 = 角点叠加(非红框)
+        assert _is_reddish(marked["miss_frame"][0]).all()
+        assert not _is_reddish(marked["ok_frame"][0]).all()
+    # summary:计数、调用方传入的 note 与 extra、逐帧 info 全部对上
+    assert summary["n_total"] == 2
+    assert summary["marked"] == {"classic": 1, "sb": 1}
+    assert summary["miss"] == {"classic": 1, "sb": 1}
+    assert summary["pose_relative"] == 1 and summary["suspect_total"] == 2
+    assert "人工复核" in summary["note"] and "calib corners" in summary["note"]
+    assert summary["jpeg_quality"] == 90
+    by_id = {f["image_id"]: f for f in summary["frames"]}
+    assert len(summary["frames"]) == 2
+    assert by_id["ok_frame"]["reason"] == "存疑原因:同姿态相对比较:曝光"
+    assert by_id["miss_frame"]["pose_id"] == "poseA"
+    assert by_id["miss_frame"]["repeat_idx"] == 1
+    assert by_id["ok_frame"]["split"] == "train"
+    # 落盘的 summary.json 与返回值是同一份内容(键名英文、中文值原样)
+    saved = json.loads((review / "summary.json").read_text(encoding="utf-8"))
+    assert saved["n_total"] == 2
+    assert saved["marked"] == {"classic": 1, "sb": 1}
+    assert saved["frames"][0]["reason"].startswith("存疑原因")
+    # 源文件自始至终不被改写(真实性承诺 T-05-01)
+    assert ok_src.read_bytes() == before["ok_frame.jpg"]
+    assert miss_src.read_bytes() == before["miss_frame.jpg"]
+
+
+def test_render_flagged_review_empty_list_creates_nothing(tmp_path):
+    """空清单:返回 None,且不创建以 folder 参数命名的目录(没帧就没文件夹)。"""
+    run_dir = tmp_path / "corners" / "run_t"
+
+    result = render_flagged_review(run_dir, "review_suspects", [], BOARD,
+                                   quality=90, note="说明", extra={"n": 0})
+
+    assert result is None
+    assert not (run_dir / "review_suspects").exists()
 
 
 # ---------------------------------------------------------------- 汇总拼图 mosaic
