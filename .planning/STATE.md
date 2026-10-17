@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-16T04:48:54.847Z"
+last_updated: "2026-10-17T10:58:19.000Z"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -64,6 +64,7 @@ Plan: 1 of 5
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261017-mmj | 角点检测最终方案落地:SB 为主、classic 兜底 + 失败帧独立产物 + 清理中间实验产物 | 2026-10-17 | dcd5abe | [261017-mmj-corners-sb-classic-fallback](./quick/261017-mmj-corners-sb-classic-fallback/) |
+| 261017-pub | 存疑帧/连拍点名帧专属复核文件夹:review_suspects(89 张)+ review_burst_flagged(24 张),一个文件夹看完人工复核 | 2026-10-17 | 0be6887 | [261017-pub-calib-corners](./quick/261017-pub-calib-corners/) |
 
 ### Research Flags
 
@@ -72,6 +73,6 @@ Plan: 1 of 5
 
 ## Session Continuity
 
-- **Last action:** 快任务 261017-mmj 完成(2026-10-17)— 角点最终方案落地:SB 为主、classic 兜底,新 run_20261017_083337 705/705,失败帧独立产物齐备,中间实验产物已清理
-- **Next action:** 用户人工验收:D-05 四项(01-HUMAN-UAT.md)+ 快任务 41 张 review_sb_failed/marked 抽查;验收通过后关闭阶段一
+- **Last action:** 快任务 261017-pub 完成(2026-10-17)— review_suspects(89 张存疑帧)+ review_burst_flagged(24 张连拍点名帧)两个专属复核文件夹落地,全量重跑新 run_20261017_104817,705/705 检出与上一 run 一致,98 个测试全绿
+- **Next action:** 用户人工验收:D-05 四项(01-HUMAN-UAT.md)+ 三个复核文件夹抽查(review_sb_failed 41 张 / review_suspects 89 张 / review_burst_flagged 24 张,各看 summary.json 中文原因与标记图);验收通过后关闭阶段一
 - **Notes for next session:** 先读 .planning/phases/01-data-foundation-minimal-calibration/01-CONTEXT.md(决定 D-01~D-13);首日待办:uv lock + 冒烟测试 opencv/numpy/scipy 三件套;数据只读已就位(80 姿态×8 连拍 + test 65 张)
