@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-17T11:35:00.000Z"
+last_updated: "2026-10-17T12:40:00.000Z"
 progress:
   total_phases: 6
   completed_phases: 1
@@ -22,11 +22,11 @@ progress:
 
 ## Current Position
 
-Phase: 02 — NOT STARTED
+Phase: 02 — DISCUSSED (context ready)
 
 - **Phase:** 2 (模型层 M1–M4 + 双求解后端 + 产物血缘)
-- **Plan:** None yet — next step `/gsd-discuss-phase 2`
-- **Status:** Phase 1 关账完毕(2026-10-17,D-05 验收 4/4),准备开启阶段二
+- **Plan:** None yet — next step `/gsd-plan-phase 2`
+- **Status:** 阶段二讨论完成(2026-10-17,02-CONTEXT.md 就绪);开工前置一个 quick task:修阶段一遗留 CR-01 + WR-01~04
 - **Progress:** `[█░░░░░░░░░] 1/6 phases`
 
 ## Performance Metrics
@@ -52,7 +52,7 @@ Phase: 02 — NOT STARTED
 
 ### Todos
 
-- Phase 1 首日:uv lock 并 smoke-test opencv/numpy/scipy 三件套(研究阶段沙箱验证失败)
+- [阶段二开工前] quick task:修阶段一代码审查遗留 CR-01(corners 空划分崩溃)+ WR-01~04,方案见 01-REVIEW.md(CONTEXT D-05)
 
 ### Blockers
 
@@ -72,6 +72,6 @@ Phase: 02 — NOT STARTED
 
 ## Session Continuity
 
-- **Last action:** 阶段一正式关账(2026-10-17)— D-05 四项人工验收全过(第 2 项暂定,存疑帧最终影响待阶段二逐帧残差复核);收尾:UAT 记录(b51eeb8)、docs/pipeline.md 同步三个 review 复核文件夹与兜底契约
-- **Next action:** `/gsd-discuss-phase 2`(模型层 M1–M4 + 双求解后端 + 产物血缘)→ 计划 → 执行
-- **Notes for next session:** 先读 .planning/phases/01-data-foundation-minimal-calibration/01-CONTEXT.md(决定 D-01~D-13);首日待办:uv lock + 冒烟测试 opencv/numpy/scipy 三件套;数据只读已就位(80 姿态×8 连拍 + test 65 张)
+- **Last action:** 阶段二前置讨论完成(2026-10-17)— 四项决定:全矩阵 M1–M4 试车 / 角点用 SB+classic 兜底最优组合 / 存疑帧复核纳入阶段二 / 遗留修复开工前 quick task(02-CONTEXT.md D-01~D-10)
+- **Next action:** ① `/gsd-quick` 修阶段一遗留(CR-01 + WR-01~04,清单在 01-REVIEW.md)→ ② `/gsd-plan-phase 2` → ③ `/gsd-execute-phase 2`
+- **Notes for next session:** 讨论决策在 .planning/phases/02-m1-m4/02-CONTEXT.md;角点输入 = sb 路线 npz(705 全覆盖,run_20261017_104817);阶段一 UAT 遗留(存疑帧 per_view_rms 对比)已收编进阶段二 D-04
