@@ -156,6 +156,37 @@ def test_fisheye_never_raises_and_structure_complete():
         assert result["rms_overall"] is None and result["per_view_rms"] is None
 
 
+def test_pinhole_cv2_error_recorded_not_raised(make_chessboard_image, monkeypatch):
+    """WR-03 锁定:求解器抛 cv2.error 时,针孔分支与鱼眼同构——不抛异常,
+    返回完整失败结构(结构键一个不少、数值字段一律 None、中文 failure_note)。
+
+    替身用空输入调用原函数:空点集会让 OpenCV 断言失败,抛出货真价实的
+    cv2.error(比手工构造 error 实例更贴近真实形态)。
+    """
+    original = cv2.calibrateCameraExtended
+
+    def _explode(*args, **kwargs):
+        return original([], [], (640, 480), None, None, flags=0)
+
+    monkeypatch.setattr(cv2, "calibrateCameraExtended", _explode)
+
+    views, _k_true = _make_true_views(make_chessboard_image, n_views=2)
+    board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+
+    result = calibrate_pinhole(views, (640, 480), board)
+
+    # 九个结构键一个不少(失败的值语义与鱼眼分支逐键一致)
+    for key in ("rms_overall", "K", "D", "rvecs", "tvecs", "per_view_rms",
+                "flags_used", "converged", "failure_note"):
+        assert key in result, f"失败结果缺结构键:{key}"
+    assert result["converged"] is False
+    note = result["failure_note"]
+    assert isinstance(note, str) and "针孔" in note and note.strip()
+    for key in ("rms_overall", "K", "D", "rvecs", "tvecs", "per_view_rms"):
+        assert result[key] is None, f"失败时数值字段 {key} 必须为 None"
+    assert result["flags_used"] == 0
+
+
 def test_fisheye_shape_assertion_raises_chinese_error():
     """陷阱 5 锁定:角点形状不合时,进函数先断言,报错一眼看懂(中文)。"""
     board = BoardSpec(cols=11, rows=8, square_size_mm=25.0)

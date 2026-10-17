@@ -91,8 +91,17 @@ def calibrate_pinhole(image_points_per_view: list[np.ndarray],
     imgs32 = [p.astype(np.float32) for p in imgs64]
 
     flags = 0  # 默认:估计 5 个畸变系数 k1,k2,p1,p2,k3(项目模型 M2)
-    rms, K, D, rvecs, tvecs, _std_int, _std_ext, per_view = cv2.calibrateCameraExtended(
-        objs32, imgs32, tuple(image_size), None, None, flags=flags)
+    # 与鱼眼分支同构:求解抛 cv2.error(如病态输入让方程组解不动)时,
+    # 失败完整记录、不中断其余组合——run_baselines 的准入门槛只有
+    # "可用视图 >= 2",两三个近平面视角正是 calibrateCamera 的病态区
+    try:
+        rms, K, D, rvecs, tvecs, _std_int, _std_ext, per_view = cv2.calibrateCameraExtended(
+            objs32, imgs32, tuple(image_size), None, None, flags=flags)
+    except cv2.error as e:
+        return {"rms_overall": None, "K": None, "D": None, "rvecs": None,
+                "tvecs": None, "per_view_rms": None, "flags_used": flags,
+                "converged": False,
+                "failure_note": f"针孔模型求解未收敛:OpenCV 报错——{e}"}
 
     return {
         "rms_overall": float(rms),
