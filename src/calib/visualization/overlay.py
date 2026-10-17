@@ -211,3 +211,86 @@ def render_sb_failed_review(corners_run_dir: Path | str,
     with open(review_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     return summary
+
+
+def render_flagged_review(corners_run_dir: Path | str,
+                          folder: str,
+                          frames: list[dict],
+                          board: BoardSpec,
+                          quality: int = 90,
+                          note: str | None = None,
+                          extra: dict | None = None) -> dict | None:
+    """通用复核文件夹:把"要点名人工复核"的帧归拢到一个文件夹里看全。
+
+    review_sb_failed 只管"SB 未检出"一类帧;体检存疑帧、连拍点名帧需要
+    同一套文件夹结构但判定原因各不相同,所以抽出这个通用函数:文件夹名、
+    顶层中文说明、附加计数字段、逐帧原因全部由调用方传,函数只负责
+    "归拢成一个文件夹"——原图副本 + 每颗检测器一张标记图 + 中文汇总,
+    人工复核不再跨目录按文件名翻找。
+
+    参数:
+        corners_run_dir: 本轮 corners 运行目录(产物写到其下 <folder>/)
+        folder: 文件夹名(如 "review_suspects" / "review_burst_flagged",
+                由调用方传,函数本身不写死)
+        frames: 复核帧清单,每项含 image_id(照片编号)、path(原图路径,
+                只读不改写)、uv_classic(classic 路线最终角点或 None)、
+                uv_sb(sb 路线最终角点或 None——含 classic 兜底帧,判据与
+                marked_copies/sb 一致即该路线 detected 数组)、note(可选
+                ASCII 短标,画在标记图上;cv2.putText 画不了中文)、
+                info(dict,原样并进 summary 该帧条目:判定原因等)
+        board: 棋盘规格(角点叠加按列×行画)
+        quality: JPEG 质量 1–100
+        note: 顶层中文说明(summary.json 的 note 字段)
+        extra: 顶层附加计数字段(如存疑来源分桶张数),原样并入 summary
+
+    清单为空直接返回 None 且不建目录(没有复核帧就没有这个文件夹)。
+    产物结构:folder/original/ 逐字节复制原图(shutil.copy2 保持原文件名
+    与格式);folder/marked_classic/ 与 folder/marked_sb/ 用 render_marked
+    画(检出画角点叠加、未检出画 MISS 红框留痕);summary.json 键名英文、
+    值中文。返回写盘的同一份字典供控制台汇总。
+    """
+    if not frames:
+        return None
+
+    review_dir = Path(corners_run_dir) / folder
+    originals_dir = review_dir / "original"
+    marked_dirs = {detector: review_dir / f"marked_{detector}"
+                   for detector in DETECTORS}
+
+    marked_counts = {detector: 0 for detector in DETECTORS}
+    miss_counts = {detector: 0 for detector in DETECTORS}
+    frame_entries = []
+    for frame in frames:
+        src_path = Path(frame["path"])
+        # 原图副本:逐字节复制(保留原文件名与格式),源文件绝不改写
+        originals_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, originals_dir / src_path.name)
+
+        # 每颗检测器各画一张标记图:检出画角点叠加,未检出画 MISS 红框
+        for detector, key in (("classic", "uv_classic"), ("sb", "uv_sb")):
+            uv = frame.get(key)
+            render_marked(src_path, uv, board.cols, board.rows,
+                          marked_dirs[detector] / f"{frame['image_id']}.jpg",
+                          quality=quality, note=frame.get("note"))
+            if uv is not None:
+                marked_counts[detector] += 1
+            else:
+                miss_counts[detector] += 1
+
+        # info 原样并进该帧条目(判定原因、姿态编号等,调用方说了算)
+        frame_entries.append({"image_id": frame["image_id"],
+                              **frame.get("info", {})})
+
+    summary = {
+        "note": note if note is not None else
+                "本文件夹由 calib corners 自动生成,汇总需人工复核的帧。",
+        "n_total": len(frames),
+        "marked": marked_counts,
+        "miss": miss_counts,
+        "jpeg_quality": quality,
+        **(extra or {}),
+        "frames": frame_entries,
+    }
+    with open(review_dir / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    return summary
