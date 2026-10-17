@@ -52,7 +52,7 @@ Phase: 02 — DISCUSSED (context ready)
 
 ### Todos
 
-- [阶段二开工前] quick task:修阶段一代码审查遗留 CR-01(corners 空划分崩溃)+ WR-01~04,方案见 01-REVIEW.md(CONTEXT D-05)
+- None(阶段二开工前置 quick task 已完成,下一步 /gsd-plan-phase 2)
 
 ### Blockers
 
@@ -62,6 +62,7 @@ Phase: 02 — DISCUSSED (context ready)
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
+| 261017-trb | 阶段一审查遗留修复:CR-01 空划分崩溃 + WR-01~04(拼图路径/yaml 报错/针孔失败契约/体检配置驱动),106 测试全绿 | 2026-10-17 | 3439c3e | [261017-trb-review-fixes](./quick/261017-trb-review-fixes/) |
 | 261017-mmj | 角点检测最终方案落地:SB 为主、classic 兜底 + 失败帧独立产物 + 清理中间实验产物 | 2026-10-17 | dcd5abe | [261017-mmj-corners-sb-classic-fallback](./quick/261017-mmj-corners-sb-classic-fallback/) |
 | 261017-pub | 存疑帧/连拍点名帧专属复核文件夹:review_suspects(89 张)+ review_burst_flagged(24 张),一个文件夹看完人工复核 | 2026-10-17 | 0be6887 | [261017-pub-calib-corners](./quick/261017-pub-calib-corners/) |
 
@@ -72,6 +73,6 @@ Phase: 02 — DISCUSSED (context ready)
 
 ## Session Continuity
 
-- **Last action:** 阶段二前置讨论完成(2026-10-17)— 四项决定:全矩阵 M1–M4 试车 / 角点用 SB+classic 兜底最优组合 / 存疑帧复核纳入阶段二 / 遗留修复开工前 quick task(02-CONTEXT.md D-01~D-10)
-- **Next action:** ① `/gsd-quick` 修阶段一遗留(CR-01 + WR-01~04,清单在 01-REVIEW.md)→ ② `/gsd-plan-phase 2` → ③ `/gsd-execute-phase 2`
+- **Last action:** 阶段二开工前置完成(2026-10-17)— 讨论决策落盘(02-CONTEXT.md)+ 遗留修复 quick task(261017-trb:CR-01+WR-01~04 修净,106 测试全绿)
+- **Next action:** `/gsd-plan-phase 2`(模型层 M1–M4 + 双求解后端 + 产物血缘)→ `/gsd-execute-phase 2`
 - **Notes for next session:** 讨论决策在 .planning/phases/02-m1-m4/02-CONTEXT.md;角点输入 = sb 路线 npz(705 全覆盖,run_20261017_104817);阶段一 UAT 遗留(存疑帧 per_view_rms 对比)已收编进阶段二 D-04
