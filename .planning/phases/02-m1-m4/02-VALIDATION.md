@@ -18,7 +18,7 @@ created: 2026-10-17
 
 | Property | Value |
 |----------|-------|
-| **Framework** | pytest 8.x(uv 管理,阶段一已就位;106 条现有测试为回归基线) |
+| **Framework** | pytest 8.x(uv 管理,阶段一已就位;103 条快速用例为回归基线,另 3 条 integration 按波次合并前全量跑) |
 | **Config file** | pyproject.toml [tool.pytest.ini_options](markers: integration,阶段一已建) |
 | **Quick run command** | `uv run pytest tests/ -x -q -m "not integration"` |
 | **Full suite command** | `uv run pytest tests/ -q` |
@@ -44,7 +44,7 @@ created: 2026-10-17
 | 1 | 投影一致性(parity) | 标准 1 | M1/M2/M3 vs `cv2.projectPoints`、M4 vs `cv2.fisheye.projectPoints`,float64 atol 1e-9;OpenCV float32 路径 1e-3;典型/边界/随机种子 ≥3 组参数(02-01 Task 3) |
 | 2 | 解析雅可比正确性 | 标准 1 | 每模型每参数列,对 numdifftools 列相对误差 < 1e-6(含近轴点;M1–M3 另加 cv2 雅可比 float64 辅助交叉)(02-01 Task 3) |
 | 3 | 双后端同构与可互换 | 标准 2 | 同一 ObservationSet × 任一注册模型,两后端 CalibrationResult 字段名单一致;失败契约逐键(02-03 Task 2/3、02-04 Task 2) |
-| 4 | 真实数据收敛不劣化 | 标准 3 | 全矩阵试车落盘;m1/m2 各至少一条 scipy 路径(含 soft_l1)RMS ≤ 同模型 opencv + 1e-6(02-05 Task 3) |
+| 4 | 真实数据收敛不劣化 | 标准 3 | 全矩阵试车落盘;m1/m2 的 soft_l1 路径按实用收敛判定 converged=True 且 RMS ≤ 同模型 opencv + 1e-6;若实测 soft_l1 不收敛,按发现落盘并在 SUMMARY 给出 linear 路径证据,提交人工裁定(02-05 Task 3) |
 | 5 | 血缘与独立重跑 | 标准 4 | lineage 三要素齐 + upstream 哈希重算对账;新进程重跑数值一致 < 1e-12(02-05 Task 3、02-06 Task 2) |
 | 6 | 注册机制零侵入 | 标准 5 | 测试内玩具模型一处注册,两求解器均可解;求解器源码无具体模型 import(02-04 Task 3) |
 
@@ -63,8 +63,8 @@ created: 2026-10-17
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | 02-01-1 | 02-01 | 1 | MOD-01 | T-02-01-SC/01 | numdifftools 仅 dev 组;注册表中文报错 | unit | `uv run python -c "import numdifftools; from calib.models.base import CameraModel" && uv run pytest -m "not integration" -q` | ✅ pyproject | ⬜ pending |
-| 02-01-2 | 02-01 | 1 | MOD-02 | T-02-01-01/02 | 近轴除零保护;适配器 D 切片 | unit | `uv run python -c "from calib.models import create_model, BUILTIN_MODEL_IDS; [create_model(m) for m in BUILTIN_MODEL_IDS]" && uv run pytest -m "not integration" -q` | ❌ 新建 | ⬜ pending |
-| 02-01-3 | 02-01 | 1 | MOD-02 | T-02-01-01 | parity 1e-9 / float32 1e-3;雅可比列相对 1e-6;src 无 numdifftools | unit | `uv run pytest tests/test_models_parity.py tests/test_models_jacobian.py -q && ! grep -rn "numdifftools" src/` | ❌ 新建 | ⬜ pending |
+| 02-01-2 | 02-01 | 1 | MOD-02 | T-02-01-01/02 | 近轴除零保护;适配器 D 切片;unproject 牛顿逆解真实现(针孔族畸变迭代/KB4 theta 迭代) | unit | `uv run python -c "from calib.models import create_model, BUILTIN_MODEL_IDS; [create_model(m) for m in BUILTIN_MODEL_IDS]" && uv run pytest -m "not integration" -q` | ❌ 新建 | ⬜ pending |
+| 02-01-3 | 02-01 | 1 | MOD-02 | T-02-01-01 | parity 1e-9 / float32 1e-3;雅可比列相对 1e-6;反投影往返 < 1e-9 px;src 无 numdifftools | unit | `uv run pytest tests/test_models_parity.py tests/test_models_jacobian.py -q && ! grep -rn "numdifftools" src/` | ❌ 新建 | ⬜ pending |
 | 02-02-1 | 02-02 | 1 | SOL-01 | T-02-02-01/02/03 | npz allow_pickle=False;行序逐项断言;NaN 防线 | unit | `uv run python -c "from calib.solve.observation import ObservationSet, load_observation_set" && uv run pytest -m "not integration" -q` | ❌ 新建 | ⬜ pending |
 | 02-02-2 | 02-02 | 1 | SOL-01 | T-02-02-02/03 | 装载契约六条(行序/剔除/未检出/NaN/下限/来源) | unit | `uv run pytest tests/test_solve_observation.py -q` | ❌ 新建 | ⬜ pending |
 | 02-03-1 | 02-03 | 2 | SOL-01 | T-02-03-01 | yaml 白名单 + 中文校验(models/solvers/losses/f_scale/method) | unit | `uv run pytest tests/test_io_config.py -q && uv run python -c "from calib.io.config import load_calibration; load_calibration('config/calibration.yaml')"` | ✅ 修改 | ⬜ pending |
@@ -88,7 +88,7 @@ created: 2026-10-17
 
 - [ ] `uv add --group dev numdifftools`(0.11.1)—— 02-01 Task 1(唯一新依赖,研究已审计 [OK])
 - [ ] 新测试文件按计划落地:parity/雅可比(02-01 Task 3)、observation(02-02 Task 2)、solvers(02-03 Task 2/3)、scipy_residuals + registry(02-04 Task 1/3)、calibrate_matrix(02-05 Task 2/3)、scoring(02-06 Task 1/2)—— 上表 ❌ 列即 Wave 0 缺口,全部有归属任务
-- [ ] 现有 106 条测试保持全绿(回归基线,每任务提交前快速命令把关)
+- [ ] 现有测试保持全绿(103 条快速用例为回归基线,每任务提交前快速命令把关;3 条 integration 按波次合并前全量跑)
 
 *测试框架与夹具基建阶段一已就位,无框架安装需求;合成真值视角夹具上提由 02-03 Task 3 完成。*
 
