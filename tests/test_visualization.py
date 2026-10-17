@@ -22,7 +22,7 @@ import numpy as np
 from calib.corners.artifacts import save_corners
 from calib.io.config import BoardSpec, CalibrationConfig
 from calib.visualization.mosaic import build_mosaic, write_mosaics
-from calib.visualization.overlay import render_all, render_marked
+from calib.visualization.overlay import render_all, render_marked, render_sb_failed_review
 
 # 测试统一用真实棋盘规格(11×8 内角点)
 COLS, ROWS = 11, 8
@@ -99,6 +99,26 @@ def test_render_marked_miss_path_draws_red_border(tmp_path):
     # (drawChessboardCorners 的检测结果叠加同理不做逐像素相等断言)
     assert _is_reddish(drawn[0]).all()  # 顶边框整行
     assert drawn.shape[:2] == (IMG_H, IMG_W)
+
+
+def test_render_marked_with_ascii_note(tmp_path):
+    """可选 ASCII 短标(note):副本正常生成、尺寸与原图一致、源文件不动。
+
+    note 用于 SB 失败帧的逐帧证据(如 "SB MISS - CLASSIC FALLBACK");
+    默认不传 note 时走的还是原来的路径(由上方既有 render_marked 测试锁定)。
+    """
+    src = _write_fake_image(tmp_path / "src.jpg", seed=5)
+    before = src.read_bytes()
+    out = tmp_path / "out_note.jpg"
+
+    result = render_marked(src, _grid_uv(), COLS, ROWS, out, quality=90,
+                           note="SB MISS - CLASSIC FALLBACK")
+
+    assert result == out and out.is_file() and out.stat().st_size > 0
+    drawn = cv2.imread(str(out))
+    assert drawn is not None
+    assert drawn.shape[:2] == (IMG_H, IMG_W)  # 副本不改变原图分辨率
+    assert src.read_bytes() == before          # 源文件自始至终不被改写
 
 
 def test_render_marked_rejects_unreadable_source(tmp_path):
@@ -189,6 +209,67 @@ def test_render_all_uses_configured_jpeg_quality(tmp_path):
     saved = json.loads(
         (run_dir / "marked_copies" / "summary.json").read_text(encoding="utf-8"))
     assert saved["jpeg_quality"] == 42
+
+
+# ------------------------------------------- SB 失败帧独立产物 render_sb_failed_review
+
+def test_render_sb_failed_review_two_frames(tmp_path, make_chessboard_image):
+    """2 帧失败清单(1 帧 classic 兜底带角点 + 1 帧两法都未检出):
+
+    original/ 存 2 张原图副本(保持原文件名,逐字节一致);marked/ 存 2 张
+    标记图(兜底帧 = 角点叠加 + ASCII 短标,双失败帧 = MISS 红框);
+    summary.json 计数正确且含通俗中文说明;源文件一张都不被改写。
+    """
+    # 兜底帧:合成棋盘当原图,夹具自带的真值角点当 classic 兜底角点
+    board_img, truth_uv, _sq = make_chessboard_image()
+    fb_src = tmp_path / "src" / "fb_frame.jpg"
+    fb_src.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(fb_src), board_img):
+        raise RuntimeError("测试夹具写棋盘原图失败")
+    # 双失败帧:随机噪声图
+    miss_src = _write_fake_image(tmp_path / "src" / "miss_frame.jpg", seed=6)
+    before = {p.name: p.read_bytes() for p in (fb_src, miss_src)}
+
+    run_dir = tmp_path / "corners" / "run_t"
+    frames = [
+        {"image_id": "fb_frame", "path": str(fb_src), "uv_or_none": truth_uv},
+        {"image_id": "miss_frame", "path": str(miss_src), "uv_or_none": None},
+    ]
+    summary = render_sb_failed_review(run_dir, frames, BOARD, quality=90)
+
+    review = run_dir / "review_sb_failed"
+    # 原图副本:保持原文件名与格式,内容逐字节一致(只读复制)
+    assert sorted(p.name for p in (review / "original").iterdir()) == \
+        ["fb_frame.jpg", "miss_frame.jpg"]
+    assert (review / "original" / "fb_frame.jpg").read_bytes() == before["fb_frame.jpg"]
+    assert (review / "original" / "miss_frame.jpg").read_bytes() == before["miss_frame.jpg"]
+    # 标记图:两张都在,尺寸与各自原图一致
+    fb_marked = cv2.imread(str(review / "marked" / "fb_frame.jpg"))
+    miss_marked = cv2.imread(str(review / "marked" / "miss_frame.jpg"))
+    assert fb_marked is not None and fb_marked.shape[:2] == board_img.shape[:2]
+    assert miss_marked is not None and miss_marked.shape[:2] == (IMG_H, IMG_W)
+    # 双失败帧 = MISS 红框(顶边整行接近纯红);兜底帧 = 角点叠加(非红框)
+    assert _is_reddish(miss_marked[0]).all()
+    assert not _is_reddish(fb_marked[0]).all()
+    # summary 计数:总数 2、classic 兜底 1、两法都未检出 1,说明是通俗中文
+    assert summary["n_total"] == 2
+    assert summary["n_classic_fallback"] == 1 and summary["n_both_missed"] == 1
+    saved = json.loads((review / "summary.json").read_text(encoding="utf-8"))
+    assert saved["n_total"] == 2 and saved["n_classic_fallback"] == 1
+    assert "兜底" in saved["note"] and "calib corners" in saved["note"]
+    # 源文件自始至终不被改写(真实性承诺 T-05-01)
+    assert fb_src.read_bytes() == before["fb_frame.jpg"]
+    assert miss_src.read_bytes() == before["miss_frame.jpg"]
+
+
+def test_render_sb_failed_review_empty_list_creates_nothing(tmp_path):
+    """空失败清单:返回 None,且不创建 review_sb_failed 目录(没有失败帧不建目录)。"""
+    run_dir = tmp_path / "corners" / "run_t"
+
+    result = render_sb_failed_review(run_dir, [], BOARD, quality=90)
+
+    assert result is None
+    assert not (run_dir / "review_sb_failed").exists()
 
 
 # ---------------------------------------------------------------- 汇总拼图 mosaic
