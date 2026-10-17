@@ -59,6 +59,12 @@ Plan: 1 of 5
 
 - None
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 261017-mmj | 角点检测最终方案落地:SB 为主、classic 兜底 + 失败帧独立产物 + 清理中间实验产物 | 2026-10-17 | dcd5abe | [261017-mmj-corners-sb-classic-fallback](./quick/261017-mmj-corners-sb-classic-fallback/) |
+
 ### Research Flags
 
 - Phase 3: FIM 边际化数学需与 stdDeviationsIntrinsics 交叉验证(MEDIUM 置信设计点)
@@ -66,6 +72,6 @@ Plan: 1 of 5
 
 ## Session Continuity
 
-- **Last action:** Phase 1 context gathered (2026-10-16) — 4 个话题讨论完毕,CONTEXT.md 已提交
-- **Next action:** `/gsd-plan-phase 1`
+- **Last action:** 快任务 261017-mmj 完成(2026-10-17)— 角点最终方案落地:SB 为主、classic 兜底,新 run_20261017_083337 705/705,失败帧独立产物齐备,中间实验产物已清理
+- **Next action:** 用户人工验收:D-05 四项(01-HUMAN-UAT.md)+ 快任务 41 张 review_sb_failed/marked 抽查;验收通过后关闭阶段一
 - **Notes for next session:** 先读 .planning/phases/01-data-foundation-minimal-calibration/01-CONTEXT.md(决定 D-01~D-13);首日待办:uv lock + 冒烟测试 opencv/numpy/scipy 三件套;数据只读已就位(80 姿态×8 连拍 + test 65 张)
