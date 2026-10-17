@@ -45,6 +45,18 @@ _CLASSIC_FLAG_VALUES = {
 }
 
 
+def _classic_flag_mask(cfg: CornersConfig) -> int:
+    """把配置里的经典检测器选项名按位或成 cv2 常量掩码(选项翻译的唯一来源)。
+
+    可见性探针与棋盘框回退查找都调它——同一颗检测器、同一份选项,
+    同一帧内口径一致(D-12:换数据集只改配置不改代码)。
+    """
+    mask = 0
+    for name in cfg.classic_flags:
+        mask |= _CLASSIC_FLAG_VALUES[name]
+    return mask
+
+
 def exposure_clip(gray: np.ndarray) -> tuple[float, float]:
     """曝光裁剪比例:返回 (高光裁剪占比, 阴影裁剪占比)。
 
@@ -59,17 +71,17 @@ def exposure_clip(gray: np.ndarray) -> tuple[float, float]:
 
 
 def board_roi(gray: np.ndarray, cols: int, rows: int,
-              corners_found: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray | None, bool]:
+              corners_found: np.ndarray | None = None,
+              cfg: CornersConfig | None = None) -> tuple[np.ndarray, np.ndarray | None, bool]:
     """定位棋盘检测框,供模糊度在棋盘区域内计算(比例化的第一层)。
 
     查找顺序:
     1. 调用方已带进一次成功检测的角点(corners_found,复用可见性探针的结果,
        免去同一条检测在同一家检测器上白跑第二遍);
-    2. 快速预筛(选项 FAST_CHECK:先快速判断图里"像不像有棋盘",
-       像才肯花完整查找的时间——只作预筛加速,不作判决);
-    3. 完整查找(自适应阈值 + 亮度归一化)。
-    都失败:回退用整张图,roi_found=False(此时没有角点,归一值无从谈起,
-    由调用方把归一值记为"缺失")。
+    2. 按配置选项完整查找一次(cfg 不传时用配置默认值兜底;fast_check 若
+       在配置里自然已并入选项掩码,不单独再跑一遍);
+    3. 都失败:回退用整张图,roi_found=False(此时没有角点,归一值无从谈起,
+       由调用方把归一值记为"缺失")。
 
     返回 (框内图像区域, 检出的角点或 None, 是否成功框出棋盘)。
     """
@@ -77,12 +89,10 @@ def board_roi(gray: np.ndarray, cols: int, rows: int,
     if corners_found is not None:
         corners = np.asarray(corners_found, dtype=np.float64).reshape(-1, 2)
     else:
-        # 快速预筛:失败不代表真没有,必须回退完整查找再试一次
-        found, raw = cv2.findChessboardCorners(gray, (cols, rows), cv2.CALIB_CB_FAST_CHECK)
-        if not found:
-            found, raw = cv2.findChessboardCorners(
-                gray, (cols, rows),
-                cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE)
+        # 单次完整查找,选项与探针同一来源(_classic_flag_mask);
+        # 同一颗检测器、同一份选项在同一张图上跑第二遍必然同样结果,不白跑
+        mask = _classic_flag_mask(cfg if cfg is not None else CornersConfig())
+        found, raw = cv2.findChessboardCorners(gray, (cols, rows), mask)
         if found:
             corners = raw.reshape(-1, 2).astype(np.float64)
 
@@ -113,9 +123,7 @@ def visibility_probe(gray: np.ndarray, cols: int, rows: int, cfg: CornersConfig)
         classic_corners / sb_corners   各自的原始角点(未精化未整理,体检内部复用,
                              不入盘;键名带 corners 是为了与产物里的坐标区分)
     """
-    classic_flags = 0
-    for name in cfg.classic_flags:
-        classic_flags |= _CLASSIC_FLAG_VALUES[name]
+    classic_flags = _classic_flag_mask(cfg)
 
     ok_c, raw_c = cv2.findChessboardCorners(gray, (cols, rows), classic_flags)
     ok_s, raw_s = cv2.findChessboardCornersSB(gray, (cols, rows), cfg.sb_flags)
@@ -149,7 +157,8 @@ def compute_metrics(gray: np.ndarray, cols: int, rows: int, cfg: CornersConfig) 
     返回键:
         blur_raw        棋盘框内拉普拉斯方差(原始值,越小越糊)
         blur_norm       blur_raw / 方格像素边长²(归一值,跨拍摄距离可比;
-                        没框出棋盘时为 NaN——缺失,判定阶段会跳过它)
+                        没框出棋盘时为 NaN——缺失,判定阶段会跳过它;
+                        classic 未检出而 SB 检出时,棋盘框由 SB 角点定位)
         expo_hi/lo      高光/阴影裁剪占比(全图)
         classic_ok/sb_ok          双检测器各自成败
         box_area_ratio  棋盘检测框面积占比
@@ -159,10 +168,14 @@ def compute_metrics(gray: np.ndarray, cols: int, rows: int, cfg: CornersConfig) 
     """
     probe = visibility_probe(gray, cols, rows, cfg)
 
-    # 模糊度:复用探针的检测结果定位棋盘框,免得同一颗检测器白跑第二遍
+    # 模糊度:复用探针的检测结果定位棋盘框,免得同一颗检测器白跑第二遍。
+    # classic 优先;classic 未检出而 SB 检出时用 SB 角点——模糊度只在棋盘
+    # 框内算,不关心角点来自哪颗检测器,口径与 box_area_ratio 的
+    # "谁检出用谁"对齐
+    corners_in = (probe["classic_corners"] if probe["classic_ok"]
+                  else probe["sb_corners"] if probe["sb_ok"] else None)
     roi, corners, roi_found = board_roi(
-        gray, cols, rows,
-        corners_found=probe["classic_corners"] if probe["classic_ok"] else None)
+        gray, cols, rows, corners_found=corners_in, cfg=cfg)
     blur_raw = float(cv2.Laplacian(roi, cv2.CV_64F).var())
     if corners is not None:
         sq_px = estimate_sq_px(corners, cols, rows)

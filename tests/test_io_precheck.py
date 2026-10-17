@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 
+import cv2
 import numpy as np
 
 from calib.io.config import CornersConfig, PrecheckConfig
@@ -101,6 +102,65 @@ def test_board_roi_falls_back_to_full_image_on_noise():
     assert found is False
     assert corners is None
     assert roi.shape == noise.shape  # 回退整张图
+
+
+def test_board_roi_fallback_uses_configured_flags_and_no_double_run(monkeypatch):
+    """WR-04 锁定:回退查找的检测器选项来自配置(不再是写死的
+    ADAPTIVE+NORMALIZE),classic 探针失败后也不再白跑第二遍、第三遍。"""
+    calls: list[int] = []
+    original = cv2.findChessboardCorners
+
+    def spy(gray, pattern, flags):
+        calls.append(int(flags))
+        return original(gray, pattern, flags)
+
+    monkeypatch.setattr(cv2, "findChessboardCorners", spy)
+
+    rng = np.random.default_rng(7)
+    noise = rng.integers(0, 256, size=(240, 320), dtype=np.uint8)
+    m = compute_metrics(noise, COLS, ROWS,
+                        CornersConfig(classic_flags=("fast_check",)))
+
+    # 每一次调用的 flags 都恰等于 FAST_CHECK:探针与回退同一来源
+    # (旧代码回退处会冒出 ADAPTIVE+NORMALIZE 这个第三种取值)
+    assert calls and all(f == cv2.CALIB_CB_FAST_CHECK for f in calls)
+    # classic 总调用恰 2 次:探针 1 + 回退 1(旧代码是 3 次:
+    # 探针 + FAST_CHECK 预筛 + 硬编码完整查找,同一颗检测器白跑)
+    assert len(calls) == 2
+    # 噪声图必然全部失败:回退整图、归一值缺失的行为不变
+    assert m["roi_found"] is False
+    assert np.isnan(m["blur_norm"])
+
+
+def test_compute_metrics_feeds_sb_corners_when_classic_fails(
+        make_chessboard_image, monkeypatch):
+    """WR-04 锁定:classic 未检出而 SB 检出时,SB 角点喂给棋盘框定位,
+    模糊度通道不再失明(roi_found=True、blur_norm 有限),且不回退重跑
+    classic(角点确实来自 SB 喂入)。"""
+    img, truth_uv, _sq = make_chessboard_image(square_px=20.0)
+
+    def fake_probe(gray, cols, rows, cfg):
+        # 假探针:classic 失败、SB 检出并带真值角点网格
+        return {"classic_ok": False, "sb_ok": True,
+                "box_area_ratio": 0.3, "corners_count_ok": True,
+                "classic_corners": None, "sb_corners": truth_uv}
+
+    monkeypatch.setattr("calib.io.precheck.visibility_probe", fake_probe)
+    calls: list[int] = []
+    original = cv2.findChessboardCorners
+
+    def spy(gray, pattern, flags):
+        calls.append(int(flags))
+        return original(gray, pattern, flags)
+
+    monkeypatch.setattr(cv2, "findChessboardCorners", spy)
+
+    m = compute_metrics(img, COLS, ROWS, CORNERS_CFG)
+
+    assert calls == []  # classic 一次都没被调:角点来自 SB 喂入,无回退重跑
+    assert m["roi_found"] is True
+    assert np.isfinite(m["sq_px"])
+    assert np.isfinite(m["blur_norm"]) and not np.isnan(m["blur_norm"])
 
 
 def test_compute_metrics_returns_all_documented_keys(make_chessboard_image):
