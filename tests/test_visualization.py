@@ -370,6 +370,149 @@ def test_render_flagged_review_empty_list_creates_nothing(tmp_path):
     assert not (run_dir / "review_suspects").exists()
 
 
+# ------------------------------- 复核文件夹:清单组装(体检存疑 / 连拍点名)
+#
+# 两个帮手只做"筛帧 + 拼中文原因",不碰文件系统(渲染交给
+# render_flagged_review),所以这里直接用假数据锁行为,不需要跑命令行。
+
+def _fake_arrays(n: int, detected: dict[str, list[bool]],
+                 uv=None) -> dict:
+    """造两颗检测器的假角点数组:uv 全 NaN,检出帧那几行填规则网格。
+
+    形状与 corners 命令内部的 arrays 一致(每颗检测器一个字典,
+    uv 是 (张数, 内角点数, 2),detected 是布尔数组)。
+    """
+    uv = uv if uv is not None else _grid_uv()
+    arrays = {}
+    for detector in ("classic", "sb"):
+        slot_uv = np.full((n, COLS * ROWS, 2), np.nan)
+        flags = np.zeros(n, dtype=bool)
+        for i, ok in enumerate(detected[detector]):
+            if ok:
+                slot_uv[i] = uv
+                flags[i] = True
+        arrays[detector] = {"uv": slot_uv, "detected": flags}
+    return arrays
+
+
+def test_suspect_review_frames_assembly():
+    """存疑清单组装:只收 suspect 帧;info 保留原始记号 + 中文翻译
+    (四种来源记号全覆盖)+ 三个指标原值;角点按 detected 取或 None;
+    note 是 ASCII 短标(图上画不了中文)。"""
+    from calib.cli.main import _suspect_review_frames
+
+    images = [
+        {"image_id": "img1", "path": "p1.jpg", "split": "train",
+         "pose_id": "poseA", "repeat_idx": 0,
+         "precheck": {"verdict": "suspect", "blur_norm": 0.12,
+                      "expo_hi": 0.001, "expo_lo": 0.002,
+                      "suspect_sources": ["pose_relative:blur",
+                                          "global:exposure"]}},
+        {"image_id": "img2", "path": "p2.jpg", "split": "train",
+         "pose_id": "poseA", "repeat_idx": 1,
+         "precheck": {"verdict": "suspect", "blur_norm": 0.34,
+                      "expo_hi": 0.003, "expo_lo": 0.004,
+                      "suspect_sources": ["pose_relative:exposure",
+                                          "global:blur"]}},
+        {"image_id": "img3", "path": "p3.jpg", "split": "train",
+         "pose_id": "poseB", "repeat_idx": 0,
+         "precheck": {"verdict": "ok", "blur_norm": 1.0, "expo_hi": 0.0,
+                      "expo_lo": 0.0, "suspect_sources": []}},
+    ]
+    # img2 的 classic 未检出(角点给 None);sb 检出 True —— 正是
+    # "classic 兜底帧"的情形:sb 槽位的 detected 天然含兜底,不再特殊处理
+    arrays = _fake_arrays(3, detected={"classic": [True, False, True],
+                                       "sb": [True, True, True]})
+    uv = _grid_uv()
+
+    frames = _suspect_review_frames(images, arrays)
+
+    # 只收 2 张存疑帧,正常帧不进清单;顺序照数据清单
+    assert [f["image_id"] for f in frames] == ["img1", "img2"]
+    f1, f2 = frames
+    # 原始记号原样保留(可对账 manifest);中文翻译四种记号全覆盖
+    assert f1["info"]["suspect_sources"] == ["pose_relative:blur",
+                                             "global:exposure"]
+    assert f1["info"]["reason"] == \
+        "存疑原因:同姿态相对比较:模糊度、全局线兜底:曝光"
+    assert f2["info"]["reason"] == \
+        "存疑原因:同姿态相对比较:曝光、全局线兜底:模糊度"
+    # 三个体检指标数值原样照抄,复核时不翻 manifest
+    assert f1["info"]["metrics"] == {"blur_norm": 0.12, "expo_hi": 0.001,
+                                     "expo_lo": 0.002}
+    assert f2["info"]["metrics"]["blur_norm"] == 0.34
+    # 姿态/连拍序号/划分带齐
+    assert f2["info"]["pose_id"] == "poseA" and f2["info"]["repeat_idx"] == 1
+    assert f1["info"]["split"] == "train"
+    # 角点:classic 检出给角点、未检出给 None;sb 路线(含兜底)都给角点
+    assert np.array_equal(f1["uv_classic"], uv)
+    assert f2["uv_classic"] is None
+    assert np.array_equal(f1["uv_sb"], uv) and np.array_equal(f2["uv_sb"], uv)
+    # note 是 ASCII 短标(多来源 "+" 连接、前缀 "SUS ")
+    assert f1["note"] == "SUS BLUR+EXPO"
+    assert f2["note"] == "SUS EXPO+BLUR"
+    # 原图路径原样带出(渲染函数要靠它复制原图)
+    assert f1["path"] == "p1.jpg"
+
+
+def test_burst_review_frames_assembly():
+    """连拍点名清单组装:两颗检测器点名并集去重、按清单顺序;
+    每帧 flagged_by 列出点名者;原因串带波动中位数/最大值与容差的
+    数值和超限结论(超限与否按数值现算);未点名的帧不进清单。"""
+    from calib.cli.main import _burst_review_frames
+
+    images = [
+        {"image_id": "a1", "path": "a1.jpg", "split": "train",
+         "pose_id": "poseA", "repeat_idx": 0},
+        {"image_id": "a2", "path": "a2.jpg", "split": "train",
+         "pose_id": "poseA", "repeat_idx": 1},
+        {"image_id": "a3", "path": "a3.jpg", "split": "train",
+         "pose_id": "poseA", "repeat_idx": 2},
+        {"image_id": "a4", "path": "a4.jpg", "split": "train",
+         "pose_id": "poseB", "repeat_idx": 0},
+    ]
+    # classic 点名 [a1, a2],sb 点名 [a2, a3]:并集 [a1, a2, a3]
+    # 两颗检测器的数值都是"中位数超限、最大值未超"
+    burst_failures = [
+        {"detector": "classic", "split": "train", "pose_id": "poseA",
+         "suspect_image_ids": ["a1", "a2"],
+         "spread_median_px": 4.5, "spread_max_px": 5.0,
+         "threshold_px": [2.0, 12.0]},
+        {"detector": "sb", "split": "train", "pose_id": "poseA",
+         "suspect_image_ids": ["a2", "a3"],
+         "spread_median_px": 4.6, "spread_max_px": 5.2,
+         "threshold_px": [2.1, 12.5]},
+    ]
+    arrays = _fake_arrays(4, detected={"classic": [True] * 4,
+                                       "sb": [True] * 4})
+
+    frames = _burst_review_frames(images, arrays, burst_failures)
+
+    # 并集去重、按数据清单顺序;未点名的 a4 不进清单
+    assert [f["image_id"] for f in frames] == ["a1", "a2", "a3"]
+    by_id = {f["image_id"]: f for f in frames}
+    # a2 被两颗检测器同时点名:只保留一条,点名者列全
+    assert by_id["a2"]["info"]["flagged_by"] == ["classic", "sb"]
+    assert by_id["a1"]["info"]["flagged_by"] == ["classic"]
+    assert by_id["a3"]["info"]["flagged_by"] == ["sb"]
+    # 每帧原因按检测器各一条,数值与超限结论齐全(中位超限、最大未超)
+    reason_c = by_id["a1"]["info"]["reason"]["classic"]
+    assert "4.50px" in reason_c and "2.00px" in reason_c and "超限" in reason_c
+    assert "5.00px" in reason_c and "12.00px" in reason_c and "未超" in reason_c
+    assert "连拍断言失败" in reason_c
+    reason_s = by_id["a3"]["info"]["reason"]["sb"]
+    assert "4.60px" in reason_s and "2.10px" in reason_s and "超限" in reason_s
+    # a2 的原因两颗检测器都有,各带各的数值
+    assert set(by_id["a2"]["info"]["reason"]) == {"classic", "sb"}
+    # 姿态/连拍序号/划分带齐;note 固定 BURST FLAG;角点照 detected 给
+    assert by_id["a1"]["info"]["pose_id"] == "poseA"
+    assert by_id["a1"]["info"]["repeat_idx"] == 0
+    assert by_id["a1"]["info"]["split"] == "train"
+    assert all(f["note"] == "BURST FLAG" for f in frames)
+    assert all(f["uv_classic"] is not None and f["uv_sb"] is not None
+               for f in frames)
+
+
 # ---------------------------------------------------------------- 汇总拼图 mosaic
 
 def test_build_mosaic_size_and_file(tmp_path):
