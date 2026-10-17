@@ -533,7 +533,9 @@ def test_build_mosaic_size_and_file(tmp_path):
 
 def _mosaic_fixtures(tmp_path: Path):
     """假数据场景:poseA 两张(img1 正常 / img2 存疑)+ poseB 一张(img3 正常)
-    + test 一张(img4 正常),全部检出,存疑原图副本就位。返回 (run_dir, 清单路径)。"""
+    + test 一张(img4 正常),全部检出。按真实流水线布局构造:数据清单与
+    存疑原图副本都在 ingest 运行目录,corners 运行目录只有角点产物
+    (suspect_originals 从不在 corners 目录下)。返回 (corners 运行目录, 清单路径)。"""
     paths = {f"img{i}": _write_fake_image(tmp_path / "src" / f"img{i}.jpg",
                                           seed=20 + i, width=160, height=120)
              for i in range(1, 5)}
@@ -555,23 +557,28 @@ def _mosaic_fixtures(tmp_path: Path):
          "precheck": {"verdict": "ok", "blur_norm": 0.9, "expo_hi": 0.0,
                       "expo_lo": 0.0, "suspect_sources": []}},
     ]
-    manifest_path = _write_fake_manifest(images, tmp_path / "manifest.json")
+    # ingest 运行目录:数据清单 + 存疑原图副本(入库体检写的,就在这里)
+    ingest_run = tmp_path / "ingest" / "run_t"
+    ingest_run.mkdir(parents=True)
+    manifest_path = _write_fake_manifest(images, ingest_run / "manifest.json")
+    _write_fake_image(ingest_run / "suspect_originals" / "img2.jpg", seed=99,
+                      width=160, height=120)
 
     run_dir = tmp_path / "corners" / "run_t"
     uv = _grid_uv(160, 120)
+    # 血缘里记上游清单路径:mosaic 按它反推 ingest 运行目录(真实布局可测)
+    lineage = {"round_id": "t",
+               "upstream": {"manifest.json": {"path": str(manifest_path)}}}
     for detector in ("classic", "sb"):
         save_corners(run_dir, "train", detector, image_ids=["img1", "img2", "img3"],
                      uv=np.stack([uv, uv, uv]),
                      sq_px=np.full(3, 15.0), win_size=np.full(3, 4.0),
                      detected=np.array([True, True, True]),
-                     lineage={"round_id": "t"})
+                     lineage=lineage)
         save_corners(run_dir, "test", detector, image_ids=["img4"],
                      uv=uv[np.newaxis], sq_px=np.array([15.0]),
                      win_size=np.array([4.0]), detected=np.array([True]),
-                     lineage={"round_id": "t"})
-    # 存疑原图副本(suspect 拼图优先看这里的未标记原貌)
-    _write_fake_image(run_dir / "suspect_originals" / "img2.jpg", seed=99,
-                      width=160, height=120)
+                     lineage=lineage)
     return run_dir, manifest_path
 
 
@@ -635,3 +642,38 @@ def test_overview_fills_all_when_worst_n_covers_everything(tmp_path):
         (run_dir / "mosaic" / "mosaic_index.json").read_text(encoding="utf-8"))
     assert sorted(c["image_id"] for c in index["overview"]["cells"]) == \
         ["img1", "img2", "img3", "img4"]
+
+
+def test_suspect_mosaic_uses_ingest_copy_when_corners_dir_has_none(tmp_path):
+    """WR-01 回归:corners 运行目录没有 suspect_originals(真实流水线从来
+    如此——副本由入库体检写在 ingest 目录),存疑拼图仍取到 ingest 副本:
+    不显式传 ingest_run_dir,靠角点产物血缘反推定位,逐格索引的 source
+    指向 ingest 副本,证明没有退回原始路径。"""
+    run_dir, manifest_path = _mosaic_fixtures(tmp_path)
+
+    write_mosaics(run_dir, manifest_path, CalibrationConfig())
+
+    # 真实布局:corners 运行目录下确实没有 suspect_originals
+    assert not (run_dir / "suspect_originals").exists()
+    index = json.loads(
+        (run_dir / "mosaic" / "mosaic_index.json").read_text(encoding="utf-8"))
+    cells = {c["image_id"]: c for c in index["suspect"]["cells"]}
+    expected_copy = str(tmp_path / "ingest" / "run_t" / "suspect_originals" / "img2.jpg")
+    assert cells["img2"]["source"] == expected_copy
+
+
+def test_suspect_mosaic_falls_back_to_original_path_when_copy_missing(tmp_path):
+    """WR-01 退回分支:ingest 目录里副本也缺失(如被手工清理)时,
+    source 等于清单里的原始路径,拼图照常产出、不中断。"""
+    run_dir, manifest_path = _mosaic_fixtures(tmp_path)
+    (tmp_path / "ingest" / "run_t" / "suspect_originals" / "img2.jpg").unlink()
+
+    write_mosaics(run_dir, manifest_path, CalibrationConfig())
+
+    index = json.loads(
+        (run_dir / "mosaic" / "mosaic_index.json").read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original = next(img["path"] for img in manifest["images"]
+                    if img["image_id"] == "img2")
+    cells = {c["image_id"]: c for c in index["suspect"]["cells"]}
+    assert cells["img2"]["source"] == original

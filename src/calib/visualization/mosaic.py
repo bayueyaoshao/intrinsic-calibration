@@ -8,7 +8,8 @@
 - 总览拼图 overview_mosaic.png:每姿态第 1 张 + 模糊度最差 N 张 + 全部存疑,
   覆盖"常态、最糟、可疑"三种画面;
 - 存疑拼图 suspect_mosaic.png:只拼体检判为存疑的照片,并且看的是
-  suspect_originals/ 里的**未加标记原貌**(与角点标记副本互相印证)。
+  入库(ingest)轮次运行目录 suspect_originals/ 里的**未加标记原貌**
+  (副本由入库体检写入;与角点标记副本互相印证)。
 
 逐格清单 mosaic_index.json 记录格号 → 照片编号/标签/全部指标值——
 拼图上认出哪格不对劲,按格号来这里查编号,再去单张副本放大细看。
@@ -215,31 +216,66 @@ def overview_mosaic(corners_run_dir: Path | str,
     return {"path": None, "n_cells": 0, "cells": []}
 
 
+def _ingest_run_dir_for(corners_run_dir: Path,
+                        ingest_run_dir: Path | None) -> Path:
+    """定位存疑原图副本所在的入库(ingest)运行目录。
+
+    优先级:
+    1. 显式传入的 ingest_run_dir(CLI 走这条路——corners 命令本来就握着
+       本轮消费的 ingest 运行目录,直白且不依赖文件);
+    2. 从角点产物的血缘反推:读 corners_train_classic.meta.json 里记录的
+       上游清单路径,清单所在目录即 ingest 运行目录——与 cli/main.py 的
+       _manifest_path_for 同款先例,血缘链闭合,之后又跑过新的 ingest
+       也不串轮;
+    3. 都没有:退回 corners 运行目录本身(旧行为兜底;副本缺失时
+       suspect_mosaic 本来就有"退回原始路径"分支,不会崩)。
+    """
+    if ingest_run_dir is not None:
+        return Path(ingest_run_dir)
+    meta_path = corners_run_dir / "corners_train_classic.meta.json"
+    if meta_path.is_file():
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        recorded = (meta.get("lineage", {}).get("upstream", {})
+                    .get("manifest.json", {}).get("path"))
+        if recorded and Path(recorded).is_file():
+            return Path(recorded).parent
+    return corners_run_dir
+
+
 def suspect_mosaic(corners_run_dir: Path | str,
                    manifest: dict,
-                   cfg: CalibrationConfig) -> dict:
-    """存疑拼图:只拼体检存疑的照片,看 suspect_originals/ 的未标记原貌。
+                   cfg: CalibrationConfig,
+                   ingest_run_dir: Path | None = None) -> dict:
+    """存疑拼图:只拼体检存疑的照片,看 ingest 目录 suspect_originals/ 的未标记原貌。
 
-    写 suspect_mosaic.png;没有存疑照片时不产出文件(返回 n_cells=0),
-    mosaic_index.json 里如实记"无存疑"。
+    ingest_run_dir 不传时按 _ingest_run_dir_for 的优先级(显式参数 >
+    角点产物血缘反推 > corners 目录兜底)自行定位。写 suspect_mosaic.png;
+    没有存疑照片时不产出文件(返回 n_cells=0),mosaic_index.json 里如实记"无存疑"。
     """
     corners_run_dir = Path(corners_run_dir)
     images: list[dict] = _as_manifest(manifest)["images"]
     mcfg = cfg.visualization.mosaic
     detected = _detected_map(corners_run_dir, "classic")
+    ingest_run_dir = _ingest_run_dir_for(corners_run_dir, ingest_run_dir)
 
     suspects = [img for img in images
                 if img.get("precheck", {}).get("verdict") == "suspect"]
     items, cells = [], []
     for img in suspects:
-        # 优先用存疑原图副本(未加标记的原貌,拼图缩略图看不清细节才存的);
+        # 优先用存疑原图副本(未加标记的原貌,入库体检写在 ingest 运行目录的
+        # suspect_originals/ 下,拼图缩略图看不清细节才存的);
         # 副本不在时退回原始路径,不让拼图中断
-        original_copy = corners_run_dir / "suspect_originals" / f"{img['image_id']}.jpg"
-        image_path = original_copy if original_copy.is_file() else img["path"]
+        original_copy = ingest_run_dir / "suspect_originals" / f"{img['image_id']}.jpg"
+        image_path = original_copy if original_copy.is_file() else Path(img["path"])
         label = _cell_label(img, detected.get(img["image_id"], False))
         items.append((image_path, label))
-        cells.append(_cell_record(len(cells), img, label,
-                                  detected.get(img["image_id"], False)))
+        record = _cell_record(len(cells), img, label,
+                              detected.get(img["image_id"], False))
+        # source 记这一格实际采用的图片来源(ingest 副本,或副本缺失时退回的
+        # 原始路径)——逐格可对账,回归测试也能直接断言,不用肉眼比拼图像素
+        record["source"] = str(image_path)
+        cells.append(record)
     out_path = corners_run_dir / "mosaic" / "suspect_mosaic.png"
     if items:
         build_mosaic(items, mcfg.thumb_width, mcfg.cols, out_path)
@@ -249,19 +285,27 @@ def suspect_mosaic(corners_run_dir: Path | str,
 
 def write_mosaics(corners_run_dir: Path | str,
                   manifest: dict,
-                  cfg: CalibrationConfig) -> dict:
+                  cfg: CalibrationConfig,
+                  ingest_run_dir: Path | None = None) -> dict:
     """两个拼图入口 + 逐格索引一次写齐(corners 命令的收尾调用)。
 
-    写 mosaic/mosaic_index.json(格号 → image_id/标签/指标值)并返回
-    控制台汇总用的一行信息。拼图只是索引,不是全量副本的替代(D-06)。
+    ingest_run_dir 是存疑原图副本所在的入库运行目录,不传时按血缘反推
+    (见 _ingest_run_dir_for)。写 mosaic/mosaic_index.json
+    (格号 → image_id/标签/指标值)并返回控制台汇总用的一行信息。
+    拼图只是索引,不是全量副本的替代(D-06)。
     """
     corners_run_dir = Path(corners_run_dir)
+    resolved_ingest = _ingest_run_dir_for(corners_run_dir, ingest_run_dir)
     overview = overview_mosaic(corners_run_dir, manifest, cfg)
-    suspect = suspect_mosaic(corners_run_dir, manifest, cfg)
+    suspect = suspect_mosaic(corners_run_dir, manifest, cfg,
+                             ingest_run_dir=resolved_ingest)
 
     index = {
         "note": "拼图只是索引,不是替代(D-06):在这里认格子,去 marked_copies/"
-                "看单张标记副本,存疑照片的未标记原貌在 suspect_originals/。"
+                "看单张标记副本。存疑照片的未标记原貌在入库(ingest)轮次运行"
+                "目录的 suspect_originals/ 下(角点轮次目录里没有这个文件夹);"
+                "存疑格的 source 键记该格实际采用的图片来源"
+                "(ingest 副本,或副本缺失时退回的原始路径)。"
                 "标签为 ASCII(pose_id 前 8 字符#连拍序号 判定缩写),"
                 "判定缩写:OK=正常,SUS=体检存疑,MISS=经典检测器未检出。",
         "overview": {"n_cells": overview["n_cells"], "path": overview["path"],

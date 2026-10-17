@@ -576,8 +576,9 @@ def corners() -> None:
              "容差对比结论,数值与 detection_summary.json 的 burst_check 一致。",
         extra={"n_poses": len(burst_poses), "flagged_poses": burst_poses})
 
-    # 汇总拼图(D-06):总览 + 存疑两张 + 逐格索引,只是索引不是替代
-    mosaic_info = write_mosaics(out_dir, manifest, cfg)
+    # 汇总拼图(D-06):总览 + 存疑两张 + 逐格索引,只是索引不是替代;
+    # 存疑原图副本在 ingest 运行目录,显式传入(不靠 mosaic 内部反推)
+    mosaic_info = write_mosaics(out_dir, manifest, cfg, ingest_run_dir=ingest_run)
 
     # 中文汇总:两颗检测器成功率对比表 + 方格/窗口量级 + 断言结论 + 产物位置
     typer.echo("找角点完成,4 份角点文件与质量摘要已写盘。")
