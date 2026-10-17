@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-17T12:40:00.000Z"
+last_updated: "2026-10-17T15:13:51.616Z"
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 5
+  total_plans: 11
   completed_plans: 5
   percent: 17
 ---
@@ -22,11 +22,11 @@ progress:
 
 ## Current Position
 
-Phase: 02 — DISCUSSED (context ready)
+Phase: 02 — PLANNED (ready to execute)
 
 - **Phase:** 2 (模型层 M1–M4 + 双求解后端 + 产物血缘)
-- **Plan:** None yet — next step `/gsd-plan-phase 2`
-- **Status:** 阶段二讨论完成(2026-10-17,02-CONTEXT.md 就绪);开工前置一个 quick task:修阶段一遗留 CR-01 + WR-01~04
+- **Plan:** 6 个计划(02-01~02-06,5 个执行波)— next step `/gsd-execute-phase 2`
+- **Status:** Ready to execute(计划经校验器两轮:0 阻断,警告已修订闭环)
 - **Progress:** `[█░░░░░░░░░] 1/6 phases`
 
 ## Performance Metrics
@@ -35,7 +35,7 @@ Phase: 02 — DISCUSSED (context ready)
 |--------|-------|
 | Phases complete | 1/6 |
 | Requirements shipped | 4/32 |
-| Plans this phase | 0 |
+| Plans this phase | 6(planned) |
 | Blocked items | 0 |
 
 ## Accumulated Context
@@ -73,6 +73,6 @@ Phase: 02 — DISCUSSED (context ready)
 
 ## Session Continuity
 
-- **Last action:** 阶段二开工前置完成(2026-10-17)— 讨论决策落盘(02-CONTEXT.md)+ 遗留修复 quick task(261017-trb:CR-01+WR-01~04 修净,106 测试全绿)
-- **Next action:** `/gsd-plan-phase 2`(模型层 M1–M4 + 双求解后端 + 产物血缘)→ `/gsd-execute-phase 2`
+- **Last action:** 阶段二规划完成(2026-10-17)— 研究(02-RESEARCH.md,710 行,公式/flags/稀疏求解全实测)+ 模式映射 + 6 计划(02-01~02-06,5 波)+ 校验两轮通过(0 阻断,3 警告已修订:soft_l1 判定统一 / unproject 改真实现 / 研究问题闭环)
+- **Next action:** `/gsd-execute-phase 2`(Wave 1:02-01 模型数学核心 ∥ 02-02 观测集装载)
 - **Notes for next session:** 讨论决策在 .planning/phases/02-m1-m4/02-CONTEXT.md;角点输入 = sb 路线 npz(705 全覆盖,run_20261017_104817);阶段一 UAT 遗留(存疑帧 per_view_rms 对比)已收编进阶段二 D-04
