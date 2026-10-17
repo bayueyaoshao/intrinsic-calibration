@@ -13,6 +13,7 @@ ASCII 短标 "MISS"(cv2.putText 不支持中文字形,图内文字只能用 ASCI
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import cv2
@@ -29,7 +30,8 @@ def render_marked(image_path: Path | str,
                   uv_or_none: np.ndarray | None,
                   cols: int, rows: int,
                   out_path: Path | str,
-                  quality: int = 90) -> Path:
+                  quality: int = 90,
+                  note: str | None = None) -> Path:
     """把一张原图的副本画上角点标记后另存,返回副本路径。
 
     参数:
@@ -39,6 +41,10 @@ def render_marked(image_path: Path | str,
         cols / rows: 内角点列数 / 行数(如 11×8 = 88 个角点)
         out_path:    副本输出路径(JPEG)
         quality:     JPEG 质量 1–100(来自 config 的 visualization.jpeg_quality)
+        note:        可选的红色 ASCII 短标(画在左上角 MISS 短标下方),
+                     给"SB 未检出、classic 兜底"这类逐帧证据加一行说明。
+                     cv2.putText 不支持中文字形,note 只能是 ASCII;
+                     完整中文说明写在 summary.json 与控制台输出里
     """
     img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if img is None:
@@ -59,6 +65,19 @@ def render_marked(image_path: Path | str,
         font_scale = max(1.0, min(height, width) / 480)
         cv2.putText(img, "MISS",
                     org=(thickness * 2, thickness * 2 + int(font_scale * 22)),
+                    fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=font_scale,
+                    color=(0, 0, 255), thickness=max(2, thickness // 2),
+                    lineType=cv2.LINE_AA)
+
+    if note is not None:
+        # 附加短标:字号/线宽沿用 MISS 分支那套"按画面尺寸比例推导"的写法,
+        # 位置放在 MISS 短标正下方一行(没画 MISS 时同样落左上角区域)
+        height, width = img.shape[:2]
+        thickness = max(4, min(height, width) // 80)
+        font_scale = max(1.0, min(height, width) / 480)
+        cv2.putText(img, note,
+                    org=(thickness * 2,
+                         thickness * 2 + int(font_scale * (22 + 26))),
                     fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=font_scale,
                     color=(0, 0, 255), thickness=max(2, thickness // 2),
                     lineType=cv2.LINE_AA)
@@ -126,5 +145,69 @@ def render_all(corners_run_dir: Path | str,
     }
     summary_path = corners_run_dir / "marked_copies" / "summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    return summary
+
+
+def render_sb_failed_review(corners_run_dir: Path | str,
+                            frames: list[dict],
+                            board: BoardSpec,
+                            quality: int = 90) -> dict | None:
+    """SB 检测器本体未检出的帧单独留证据:原图副本 + 标记图 + 中文汇总。
+
+    设计约定"提取效果不好的图像,原图 + 标记图都单独存"的落地产物:
+    这些帧混在全量 marked_copies/sb/ 里找起来费劲,单独归拢一份,
+    人工逐张核查兜底角点贴得准不准(证据本体,拼图只是索引)。
+
+    参数:
+        corners_run_dir: 本轮 corners 运行目录(产物写到其下 review_sb_failed/)
+        frames: "SB 本体检出失败"的帧清单,每项含
+                image_id(照片编号)、path(原图路径)、
+                uv_or_none(classic 兜底角点;两法都未检出时为 None)
+        board: 棋盘规格(角点叠加要按列×行画)
+        quality: JPEG 质量 1–100
+
+    清单为空直接返回 None 且不建目录(没有失败帧就没有这个文件夹)。
+    非空时:original/ 存原图副本(shutil.copy2,保持原文件名与格式,
+    源文件只读不改写);marked/ 存标记图(兜底帧画角点叠加 + ASCII 短标
+    "SB MISS - CLASSIC FALLBACK",双失败帧画 MISS 红框 + "SB+CLASSIC MISS");
+    最后写 summary.json(通俗中文说明 + 计数),并返回同一份字典供控制台汇总。
+    """
+    if not frames:
+        return None
+
+    review_dir = Path(corners_run_dir) / "review_sb_failed"
+    originals_dir = review_dir / "original"
+    marked_dir = review_dir / "marked"
+
+    n_fallback = 0
+    for frame in frames:
+        src_path = Path(frame["path"])
+        # 原图副本:逐字节复制(保留原文件名与格式),源文件绝不改写
+        originals_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, originals_dir / src_path.name)
+
+        uv_or_none = frame.get("uv_or_none")
+        if uv_or_none is not None:
+            n_fallback += 1
+            note = "SB MISS - CLASSIC FALLBACK"  # SB 没检出,classic 兜底
+        else:
+            note = "SB+CLASSIC MISS"             # 两颗检测器都没检出
+        render_marked(src_path, uv_or_none, board.cols, board.rows,
+                      marked_dir / f"{frame['image_id']}.jpg",
+                      quality=quality, note=note)
+
+    summary = {
+        "note": "本文件夹由 calib corners 自动生成,汇总 SB 检测器本体未检出的帧:"
+                "标记图是逐帧证据——'SB 未检出、已用经典检测器(classic)兜底'的帧"
+                "画兜底角点叠加并在左上角标 'SB MISS - CLASSIC FALLBACK';"
+                "经典检测器也未检出的帧画 MISS 红框并标 'SB+CLASSIC MISS'。"
+                "original/ 存这些帧的原图副本(逐字节复制,源文件未改动)。",
+        "n_total": len(frames),
+        "n_classic_fallback": n_fallback,
+        "n_both_missed": len(frames) - n_fallback,
+        "jpeg_quality": quality,
+    }
+    with open(review_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     return summary

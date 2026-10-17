@@ -31,7 +31,7 @@ from calib.io.precheck import compute_metrics, judge_suspects
 from calib.solve.baseline import DETECTORS, run_baselines, save_calibration
 from calib.util.lineage import make_lineage, sha256_file
 from calib.visualization.mosaic import write_mosaics
-from calib.visualization.overlay import render_all
+from calib.visualization.overlay import render_all, render_sb_failed_review
 from calib.visualization.suspects import write_suspect_originals
 
 
@@ -232,14 +232,19 @@ def _burst_failures_for(uv: np.ndarray, sq_px: np.ndarray, detected: np.ndarray,
                          if sum(1 for i in g if detected[i]) >= 2)
 
 
-@app.command(help="② 找棋盘角点:经典与新款两个检测器并跑、各存一份,亚像素窗口按实测方格边长比例推导")
+@app.command(help="② 找棋盘角点:经典与新款两个检测器并跑、各存一份,"
+                  "SB 未检出时用经典检测器兜底(可在配置关闭),"
+                  "亚像素窗口按实测方格边长比例推导")
 def corners() -> None:
     """流水线第②步:在数据清单登记的全部照片上找角点。
 
     步骤:读配置 → 找最新一轮 ingest 产物读照片清单 → 逐张读图,
-    经典与新款(SB)两颗检测器各跑一次(D-07)→ 各自规范化、按姿态分组
-    做连拍一致性断言(D-09)→ 写 4 份角点 npz(train/test × classic/sb)
-    与检测质量摘要 → 全量标记副本(每张照片两套,D-06/D-07)
+    经典与新款(SB)两颗检测器各跑一次(D-07);SB 未检出的帧按配置开关
+    用经典检测器的结果兜底填进 SB 槽位,逐帧来源记在 source 数组 →
+    各自规范化、按姿态分组做连拍一致性断言(D-09)
+    → 写 4 份角点 npz(train/test × classic/sb)与检测质量摘要
+    → 全量标记副本(每张照片两套,D-06/D-07)
+    → SB 失败帧独立证据 review_sb_failed/(原图副本 + 标记图)
     → 汇总拼图两张 + 逐格索引(只是索引不是替代,D-06)→ 打印中文汇总。
     """
     started = datetime.now(UTC)
@@ -273,18 +278,41 @@ def corners() -> None:
         for name in detectors
     }
 
+    # SB 生产路线的逐帧来源留痕:"sb" = SB 本体检出;"classic_fallback" =
+    # SB 未检出、经典检测器结果兜底填入;"" = 两法都未检出(兜底关闭时
+    # SB 缺失帧也是 "")。经典路线没有兜底概念,不记来源、产物保持纯净。
+    sources = np.full(n, "", dtype="<U16")
+
     typer.echo(f"开始找角点:共 {n} 张照片 × 2 颗检测器(经典较慢,请稍等)……")
     for i, rec in enumerate(images):
         gray = imread_checked(Path(rec["path"]))
-        for name, detect in detectors.items():
-            result = detect(gray, board.cols, board.rows, cfg.corners)
-            if result is None:
-                continue  # 本帧该检测器未检出:照常占一行(NaN/False),不消失
-            slot = arrays[name]
-            slot["uv"][i] = result["uv"]
-            slot["sq_px"][i] = result["sq_px"]
-            slot["win_size"][i] = result["win_size"]
+        # 经典先跑:结果留在局部变量,SB 未检出时按开关兜底复用。
+        # 未检出的帧照常占一行(NaN/False),绝不从数据里消失(D-01)
+        classic_result = detect_classic(gray, board.cols, board.rows, cfg.corners)
+        if classic_result is not None:
+            slot = arrays["classic"]
+            slot["uv"][i] = classic_result["uv"]
+            slot["sq_px"][i] = classic_result["sq_px"]
+            slot["win_size"][i] = classic_result["win_size"]
             slot["detected"][i] = True
+
+        sb_result = detect_sb(gray, board.cols, board.rows, cfg.corners)
+        sb = arrays["sb"]
+        if sb_result is not None:
+            sb["uv"][i] = sb_result["uv"]
+            sb["sq_px"][i] = sb_result["sq_px"]
+            sb["win_size"][i] = sb_result["win_size"]
+            sb["detected"][i] = True
+            sources[i] = "sb"
+        elif classic_result is not None and cfg.corners.sb_fallback_classic:
+            # SB 未检出、兜底开关开、classic 本帧有结果:classic 的角点连同
+            # 方格边长/精化窗口一起填进 SB 槽位——对下游而言这帧"SB 路线
+            # 已检出",真实来源单独记在 sources 里,绝不与 SB 本体检出混淆
+            sb["uv"][i] = classic_result["uv"]
+            sb["sq_px"][i] = classic_result["sq_px"]
+            sb["win_size"][i] = classic_result["win_size"]
+            sb["detected"][i] = True
+            sources[i] = "classic_fallback"
         if (i + 1) % 100 == 0:
             typer.echo(f"  已处理 {i + 1}/{n} 张……")
 
@@ -318,12 +346,23 @@ def corners() -> None:
         rows = [i for i, rec in enumerate(images) if rec["split"] == split]
         for name in detectors:
             slot = arrays[name]
+            source_arg = None
+            extra = meta_extra
+            if name == "sb":
+                # 仅 SB 路线带 source 数组与兜底留痕;classic 的调用一字不变
+                source_arg = sources[rows]
+                extra = {
+                    **meta_extra,
+                    "sb_fallback_classic": cfg.corners.sb_fallback_classic,
+                    "n_classic_fallback": int((source_arg == "classic_fallback").sum()),
+                }
             save_corners(
                 out_dir, split, name,
                 image_ids=[images[i]["image_id"] for i in rows],
                 uv=slot["uv"][rows], sq_px=slot["sq_px"][rows],
                 win_size=slot["win_size"][rows], detected=slot["detected"][rows],
-                lineage=lineage, meta_extra=meta_extra,
+                source=source_arg,
+                lineage=lineage, meta_extra=extra,
             )
 
     # 检测质量摘要:分 划分 × 检测器 的成功率与方格/窗口统计 + 存疑帧清单
@@ -342,6 +381,15 @@ def corners() -> None:
                 "sq_px": _stats_block(slot["sq_px"][rows][ok]),
                 "win_size": _stats_block(slot["win_size"][rows][ok].astype(float)),
             }
+            if name == "sb":
+                # SB 段三口径:n_detected 是生产口径(detected 数组求和,天然含
+                # 兜底帧);另报纯 SB 与 classic 兜底张数,来源可对账。
+                # 兜底开关关闭时两字段照报(n_pure_sb == n_detected、兜底 0),
+                # 口径稳定不随开关分支
+                split_sources = sources[rows]
+                detection[split]["sb"]["n_pure_sb"] = int((split_sources == "sb").sum())
+                detection[split]["sb"]["n_classic_fallback"] = \
+                    int((split_sources == "classic_fallback").sum())
 
     summary = {
         "lineage": lineage,
@@ -361,6 +409,22 @@ def corners() -> None:
     # 全量标记副本(D-06/D-07):manifest 里每张照片、每颗检测器各一份,
     # 未检出画 MISS 红框留痕;重跑 corners 即整目录重新生成,幂等
     copy_summary = render_all(out_dir, ingest_run / "manifest.json", board, cfg)
+
+    # SB 失败帧独立证据(设计约定"提取效果不好的图像,原图 + 标记图单独存"):
+    # SB 本体未检出的帧逐张传入——classic 兜底帧带 classic 角点画叠加,
+    # 两法都未检出的帧画 MISS 红框;没有失败帧则不建目录
+    review_frames = [
+        {
+            "image_id": rec["image_id"],
+            "path": rec["path"],
+            "uv_or_none": (arrays["classic"]["uv"][i]
+                           if sources[i] == "classic_fallback" else None),
+        }
+        for i, rec in enumerate(images)
+        if sources[i] in ("classic_fallback", "")
+    ]
+    review_summary = render_sb_failed_review(
+        out_dir, review_frames, board, quality=int(cfg.visualization.jpeg_quality))
 
     # 汇总拼图(D-06):总览 + 存疑两张 + 逐格索引,只是索引不是替代
     mosaic_info = write_mosaics(out_dir, manifest, cfg)
@@ -382,6 +446,19 @@ def corners() -> None:
         if sq:
             typer.echo(f"  {name} 方格像素边长(检出帧):中位数 {sq['median']:.1f}px"
                        f"(范围 {sq['min']:.1f} ~ {sq['max']:.1f})")
+    n_pure_sb = int((sources == "sb").sum())
+    n_fallback = int((sources == "classic_fallback").sum())
+    fallback_state = "开" if cfg.corners.sb_fallback_classic else "关"
+    typer.echo(f"  SB 生产口径(兜底开关:{fallback_state}):纯 SB {n_pure_sb} 张"
+               f" + classic 兜底 {n_fallback} 张,合计 {n_pure_sb + n_fallback}/{n} 张"
+               f"(逐帧来源在 corners_*_sb.npz 的 source 数组,meta 记兜底张数)")
+    if review_summary is not None:
+        typer.echo(f"  SB 失败帧独立证据:原图副本 + 标记图各 {review_summary['n_total']} 张"
+                   f"(classic 兜底 {review_summary['n_classic_fallback']} 张、"
+                   f"两法都未检出 {review_summary['n_both_missed']} 张)"
+                   f" → {out_dir / 'review_sb_failed'}")
+    else:
+        typer.echo("  SB 失败帧独立证据:无 SB 未检出帧,未生成 review_sb_failed/")
     typer.echo(f"  连拍一致性断言:每颗检测器检查 {groups_checked.get('classic', 0)} 组,"
                f"失败 {len(burst_failures)} 组"
                + ("(存疑帧已列入质量摘要,供人工审阅)" if burst_failures else ""))
