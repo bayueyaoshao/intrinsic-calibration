@@ -7,6 +7,9 @@
 - sq_px:    (N,)    每帧实测的方格像素边长(下游窗口复核/体检归一复用)
 - win_size: (N,)    每帧实际使用的亚像素半窗口(供审查窗口断言 2*win+1 < sq_px)
 - detected: (N,)    bool,是否检出
+- source:   (N,)    每帧角点来源:"sb" = SB 本体检出;"classic_fallback" = SB 未检出、
+                    由经典检测器兜底填入;"" = 两法都未检出。仅 SB 生产路线写此键
+                    (经典路线不写,产物保持纯净)。定长 unicode 文字数组,不需要 pickle
 
 文件名按 划分(train/test)× 检测器(classic/sb)共 4 份(D-07 两颗各存一份,
 呼应 ROADMAP 成功标准 2 的 train/test 划分)。
@@ -30,6 +33,7 @@ def save_corners(out_dir: Path, split: str, detector: str,
                  image_ids: list[str] | np.ndarray,
                  uv: np.ndarray, sq_px: np.ndarray,
                  win_size: np.ndarray, detected: np.ndarray,
+                 *, source: np.ndarray | None = None,
                  lineage: dict, meta_extra: dict | None = None) -> Path:
     """写一份角点 npz 与同名 meta.json,返回 npz 路径。
 
@@ -42,21 +46,31 @@ def save_corners(out_dir: Path, split: str, detector: str,
         sq_px:      (N,) 方格像素边长,未检出为 NaN
         win_size:   (N,) 半窗口,未检出为 NaN
         detected:   (N,) bool
-        lineage:    make_lineage 组装的血缘指纹
+        source:     (N,) 每帧角点来源("sb"/"classic_fallback"/""),仅 SB 生产
+                    路线传;None(经典路线的现状调用)时完全不写该键
+        lineage:    make_lineage 组装的血缘指纹(必须按参数名传)
         meta_extra: 检测器选项/精化判据/窗口粒度等说明,进 meta.json 留痕
+
+    source 之后的名字只能按参数名传:source 有默认值而 lineage 没有,
+    Python 语法不允许"有默认值的参数排在没默认值的参数前",用关键字
+    专用参数(星号之后)既保住"source 在 detected 与 lineage 之间"的
+    排版,又不改任何现有调用(它们本来就全用参数名传 lineage)。
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     name = f"corners_{split}_{detector}"
     npz_path = out_dir / f"{name}.npz"
-    np.savez(
-        npz_path,
-        image_ids=np.asarray(image_ids),
-        uv=np.asarray(uv, dtype=np.float64),
-        sq_px=np.asarray(sq_px, dtype=np.float64),
-        win_size=np.asarray(win_size, dtype=np.float64),
-        detected=np.asarray(detected, dtype=bool),
-    )
+    arrays = {
+        "image_ids": np.asarray(image_ids),
+        "uv": np.asarray(uv, dtype=np.float64),
+        "sq_px": np.asarray(sq_px, dtype=np.float64),
+        "win_size": np.asarray(win_size, dtype=np.float64),
+        "detected": np.asarray(detected, dtype=bool),
+    }
+    if source is not None:
+        # 定长 unicode 数组,npz 存取都不需要 pickle(安全路径不破)
+        arrays["source"] = np.asarray(source)
+    np.savez(npz_path, **arrays)
 
     meta = {
         "file": npz_path.name,

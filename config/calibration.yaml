@@ -38,6 +38,14 @@ corners:
   # adaptive_thresh = 自适应阈值(光照不均时更稳);normalize_image = 先归一化亮度
   classic_flags: [adaptive_thresh, normalize_image]
   sb_flags: 0                  # 新款检测器 findChessboardCornersSB 的选项位掩码,0 = 默认
+  # SB 未检出的帧,用经典检测器(classic)的角点填进 SB 路线的槽位兜底;
+  # 每帧来源记在角点文件的 source 数组里("sb" = SB 本体检出,
+  # "classic_fallback" = SB 未检出、classic 兜底填入,"" = 两法都未检出)。
+  # false = 关闭兜底,行为与只有 SB 时完全一致(缺就缺)。
+  # 依据(三轮实验诊断,见 corners 产物 review_sb_failed/DIAGNOSIS.md):
+  # "缩小档救援 + 全分辨率精化"的产物与 classic 完全重合(偏差 0.01px 级),
+  # 多尺度重试没有增量价值;classic 兜底更简单,还多覆盖 17 张穷举也救不回的帧。
+  sb_fallback_classic: true
   subpix:
     # 亚像素精化(把角点位置从整数像素 refinement 到小数像素)的窗口粒度:
     # frame = 每帧一个窗口(帧内方格像素边长中位数推导,默认);

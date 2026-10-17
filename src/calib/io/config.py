@@ -94,6 +94,12 @@ class CornersConfig:
 
     classic_flags: tuple[str, ...] = ("adaptive_thresh", "normalize_image")
     sb_flags: int = 0
+    # SB 未检出的帧是否用经典检测器的结果兜底(填进 SB 路线的槽位)。
+    # 三轮实验结论(见 corners 产物 review_sb_failed/DIAGNOSIS.md):SB 在大倾斜/
+    # 远距视角下会系统性拒绝共 41 帧,而"缩小档救援 + 全分辨率精化"的产物与
+    # classic 完全重合(偏差 0.01px 级)——兜底比多尺度重试更简单且多覆盖
+    # 17 张穷举也救不回的帧,故默认开。false = 关闭,行为与只有 SB 时完全一致。
+    sb_fallback_classic: bool = True
     subpix: SubpixConfig = field(default_factory=SubpixConfig)
     burst_check: BurstCheckConfig = field(default_factory=BurstCheckConfig)
 
@@ -275,7 +281,14 @@ def _parse_corners(raw: dict) -> CornersConfig:
     sb_flags = section.get("sb_flags", CornersConfig.sb_flags)
     if not isinstance(sb_flags, int) or isinstance(sb_flags, bool) or sb_flags < 0:
         _fail("corners.sb_flags", sb_flags, "必须是 >= 0 的整数(选项位掩码)")
+    fallback = section.get("sb_fallback_classic", CornersConfig.sb_fallback_classic)
+    # 注意顺序:Python 里 True 同时也是 int(issubclass(bool, int)),但 1 不是 bool,
+    # 所以先判 bool 再拒其余一切——整数 1/0 是 yaml 手写时最常见的笔误,必须拦下
+    if not isinstance(fallback, bool):
+        _fail("corners.sb_fallback_classic", fallback,
+              "必须是 true 或 false(SB 未检出的帧是否用经典检测器结果兜底)")
     return CornersConfig(classic_flags=tuple(flags), sb_flags=sb_flags,
+                         sb_fallback_classic=fallback,
                          subpix=_parse_subpix(section),
                          burst_check=_parse_burst_check(section))
 
