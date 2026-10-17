@@ -173,12 +173,24 @@ def _check_is_dict(raw, field_name: str) -> dict:
 
 
 def _read_yaml(path: Path | str) -> object:
-    """读 yaml 文件,safe_load(禁 yaml.load,防配置执行任意代码)。"""
+    """读 yaml 文件,safe_load(禁 yaml.load,防配置执行任意代码)。
+
+    yaml **语法**错误(如缩进用了 tab)也归入中文报错防线:转成带文件
+    路径的 ValueError,消息附 PyYAML 原始信息(行号/列号对定位有用),
+    并保留因果链(raise ... from)——PyYAML 自己抛的 ScannerError 不是
+    ValueError 子类,不转的话两道防线(中文报错、_setup_runtime 的
+    except (ValueError, OSError))都会被击穿。
+    """
     path = Path(path)
     if not path.is_file():
         raise ValueError(f"配置文件不存在:{path}。请确认路径(相对当前工作目录)是否正确。")
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        try:
+            return yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(
+                f"配置文件 {path} 的 yaml 语法有误,请检查缩进与冒号:{e}"
+            ) from e
 
 
 def load_board(path: Path | str) -> BoardSpec:

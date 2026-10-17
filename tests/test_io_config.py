@@ -134,6 +134,38 @@ def test_sb_fallback_classic_rejects_int_one(tmp_path):
     assert "实际读到的值" in str(exc_info.value)
 
 
+def test_yaml_syntax_error_chinese_error_with_path(tmp_path):
+    """yaml 语法错误(缩进用了 tab):报错必须是带文件路径的中文 ValueError,
+    附 PyYAML 原始信息(行号/列号对定位有用),而不是裸抛英文堆栈。
+    两个加载入口(load_calibration 与 load_board)共用 _read_yaml,都要兜住。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("data:\n\ttrain: a\n  test: b\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "语法" in message
+    assert str(p) in message
+
+    board_p = tmp_path / "board.yaml"
+    board_p.write_text("board:\n\tcols: 11\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="语法"):
+        load_board(board_p)
+
+
+def test_setup_runtime_survives_broken_yaml(tmp_path, monkeypatch):
+    """坏 yaml 不再击穿 --help 防线:配置目录里只有语法坏的 calibration.yaml
+    时,_setup_runtime 安静返回——该回调承诺"--help / 配置还没就位时不拦着
+    用户",一个坏文件不该让 calib ingest --help 直接崩溃。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "calibration.yaml").write_text(
+        "data:\n\ttrain: a\n  test: b\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    from calib.cli.main import _setup_runtime
+    _setup_runtime()  # 不抛任何异常即通过
+
+
 # ---- 源码安全断言(T-01-01:配置解析只许 safe_load)----
 
 def test_config_source_uses_safe_load_only():
