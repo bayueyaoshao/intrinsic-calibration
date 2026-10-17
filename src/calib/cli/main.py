@@ -485,7 +485,11 @@ def corners() -> None:
     # 检测质量摘要:分 划分 × 检测器 的成功率与方格/窗口统计 + 存疑帧清单
     detection: dict[str, dict] = {}
     for split in ("train", "test"):
-        rows = np.array([i for i, rec in enumerate(images) if rec["split"] == split])
+        # dtype=int 必须显式写:"只有 train 没有 test"是数据层承诺的合法输入,
+        # 空列表会被 numpy 推断成 float64 数组,拿它做花式索引当场 IndexError,
+        # 下面 rows.size 的 success_rate=None 保护根本没机会生效
+        rows = np.array([i for i, rec in enumerate(images)
+                         if rec["split"] == split], dtype=int)
         detection[split] = {}
         for name in detectors:
             slot = arrays[name]
