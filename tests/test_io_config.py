@@ -38,6 +38,7 @@ def test_load_real_calibration_values():
     assert cfg.corners.burst_check.max_tol == 0.3
     assert cfg.calibrate.fisheye.max_iter == 100
     assert cfg.visualization.mosaic.cols == 8
+    assert cfg.corners.sb_fallback_classic is True  # 随仓库配置默认开 classic 兜底
 
 
 def test_missing_exclude_images_defaults_to_empty(tmp_path):
@@ -46,6 +47,22 @@ def test_missing_exclude_images_defaults_to_empty(tmp_path):
     p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
     cfg = load_calibration(p)
     assert cfg.exclude_images == ()
+
+
+def test_sb_fallback_classic_defaults_true_when_missing(tmp_path):
+    """corners 段缺 sb_fallback_classic 键:默认 True(SB 未检出的帧用 classic 兜底)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
+    cfg = load_calibration(p)
+    assert cfg.corners.sb_fallback_classic is True
+
+
+def test_sb_fallback_classic_explicit_false(tmp_path):
+    """显式写 sb_fallback_classic: false:解析为 False(关闭兜底,SB 缺就缺)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("corners:\n  sb_fallback_classic: false\n", encoding="utf-8")
+    cfg = load_calibration(p)
+    assert cfg.corners.sb_fallback_classic is False
 
 
 # ---- 非法配置:必须抛 ValueError,消息含字段名(中文)----
@@ -101,6 +118,20 @@ def test_quantile_order_violation(tmp_path):
     )
     with pytest.raises(ValueError, match="global_quantile_low"):
         load_calibration(p)
+
+
+def test_sb_fallback_classic_rejects_int_one(tmp_path):
+    """sb_fallback_classic: 1(整数而非布尔):必须报错并点名 corners.sb_fallback_classic。
+
+    Python 里 isinstance(1, int) 与 isinstance(True, int) 都成立,极容易把
+    整数 1/0 误当布尔放行;yaml 手写配置时这又是常见笔误,必须显式拒绝。
+    """
+    p = tmp_path / "calibration.yaml"
+    p.write_text("corners:\n  sb_fallback_classic: 1\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    assert "corners.sb_fallback_classic" in str(exc_info.value)
+    assert "实际读到的值" in str(exc_info.value)
 
 
 # ---- 源码安全断言(T-01-01:配置解析只许 safe_load)----

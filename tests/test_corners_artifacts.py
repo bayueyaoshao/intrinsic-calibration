@@ -135,6 +135,48 @@ def test_save_writes_four_files_for_all_splits_and_detectors(burst_of_three):
     ]
 
 
+def test_save_and_load_source_roundtrip(burst_of_three):
+    """SB 生产路线带 source 数组:三种来源值落盘读回逐位一致。
+
+    source 记录每帧角点来源:"sb" = SB 本体检出,"classic_fallback" =
+    SB 未检出、由经典检测器兜底填入,"" = 两法都未检出。夹具的 3 帧
+    (2 检出 + 1 未检出)正好对应三种值。定长 unicode 数组不需要 pickle,
+    读取仍走 load_corners 的 allow_pickle=False 安全路径。
+    """
+    data = burst_of_three
+    source = np.array(["sb", "classic_fallback", ""])
+    npz_path = save_corners(
+        data["out_dir"], "train", "sb",
+        image_ids=data["image_ids"], uv=data["uv"], sq_px=data["sq_px"],
+        win_size=data["win_size"], detected=data["detected"],
+        source=source, lineage=data["lineage"],
+    )
+    loaded = load_corners(npz_path)  # 内部强制 allow_pickle=False
+
+    assert "source" in loaded
+    assert loaded["source"].dtype.kind == "U"  # 纯文字数组,不含对象/pickle
+    assert [str(x) for x in loaded["source"]] == ["sb", "classic_fallback", ""]
+
+
+def test_save_without_source_writes_no_source_key(burst_of_three):
+    """经典路线(不传 source):npz 里没有 source 键,产物保持纯净。
+
+    经典路线没有"兜底"概念,调用签名与文件内容都与现状一字不差;
+    下游按 'source' in data.files 即可区分两种产物。
+    """
+    data = burst_of_three
+    npz_path = save_corners(
+        data["out_dir"], "train", "classic",
+        image_ids=data["image_ids"], uv=data["uv"], sq_px=data["sq_px"],
+        win_size=data["win_size"], detected=data["detected"],
+        lineage=data["lineage"],
+    )
+    loaded = load_corners(npz_path)
+
+    assert "source" not in loaded
+    assert loaded["detected"].tolist() == [True, True, False]  # 其余内容照常
+
+
 def test_load_corners_rejects_pickle(tmp_path):
     """安全防线:含 pickle 对象数组的 npz,读取必须抛错而不是执行(T-02-01)。"""
     evil = tmp_path / "evil.npz"
