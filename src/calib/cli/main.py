@@ -31,7 +31,11 @@ from calib.io.precheck import compute_metrics, judge_suspects
 from calib.solve.baseline import DETECTORS, run_baselines, save_calibration
 from calib.util.lineage import make_lineage, sha256_file
 from calib.visualization.mosaic import write_mosaics
-from calib.visualization.overlay import render_all, render_sb_failed_review
+from calib.visualization.overlay import (
+    render_all,
+    render_flagged_review,
+    render_sb_failed_review,
+)
 from calib.visualization.suspects import write_suspect_originals
 
 
@@ -232,9 +236,119 @@ def _burst_failures_for(uv: np.ndarray, sq_px: np.ndarray, detected: np.ndarray,
                          if sum(1 for i in g if detected[i]) >= 2)
 
 
+# 体检存疑来源的中文翻译与 ASCII 缩写(记号格式 "前缀:指标"):
+# 前缀说判定来自哪条线,指标说卡在哪一项
+_SUSPECT_SOURCE_CN = {"pose_relative": "同姿态相对比较", "global": "全局线兜底"}
+_SUSPECT_METRIC_CN = {"blur": "模糊度", "exposure": "曝光"}
+_SUSPECT_METRIC_ASCII = {"blur": "BLUR", "exposure": "EXPO"}
+
+
+def _suspect_review_frames(images: list[dict], arrays: dict) -> list[dict]:
+    """从数据清单筛出体检判"存疑"的帧,组装 review_suspects 复核清单。
+
+    每帧 info 同时保留存疑来源的原始记号(对账 manifest 用)与中文翻译,
+    外加三个体检指标(blur_norm/expo_hi/expo_lo)原值——复核时一个
+    文件夹看完,不用翻 manifest。角点取各检测器路线的最终结果:
+    detected 为 False 时给 None;sb 槽位的 detected 天然含 classic 兜底帧
+    (与 marked_copies/sb 同判据),不需要在这里特殊处理。
+    记号若出现陌生取值,原样保留不吞掉——宁可露出英文也不丢信息。
+    """
+    frames = []
+    for i, rec in enumerate(images):
+        precheck = rec.get("precheck", {})
+        if precheck.get("verdict") != "suspect":
+            continue
+        tokens = list(precheck.get("suspect_sources", []))
+        reason_parts = []
+        note_parts = []
+        for token in tokens:
+            prefix, _, metric = token.partition(":")
+            reason_parts.append(
+                f"{_SUSPECT_SOURCE_CN.get(prefix, prefix)}:"
+                f"{_SUSPECT_METRIC_CN.get(metric, metric)}")
+            note_parts.append(_SUSPECT_METRIC_ASCII.get(metric, metric.upper()))
+        # 图上画不了中文,note 用 ASCII 缩写(cv2.putText 不支持中文字形);
+        # 同一指标被两条线同时点名时缩写去重(如 BLUR+EXPO 而不是 BLUR+BLUR+EXPO)
+        note = "SUS " + "+".join(dict.fromkeys(note_parts)) if note_parts else "SUS"
+        frames.append({
+            "image_id": rec["image_id"],
+            "path": rec["path"],
+            "uv_classic": (arrays["classic"]["uv"][i]
+                           if arrays["classic"]["detected"][i] else None),
+            "uv_sb": (arrays["sb"]["uv"][i]
+                      if arrays["sb"]["detected"][i] else None),
+            "note": note,
+            "info": {
+                "pose_id": rec["pose_id"],
+                "repeat_idx": rec["repeat_idx"],
+                "split": rec["split"],
+                "suspect_sources": tokens,
+                "reason": "存疑原因:" + "、".join(reason_parts),
+                "metrics": {
+                    "blur_norm": precheck.get("blur_norm"),
+                    "expo_hi": precheck.get("expo_hi"),
+                    "expo_lo": precheck.get("expo_lo"),
+                },
+            },
+        })
+    return frames
+
+
+def _burst_review_frames(images: list[dict], arrays: dict,
+                         burst_failures: list[dict]) -> list[dict]:
+    """把连拍一致性断言点名的帧(两颗检测器并集)组装成复核清单。
+
+    同一张照片可能被两颗检测器同时点名,只保留一条,flagged_by 列出全部
+    点名者;reason 按检测器各写一条:组内波动中位数/最大值与各自容差的
+    数值和对比结论。超限与否按数值现算(中位数 ≥ 中位容差 即"超限"),
+    不抄断言时的旧结论,保证文字与数字永远一致。
+    """
+    flagged: dict[str, dict] = {}
+    for failure in burst_failures:
+        detector = failure["detector"]
+        median_px, max_px = failure["spread_median_px"], failure["spread_max_px"]
+        median_tol, max_tol = failure["threshold_px"]
+        median_word = "超限" if median_px >= median_tol else "未超"
+        max_word = "超限" if max_px >= max_tol else "未超"
+        reason = (f"连拍断言失败:同名角点组内波动中位数 {median_px:.2f}px"
+                  f"(容差 {median_tol:.2f}px,{median_word});"
+                  f"最大 {max_px:.2f}px(容差 {max_tol:.2f}px,{max_word})")
+        for image_id in failure["suspect_image_ids"]:
+            entry = flagged.setdefault(image_id, {"flagged_by": [],
+                                                  "reason": {}})
+            entry["flagged_by"].append(detector)
+            entry["reason"][detector] = reason
+
+    # 按数据清单的原始顺序输出(并集去重后顺序稳定,重跑结果可对账)
+    frames = []
+    for i, rec in enumerate(images):
+        info = flagged.get(rec["image_id"])
+        if info is None:
+            continue
+        frames.append({
+            "image_id": rec["image_id"],
+            "path": rec["path"],
+            "uv_classic": (arrays["classic"]["uv"][i]
+                           if arrays["classic"]["detected"][i] else None),
+            "uv_sb": (arrays["sb"]["uv"][i]
+                      if arrays["sb"]["detected"][i] else None),
+            "note": "BURST FLAG",
+            "info": {
+                "pose_id": rec["pose_id"],
+                "repeat_idx": rec["repeat_idx"],
+                "split": rec["split"],
+                "flagged_by": info["flagged_by"],
+                "reason": info["reason"],
+            },
+        })
+    return frames
+
+
 @app.command(help="② 找棋盘角点:经典与新款两个检测器并跑、各存一份,"
                   "SB 未检出时用经典检测器兜底(可在配置关闭),"
-                  "亚像素窗口按实测方格边长比例推导")
+                  "亚像素窗口按实测方格边长比例推导;"
+                  "存疑帧与连拍点名帧各归拢一个专属复核文件夹"
+                  "(原图副本 + 两颗检测器标记图 + 逐张中文原因)")
 def corners() -> None:
     """流水线第②步:在数据清单登记的全部照片上找角点。
 
@@ -245,6 +359,9 @@ def corners() -> None:
     → 写 4 份角点 npz(train/test × classic/sb)与检测质量摘要
     → 全量标记副本(每张照片两套,D-06/D-07)
     → SB 失败帧独立证据 review_sb_failed/(原图副本 + 标记图)
+    → 体检存疑帧复核文件夹 review_suspects/ 与连拍点名帧复核文件夹
+    review_burst_flagged/(原图副本 + 两颗检测器标记图 + 逐张中文原因,
+    人工一个文件夹看完,不跨目录翻找)
     → 汇总拼图两张 + 逐格索引(只是索引不是替代,D-06)→ 打印中文汇总。
     """
     started = datetime.now(UTC)
@@ -426,6 +543,35 @@ def corners() -> None:
     review_summary = render_sb_failed_review(
         out_dir, review_frames, board, quality=int(cfg.visualization.jpeg_quality))
 
+    # 两个专属复核文件夹(与 review_sb_failed 同构):体检存疑帧、连拍点名帧
+    # 各归拢一处——原图副本 + 两颗检测器标记图 + 逐张中文原因,人工复核
+    # 不再跨目录按文件名翻找;清单为空时不建目录
+    suspect_frames = _suspect_review_frames(images, arrays)
+    suspect_review_summary = render_flagged_review(
+        out_dir, "review_suspects", suspect_frames, board,
+        quality=int(cfg.visualization.jpeg_quality),
+        note="本文件夹由 calib corners 自动生成,汇总体检判\"存疑\"的帧"
+             "(manifest 的 precheck.verdict == \"suspect\",只标记不剔除,D-01)。"
+             "original/ 存原图副本(逐字节复制,源文件未改动);"
+             "marked_classic/ 与 marked_sb/ 是两颗检测器各自的角点标记图"
+             "(未检出画 MISS 红框留痕)。frames 数组逐张写明中文判定原因与"
+             "体检指标原值,suspect_sources 保留原始记号,可与 manifest 对账。",
+        extra=manifest_suspect_counts(
+            [rec.get("precheck", {}) for rec in images]))
+
+    burst_frames = _burst_review_frames(images, arrays, burst_failures)
+    burst_poses = sorted({f["pose_id"] for f in burst_failures})
+    burst_review_summary = render_flagged_review(
+        out_dir, "review_burst_flagged", burst_frames, board,
+        quality=int(cfg.visualization.jpeg_quality),
+        note="本文件夹由 calib corners 自动生成,汇总连拍一致性断言点名的帧"
+             "(两颗检测器各自的点名清单取并集,只点名不剔除,D-01)。"
+             "original/ 存原图副本(逐字节复制,源文件未改动);"
+             "marked_classic/ 与 marked_sb/ 是两颗检测器各自的角点标记图。"
+             "frames 数组逐张写明每颗点名检测器的组内波动中位数/最大值与"
+             "容差对比结论,数值与 detection_summary.json 的 burst_check 一致。",
+        extra={"n_poses": len(burst_poses), "flagged_poses": burst_poses})
+
     # 汇总拼图(D-06):总览 + 存疑两张 + 逐格索引,只是索引不是替代
     mosaic_info = write_mosaics(out_dir, manifest, cfg)
 
@@ -459,6 +605,21 @@ def corners() -> None:
                    f" → {out_dir / 'review_sb_failed'}")
     else:
         typer.echo("  SB 失败帧独立证据:无 SB 未检出帧,未生成 review_sb_failed/")
+    if suspect_review_summary is not None:
+        typer.echo(f"  存疑帧复核文件夹:原图副本 + classic/sb 标记图各 "
+                   f"{suspect_review_summary['n_total']} 张"
+                   f"(来源分桶:同姿态相对比较 {suspect_review_summary['pose_relative']} 张、"
+                   f"全局线兜底 {suspect_review_summary['global']} 张;"
+                   f"逐张中文原因在 summary.json)→ {out_dir / 'review_suspects'}")
+    else:
+        typer.echo("  存疑帧复核文件夹:无体检存疑帧,未生成 review_suspects/")
+    if burst_review_summary is not None:
+        typer.echo(f"  连拍点名帧复核文件夹:原图副本 + classic/sb 标记图各 "
+                   f"{burst_review_summary['n_total']} 张"
+                   f"(点名姿态 {burst_review_summary['n_poses']} 个;"
+                   f"逐张中文原因在 summary.json)→ {out_dir / 'review_burst_flagged'}")
+    else:
+        typer.echo("  连拍点名帧复核文件夹:无连拍断言点名帧,未生成 review_burst_flagged/")
     typer.echo(f"  连拍一致性断言:每颗检测器检查 {groups_checked.get('classic', 0)} 组,"
                f"失败 {len(burst_failures)} 组"
                + ("(存疑帧已列入质量摘要,供人工审阅)" if burst_failures else ""))
