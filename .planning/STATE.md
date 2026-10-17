@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-17T10:58:19.000Z"
+last_updated: "2026-10-17T11:35:00.000Z"
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 0
-  percent: 0
+  completed_plans: 5
+  percent: 17
 ---
 
 # STATE: intrinsic-calibration
@@ -17,25 +17,24 @@ progress:
 ## Project Reference
 
 - **Core Value:** 对给定的一批标定图像,产出可论证为当前数据下最优的内参(held-out 泛化误差最小 + 参数稳定 + 误差逼近 CRLB),并量化"距离数据极限还有多远"
-- **Current Focus:** Phase 01 — data-foundation-minimal-calibration
+- **Current Focus:** Phase 02 — models-solvers-lineage(模型层 M1–M4 + 双求解后端 + 产物血缘)
 - **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md
 
 ## Current Position
 
-Phase: 01 (data-foundation-minimal-calibration) — EXECUTING
-Plan: 1 of 5
+Phase: 02 — NOT STARTED
 
-- **Phase:** 1 (数据基座 + 首个端到端标定切片)
-- **Plan:** None yet — next step `/gsd-plan-phase 1`
-- **Status:** Executing Phase 01
-- **Progress:** `[█░░░░░░░░░] 0/6 phases`
+- **Phase:** 2 (模型层 M1–M4 + 双求解后端 + 产物血缘)
+- **Plan:** None yet — next step `/gsd-discuss-phase 2`
+- **Status:** Phase 1 关账完毕(2026-10-17,D-05 验收 4/4),准备开启阶段二
+- **Progress:** `[█░░░░░░░░░] 1/6 phases`
 
 ## Performance Metrics
 
 | Metric | Value |
 |--------|-------|
-| Phases complete | 0/6 |
-| Requirements shipped | 0/32 |
+| Phases complete | 1/6 |
+| Requirements shipped | 4/32 |
 | Plans this phase | 0 |
 | Blocked items | 0 |
 
@@ -73,6 +72,6 @@ Plan: 1 of 5
 
 ## Session Continuity
 
-- **Last action:** 快任务 261017-pub 完成(2026-10-17)— review_suspects(89 张存疑帧)+ review_burst_flagged(24 张连拍点名帧)两个专属复核文件夹落地,全量重跑新 run_20261017_104817,705/705 检出与上一 run 一致,98 个测试全绿
-- **Next action:** 用户人工验收:D-05 四项(01-HUMAN-UAT.md)+ 三个复核文件夹抽查(review_sb_failed 41 张 / review_suspects 89 张 / review_burst_flagged 24 张,各看 summary.json 中文原因与标记图);验收通过后关闭阶段一
+- **Last action:** 阶段一正式关账(2026-10-17)— D-05 四项人工验收全过(第 2 项暂定,存疑帧最终影响待阶段二逐帧残差复核);收尾:UAT 记录(b51eeb8)、docs/pipeline.md 同步三个 review 复核文件夹与兜底契约
+- **Next action:** `/gsd-discuss-phase 2`(模型层 M1–M4 + 双求解后端 + 产物血缘)→ 计划 → 执行
 - **Notes for next session:** 先读 .planning/phases/01-data-foundation-minimal-calibration/01-CONTEXT.md(决定 D-01~D-13);首日待办:uv lock + 冒烟测试 opencv/numpy/scipy 三件套;数据只读已就位(80 姿态×8 连拍 + test 65 张)
