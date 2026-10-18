@@ -28,13 +28,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from calib.solve.opencv import solve_with_opencv
 
 from calib.io.config import BoardSpec
 from calib.models import create_model
 from calib.models.base import CameraModel, transform_to_camera
 from calib.solve.baseline import build_object_points
 from calib.solve.observation import ObservationSet
+from calib.solve.opencv import solve_with_opencv
 from calib.solve.result import (
     CalibrationResult,
     compute_result_metrics,
