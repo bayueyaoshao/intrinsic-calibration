@@ -57,3 +57,10 @@ def create_model(model_id: str) -> CameraModel:
 def registered_model_ids() -> tuple[str, ...]:
     """当前已注册的全部模型短名(按注册顺序;报告与 CLI 汇总用)。"""
     return tuple(_REGISTRY)
+
+
+# 底部 import 触发 @register_model 注册(必须放在注册表定义之后:
+# 模型文件 import 本模块的 register_model,循环在此闭合,Python 能处理
+# 这种"包先定义、子模块后加载"的顺序)。四个内置模型此后可被 create_model 查到。
+from calib.models import kb4, pinhole_brown  # noqa: E402(故意置底触发注册)
+
