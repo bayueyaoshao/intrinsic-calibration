@@ -27,12 +27,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### 模型 (MOD)
 
-- [ ] **MOD-01**: CameraModel 抽象(投影/反投影/雅可比/参数布局/初值策略)+ 注册机制;models/noise/evaluation 共享同一投影与雅可比实现(单一数学源)
-- [ ] **MOD-02**: 四类模型实现:M1 针孔+k1k2p1p2、M2 +k3、M3 有理 k1–k6p1p2、M4 鱼眼 KB4;附"与 OpenCV 投影结果一致"的比对测试和数值雅可比校验测试
+- [x] **MOD-01**: CameraModel 抽象(投影/反投影/雅可比/参数布局/初值策略)+ 注册机制;models/noise/evaluation 共享同一投影与雅可比实现(单一数学源)
+- [x] **MOD-02**: 四类模型实现:M1 针孔+k1k2p1p2、M2 +k3、M3 有理 k1–k6p1p2、M4 鱼眼 KB4;附"与 OpenCV 投影结果一致"的比对测试和数值雅可比校验测试
 
 ### 求解 (SOL)
 
-- [ ] **SOL-01**: 求解器统一接口 + 双后端(OpenCV 初始化 → scipy least_squares 精化,含鲁棒核),后端可互换、结果同构(CalibrationResult)
+- [x] **SOL-01**: 求解器统一接口 + 双后端(OpenCV 初始化 → scipy least_squares 精化,含鲁棒核),后端可互换、结果同构(CalibrationResult)
 - [ ] **SOL-02**: 多优化器/鲁棒核/初始化策略对比实验,验证是否按预期提升精度
 
 ### 评估 (EVAL)
@@ -58,7 +58,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### 迭代与回环 (ITER)
 
-- [ ] **ITER-01**: 阶段间仅通过带血缘(配置指纹+上游哈希+时间戳)的落盘产物通信,输入输出契约显式;每阶段可独立运行/重跑/检查
+- [x] **ITER-01**: 阶段间仅通过带血缘(配置指纹+上游哈希+时间戳)的落盘产物通信,输入输出契约显式;每阶段可独立运行/重跑/检查
 - [ ] **ITER-02**: 问题视图/姿态标记与剔除清单机制,剔除后重标定一键执行
 - [ ] **ITER-03**: 运行清单(run manifest)+ 跨运行对比——报告含本次 vs 上次关键指标 diff
 - [ ] **ITER-04**: 回环触发条件表内置,报告自动给出"回哪一步、做什么"的建议
@@ -103,6 +103,7 @@ Explicitly excluded. Documented to prevent scope creep.
 ## Traceability
 
 Which phases cover which requirements. Updated during roadmap creation.
+(注:BOARD-01/02、MODEL-01、MAINT-01 属 v2 预留需求,不在当前路线图内,故有意不进本表。)
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
@@ -140,6 +141,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REU-03 | Phase 6 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 32 total
 - Mapped to phases: 32 ✓ (100%)
 - Unmapped: 0

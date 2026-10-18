@@ -1,9 +1,10 @@
 ---
 phase: 02-m1-m4
 verified: 2026-10-18T04:44:46Z
-status: human_needed
-score: 5/6 must-haves verified(SC3 拆成"精化主线"与"鲁棒核严格线"两条,前者已证,后者待人工裁定)
+status: passed
+score: 6/6 must-haves verified(SC3 拆成"精化主线"与"鲁棒核严格线"两条,前者已证,后者经人工裁定接受:2026-10-18 开发者选 (a),成功标准 3 由 linear 路径兑现,soft_l1 偏差记为无坏点数据上的预期表现,见 02-HUMAN-UAT.md)
 overrides_applied: 0
+human_verification_resolved: 2026-10-18(3/3 通过,裁定与目检记录见 02-HUMAN-UAT.md)
 human_verification:
   - test: "soft_l1 鲁棒核严格线裁定:核对 run_20261018_022047(与 034000 逐位一致)中 m1__scipy_softl1/result.json 的 solver_meta(nfev=300、尾部改进 0、回代 RMS 0.2491 超 linear 参照 5.8% 被 5% 守门拒绝)与 m2__scipy_softl1(result.json:RMS 0.09213935 比纯 OpenCV 高 2.77e-4 即 +0.30%),在三选一中给出裁定:(a) 接受现状——成功标准 3 由 linear 精化路径兑现,soft_l1 偏差记为'鲁棒核优化另一目标的结构性预期';(b) 调 config/calibration.yaml 的 scipy 段(f_scale/max_nfev)后重跑 soft_l1 再判;(c) 维持严格线判不达标并安排返工。"
     expected: "一条明确的裁定结论(任一走向均可),02-05/02-06 SUMMARY 已按预案把证据全部落盘,裁定本身不需要改代码即可走 (a)。"

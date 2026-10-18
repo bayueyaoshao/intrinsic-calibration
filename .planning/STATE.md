@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-10-18T00:45:33.564Z"
+status: planning
+last_updated: "2026-10-18T05:24:27.741Z"
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 11
-  completed_plans: 5
-  percent: 17
+  completed_plans: 11
+  percent: 33
 ---
 
 # STATE: intrinsic-calibration
@@ -25,9 +25,9 @@ progress:
 Phase: 02 (m1-m4) — EXECUTING
 Plan: 1 of 6
 
-- **Phase:** 2 (模型层 M1–M4 + 双求解后端 + 产物血缘)
-- **Plan:** 6 个计划(02-01~02-06,5 个执行波)— next step `/gsd-execute-phase 2`
-- **Status:** Executing Phase 02
+- **Phase:** 3
+- **Plan:** Not started
+- **Status:** Ready to plan
 - **Progress:** `[█░░░░░░░░░] 1/6 phases`
 
 ## Performance Metrics

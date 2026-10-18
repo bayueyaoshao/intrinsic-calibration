@@ -161,7 +161,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 数据基座 + 最小完整标定流程 | 5/5 | Complete   | 2026-10-16 |
-| 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete   | 2026-10-18 |
+| 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete    | 2026-10-18 |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 0/TBD | Not started | - |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
 | 5. 误差预算 + 诊断 + 角点提取寻优 | 0/TBD | Not started | - |
