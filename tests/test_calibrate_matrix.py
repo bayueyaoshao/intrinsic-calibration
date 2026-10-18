@@ -237,3 +237,103 @@ def test_scipy_refine_no_worse_than_opencv(synthetic_matrix_tree: dict):
         rms = docs[name]["rms_overall"]
         assert rms <= rms_cv + 1e-9, \
             f"{name} 精化后 RMS {rms:.9f} 比纯 OpenCV {rms_cv:.9f} 还差(容差 1e-9)"
+
+
+# ---------------------------------------------------------------------------
+# 以下为 integration 部分:真实数据(依赖仓库 output/ 里已有的上游产物,
+# 日常开发 `uv run pytest -m "not integration"` 自动跳过)
+# ---------------------------------------------------------------------------
+
+# 真实上游产物所在的 run 目录(与仓库当前数据集对应;换数据集后同步更新)
+_REAL_CORNERS_RUN = "run_20261017_104817"
+_REAL_INGEST_RUN = "run_20261016_085253"
+# 复制进临时树的角点产物(sb 路线的 train/test npz 与 meta 四件)
+_REAL_STAGE_FILES = ("corners_train_sb.npz", "corners_train_sb.meta.json",
+                     "corners_test_sb.npz", "corners_test_sb.meta.json")
+
+
+@pytest.fixture(scope="module")
+def real_matrix_tree(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """真实数据缩小矩阵(m4)两轮独立进程跑 calibrate,返回两轮产物路径。
+
+    临时树按血缘里记录的相对路径原样落位上游产物(角点四件 + 数据清单),
+    角点 meta 的血缘记录因此能走"血缘优先"定位,与真实链路同一条。
+    两轮各是全新进程、全新 run_<时间戳> 目录,只靠落盘文件传递状态——
+    确定性验证要的就是"没有任何内存状态可蹭"。
+    """
+    tmp_root = tmp_path_factory.mktemp("matrix_real")
+
+    # config:仓库复制 + 矩阵裁剪为 m4(640 视图上单模型三路径,integration 可承受)
+    cfg_dir = tmp_root / "config"
+    cfg_dir.mkdir()
+    shutil.copy(REPO_ROOT / "config" / "board.yaml", cfg_dir / "board.yaml")
+    calib_yaml = (REPO_ROOT / "config" / "calibration.yaml").read_text(encoding="utf-8")
+    calib_yaml = calib_yaml.replace("models: [m1, m2, m3, m4]", "models: [m4]")
+    (cfg_dir / "calibration.yaml").write_text(calib_yaml, encoding="utf-8")
+
+    # 上游产物按原始相对路径落位(血缘记录的路径在临时树内逐字可解析)
+    corners_src = REPO_ROOT / "output" / "corners" / _REAL_CORNERS_RUN
+    corners_dst = tmp_root / "output" / "corners" / _REAL_CORNERS_RUN
+    corners_dst.mkdir(parents=True)
+    for name in _REAL_STAGE_FILES:
+        shutil.copy(corners_src / name, corners_dst / name)
+    ingest_dst = tmp_root / "output" / "ingest" / _REAL_INGEST_RUN
+    ingest_dst.mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "output" / "ingest" / _REAL_INGEST_RUN / "manifest.json",
+                ingest_dst / "manifest.json")
+
+    runs = []
+    for k in range(2):
+        result = _run_cli("calibrate", tmp_root, timeout=600)
+        if result.returncode != 0:
+            raise AssertionError(
+                f"真实树第 {k + 1} 轮 calib calibrate 退出码 {result.returncode}\n"
+                f"--- 标准输出 ---\n{result.stdout}\n--- 标准错误 ---\n{result.stderr}"
+            )
+        runs.append(_latest_run(tmp_root / "output" / "calibration"))
+    return {"tmp_root": tmp_root, "corners_run": corners_dst, "runs": runs}
+
+
+@pytest.mark.integration
+def test_real_two_runs_deterministic(real_matrix_tree: dict):
+    """成功标准 3(确定性):两轮独立进程,m4__opencv 与 m4__scipy 的
+    回代 RMS 与逐参数差异都 < 1e-12——同输入同代码,数值必须可复现。"""
+    run_a, run_b = real_matrix_tree["runs"]
+    for name in ("m4__opencv", "m4__scipy"):
+        doc_a = json.loads((run_a / name / "result.json").read_text(encoding="utf-8"))
+        doc_b = json.loads((run_b / name / "result.json").read_text(encoding="utf-8"))
+        assert doc_a["converged"] and doc_b["converged"], \
+            f"{name} 在真实数据上应收敛(第 1 轮 {doc_a['converged']},第 2 轮 {doc_b['converged']})"
+        assert abs(doc_a["rms_overall"] - doc_b["rms_overall"]) < 1e-12, \
+            (f"{name} 两轮 RMS 不一致:{doc_a['rms_overall']!r} vs "
+             f"{doc_b['rms_overall']!r}(确定性被破坏)")
+        assert set(doc_a["params"]) == set(doc_b["params"]), \
+            f"{name} 两轮参数键不一致"
+        for key, val_a in doc_a["params"].items():
+            assert abs(val_a - doc_b["params"][key]) < 1e-12, \
+                f"{name} 参数 {key} 两轮不一致:{val_a!r} vs {doc_b['params'][key]!r}"
+
+
+@pytest.mark.integration
+def test_real_lineage_hashes_and_init_from(real_matrix_tree: dict):
+    """成功标准 4(血缘链):真实数据上 m4__scipy 的 upstream 指纹与实际文件
+    重算一致(两轮各自对账),init_from 非空(初值来源可追溯)。"""
+    tmp_root = real_matrix_tree["tmp_root"]
+    corners_run = real_matrix_tree["corners_run"]
+
+    for k, run in enumerate(real_matrix_tree["runs"], start=1):
+        doc = json.loads((run / "m4__scipy" / "result.json").read_text(encoding="utf-8"))
+        upstream = doc["lineage"]["upstream"]
+
+        corners_npz = tmp_root / upstream["corners_train_sb.npz"]["path"]
+        assert corners_npz.resolve() == (corners_run / "corners_train_sb.npz").resolve(), \
+            f"第 {k} 轮引用的角点文件不在临时树落位处"
+        assert upstream["corners_train_sb.npz"]["sha256"] == _sha256(corners_npz), \
+            f"第 {k} 轮角点 npz 血缘指纹与实际文件不符,血缘链断裂"
+
+        init_file = tmp_root / upstream["init_result.json"]["path"]
+        assert init_file.is_file(), f"第 {k} 轮血缘指向的初值产物不存在:{init_file}"
+        assert upstream["init_result.json"]["sha256"] == _sha256(init_file), \
+            f"第 {k} 轮初值产物的血缘指纹与实际文件不符,血缘链断裂"
+
+        assert doc["init_from"], f"第 {k} 轮 init_from 为空,初值来源不可追溯"
