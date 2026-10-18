@@ -1036,12 +1036,13 @@ def fisher() -> None:
         "noise.json": noise_run / "noise.json",
     }
     for model_id in fisher_cfg.models:
-        for name in (f"{model_id}__scipy_result.json",
-                     f"{model_id}__scipy_extrinsics.npz",
-                     f"{model_id}__opencv_result.json"):
-            candidate = calib_run / name
+        # 标定产物按组合子目录存放(m{X}__scipy/result.json),不在 run 根下
+        for rel in (f"{model_id}__scipy/result.json",
+                    f"{model_id}__scipy/extrinsics.npz",
+                    f"{model_id}__opencv/result.json"):
+            candidate = calib_run / rel
             if candidate.is_file():
-                upstream[name] = candidate
+                upstream[rel] = candidate
     lineage = make_lineage(
         config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH},
         upstream=upstream,

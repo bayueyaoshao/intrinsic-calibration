@@ -86,7 +86,11 @@ def plot_spectrum(model_id: str, spectrum: dict, out_path: Path | str) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    eigvals = np.asarray(spectrum.get("eigvals") or [], dtype=np.float64)
+    # eigvals 可能是 numpy 数组(编排内存态)或列表(json 读回态):
+    # 不能写 `or []`——数组的真值判断有歧义,直接判 None
+    raw_eigvals = spectrum.get("eigvals")
+    eigvals = np.asarray([] if raw_eigvals is None else raw_eigvals,
+                         dtype=np.float64)
     cond = spectrum.get("condition_number")
     flag = spectrum.get("flag") or ""
     flag_text = {"warning": "警戒线以上", "degenerate": "已判退化"}.get(
