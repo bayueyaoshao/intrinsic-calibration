@@ -28,11 +28,21 @@ from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
+from calib.noise.artifacts import make_failure_report, save_noise_report
+from calib.noise.immerkaer import immerkaer_sigma
+from calib.noise.injection import run_injection_experiment
+from calib.noise.temporal import temporal_noise
+from calib.noise.transfer import (
+    build_transfer_curve,
+    fit_interp,
+    save_transfer_curve,
+)
 from calib.solve.matrix import run_calibration_matrix
 from calib.solve.observation import excluded_image_ids, load_observation_set
 from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
 from calib.visualization.mosaic import write_mosaics
+from calib.visualization.noise_figs import plot_transfer_curve
 from calib.visualization.overlay import (
     render_all,
     render_flagged_review,
@@ -648,7 +658,214 @@ def corners() -> None:
 
 @app.command(help="③ 测噪声底:同一拍摄位置的连拍相减,实测这批数据天生的噪声水平")
 def noise() -> None:
-    _not_implemented(3, "测噪声底")
+    """流水线第③步:测这批数据天生的噪声底(两条线:注入实验 + 时域实测)。
+
+    步骤:读配置 → 找最新一轮 corners 产物与同轮数据清单(血缘优先防串轮)
+    → 受控注入实验:给照片加已知大小的高斯噪声再重新找角点,量出
+    "像素噪声被检测器放大成多大角点误差"的传递曲线(逐张逐档逐重复
+    的角点位移全量落盘,D-13)→ 时域噪声底:同姿态连拍的角点波动直接
+    实测,逐姿态标注来源(实测 temporal / 单帧折算 immerkaer_transfer),
+    并分离检测器噪声与位姿抖动 → 组装 noise.json(契约键一个不少)+
+    明细 npz 与血缘旁车 → 中途失败也照常落盘失败报告(数值字段为 null,
+    中文 failure_note 写清原因,T-03-03-04)→ 打印中文汇总。
+    """
+    started = datetime.now(UTC)
+    board = load_board(BOARD_PATH)
+    cfg = load_calibration(CALIBRATION_PATH)
+    noise_cfg = cfg.noise
+
+    # 上游产物:最新一轮 corners 的 SB 生产路线角点(D-02)与同轮数据清单
+    corners_run = latest_run_dir(OUTPUT_ROOT, "corners")
+    manifest_path = _manifest_path_for(corners_run, "sb")
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    images: list[dict] = manifest["images"]
+    train_records = [r for r in images if r["split"] == "train"]
+
+    timestamp = started.strftime("%Y%m%d_%H%M%S")
+    round_id = f"run_{timestamp}"
+    out_dir = OUTPUT_ROOT / "noise" / round_id
+
+    # 血缘指纹:上游 = 角点产物 + 数据清单(test 切分进折算名单时也登记)
+    upstream = {
+        "corners_train_sb.npz": corners_run / "corners_train_sb.npz",
+        "manifest.json": manifest_path,
+    }
+    if "test" in noise_cfg.noise_splits:
+        upstream["corners_test_sb.npz"] = corners_run / "corners_test_sb.npz"
+    lineage = make_lineage(
+        config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH},
+        upstream=upstream,
+        round_id=round_id,
+    )
+
+    n_points = board.cols * board.rows
+    typer.echo(f"开始测噪声底:train 连拍 {len(train_records)} 张 × 注入 "
+               f"{noise_cfg.injection_n_levels} 档 σ × "
+               f"{noise_cfg.injection_n_repeats} 次重复"
+               f"(全流水线最重的一步,分钟级到十几分钟,请稍等)……")
+
+    try:
+        # ---- 第一条线:受控注入实验(只跑 train,test 独立照天然无连拍,
+        #      走折算路径,不进注入)----
+        def _progress(state: dict) -> None:
+            if state["done"] % 100 == 0 or state["done"] == state["total"]:
+                typer.echo(f"  注入重检 {state['done']}/{state['total']} 张……")
+
+        injection = run_injection_experiment(
+            corners_run / "corners_train_sb.npz", train_records, cfg,
+            board.cols, board.rows, out_dir, progress=_progress, lineage=lineage)
+        inj_meta = injection["meta"]
+
+        # 传递曲线:注入位移按 σ 档汇总 → PCHIP 保形插值 → 落盘 + 曲线图
+        with np.load(injection["displacements_path"], allow_pickle=False) as data:
+            disp = np.asarray(data["displacements"], dtype=np.float64)
+            grid = [float(x) for x in np.asarray(data["grid"]).ravel()]
+            inj_detected = np.asarray(data["detected"], dtype=bool)
+            inj_sources = np.asarray(data["source"])
+            inj_ids = [str(x) for x in np.asarray(data["image_ids"]).ravel()]
+            imm_std = np.asarray(data["sigma_immerkaer_std"], dtype=np.float64)
+            imm_robust = np.asarray(data["sigma_immerkaer_robust"], dtype=np.float64)
+        curve = build_transfer_curve(disp, grid, inj_detected, inj_sources)
+        curve_path = save_transfer_curve(curve, out_dir)
+        curve_interp = fit_interp(curve)
+        try:
+            fig_path: Path | None = plot_transfer_curve(
+                curve, out_dir / "transfer_curve.png")
+        except Exception as e:  # noqa: BLE001  # 故意宽接:曲线图是附加产物,失败不拦数据落盘
+            fig_path = None
+            typer.echo(f"  传递曲线图未生成(不影响数据产物):{type(e).__name__}——{e}")
+
+        # ---- 第二条线:时域噪声底(连拍波动实测 + 单帧折算退化)----
+        # train 各张的 Immerkaer σ 直接复用注入实验已算好的值(同一轮同一
+        # 口径,不重复读图);test 独立照没进注入,现场补算
+        immerkaer_sigmas = {
+            image_id: {"sigma_std": float(imm_std[i]),
+                       "sigma_robust": float(imm_robust[i])}
+            for i, image_id in enumerate(inj_ids)
+        }
+        test_records = [r for r in images if r["split"] == "test"]
+        for rec in test_records:
+            gray = imread_checked(Path(rec["path"]))
+            immerkaer_sigmas[rec["image_id"]] = immerkaer_sigma(gray)
+
+        temporal = temporal_noise(
+            corners_run / "corners_train_sb.npz", images, immerkaer_sigmas,
+            curve_interp, noise_cfg)
+
+        # ---- 组装报告:noise.json 只是目录不是替代(D-13),逐姿态逐角点
+        #      明细走 npz,读回与下游先验键、再取数 ----
+        poses = temporal["poses"]
+        per_corner_rows = []
+        for p in poses:
+            if p["sigma_per_corner"] is not None:
+                per_corner_rows.append(p["sigma_per_corner"])
+            else:
+                # 折算姿态没有逐角点表:NaN 占位行留位,来源列可分辨
+                per_corner_rows.append(np.full((n_points, 2), np.nan))
+        fail_copies = inj_meta["n_failed_copies"]
+        total_copies = fail_copies + inj_meta["n_detected_copies"]
+        report = {
+            "schema_version": "noise-v1",
+            "created": lineage["created"],
+            "lineage": {},  # save_noise_report 统一填(失败报告同样带全血缘)
+            "sigma_detector_corner": temporal["sigma_detector_corner"],
+            "sigma_temporal_corner": temporal["sigma_temporal_corner"],
+            "n_poses_temporal": temporal["n_poses_temporal"],
+            "n_poses_fallback": temporal["n_poses_fallback"],
+            "per_source_counts": temporal["per_source_counts"],
+            "outlier_poses": temporal["outlier_poses"],
+            "splits": {
+                "train": {
+                    **temporal["splits"]["train"],
+                    "sigma_temporal_rms": temporal["sigma_temporal_rms"],
+                    "sigma_temporal_median": temporal["sigma_temporal_median"],
+                    "pooling": temporal["pooling"],
+                },
+                "test": temporal["splits"]["test"],
+            },
+            "transfer_curve": {
+                "path": curve_path.name,
+                "grid": grid,
+                "figure": fig_path.name if fig_path else None,
+            },
+            "injection": {
+                "displacements_npz": Path(injection["displacements_path"]).name,
+                "per_image_json": Path(injection["per_image_path"]).name,
+                "n_images": inj_meta["n_images"],
+                "grid": grid,
+                "n_levels": inj_meta["n_levels"],
+                "n_repeats": inj_meta["n_repeats"],
+                "n_detected_copies": inj_meta["n_detected_copies"],
+                "n_failed_copies": fail_copies,
+                "copy_failure_rate": (fail_copies / total_copies)
+                if total_copies else None,
+            },
+            "meta": {
+                "corner_route": "sb",
+                "corners_run": corners_run.name,
+                "manifest": str(manifest_path),
+                "board": {"cols": board.cols, "rows": board.rows},
+                "duration_s": round(
+                    (datetime.now(UTC) - started).total_seconds(), 1),
+            },
+            "failure_note": None,
+            # 私有明细键:save_noise_report 取出转 npz,绝不进 json
+            "_temporal_detail": {
+                "pose_ids": [p["pose_id"] for p in poses],
+                "sigma_per_corner_all": np.stack(per_corner_rows),
+                "sources": [p["source"] for p in poses],
+                "sigma_pose": np.asarray([p["sigma_pose"] for p in poses]),
+                "sigma_detector": np.asarray(
+                    [p["sigma_detector_used"] for p in poses]),
+                "sigma_jitter": np.asarray([p["sigma_jitter"] for p in poses]),
+                "clamped": np.asarray([p["clamped"] for p in poses]),
+                "n_frames": np.asarray([p["n_frames"] for p in poses]),
+                "n_detected": np.asarray([p["n_detected"] for p in poses]),
+            },
+            "_immerkaer_detail": {
+                "image_ids": inj_ids + [r["image_id"] for r in test_records],
+                "sigma_std": np.concatenate([
+                    imm_std,
+                    np.asarray([immerkaer_sigmas[r["image_id"]]["sigma_std"]
+                                for r in test_records])]),
+                "sigma_robust": np.concatenate([
+                    imm_robust,
+                    np.asarray([immerkaer_sigmas[r["image_id"]]["sigma_robust"]
+                                for r in test_records])]),
+                "split": (["train"] * len(inj_ids)
+                          + ["test"] * len(test_records)),
+            },
+        }
+        paths = save_noise_report(out_dir, report, lineage)
+    except Exception as e:  # 故意宽接:失败契约(T-03-03-04),失败也落盘
+        note = f"噪声阶段中途失败:{type(e).__name__}——{e}"
+        save_noise_report(out_dir, make_failure_report(lineage, note), lineage)
+        typer.echo(f"测噪声底失败(失败报告已照常落盘,数值字段为 null):{note}")
+        typer.echo(f"  失败报告:{out_dir / 'noise.json'}")
+        raise typer.Exit(code=1) from e
+
+    # ---- 中文汇总:双口径一行读全 + 来源计数 + 注入规模 + 产物位置 ----
+    typer.echo("测噪声底完成,noise.json 与全保真明细已写盘。")
+    typer.echo(f"  全局双口径(像素/轴):时域噪声底 σ_temporal = "
+               f"{temporal['sigma_temporal_corner']:.4f},检测器口径 "
+               f"σ_detector = {temporal['sigma_detector_corner']:.4f}"
+               f"(两者差的那一截就是拍摄瞬间的位姿抖动)")
+    typer.echo(f"  来源计数:{temporal['n_poses_temporal']} 个姿态连拍实测"
+               f"(temporal)+ {temporal['n_poses_fallback']} 个姿态单帧折算"
+               f"(immerkaer_transfer)")
+    if temporal["outlier_poses"]:
+        tops = "、".join(f"{o['pose_id']}({o['sigma_pose']:.3f})"
+                         for o in temporal["outlier_poses"][:3])
+        typer.echo(f"  波动最大的姿态(只点名不剔除):{tops}")
+    typer.echo(f"  注入实验:{inj_meta['n_images']} 张 × {inj_meta['n_levels']} 档 σ"
+               f" × {inj_meta['n_repeats']} 次重复,副本检出 "
+               f"{inj_meta['n_detected_copies']}/{total_copies}"
+               f"(σ=0 校准行与高档位失败属预期,曲线拟合只取有效档)")
+    typer.echo(f"  传递曲线:{curve_path}"
+               f"(曲线图:{fig_path if fig_path else '未生成'})")
+    typer.echo(f"  噪声产物:{out_dir}")
+    typer.echo(f"  汇总报告:{paths['noise_json']}")
 
 
 def _manifest_path_for(corners_run: Path, corner_route: str = "sb") -> Path:
