@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +37,15 @@ _ALLOWED_LOSSES = {"linear", "soft_l1", "huber"}
 _ALLOWED_SCIPY_METHODS = {"trf"}
 # scipy 内部线性求解器:lsmr 是稀疏雅可比的标配搭配(trf 专属)
 _ALLOWED_TR_SOLVERS = {"lsmr"}
+# noise 段的白名单(第③步测噪声的全部参数,CLI 零参数,D-12):
+# Immerkaer 估计(用固定 3×3 卷积核从单张照片估像素噪声)的主线口径:
+# std = 整图标准式;robust = 稳健中位数式(JPEG 痕迹/纹理下更稳,默认主线)
+_ALLOWED_IMMERKAER_VARIANTS = {"std", "robust"}
+# 逐姿态 σ 汇成全局标量时的统计量:rms = 方均根(标量噪声假设下的自然聚合);
+# median = 中位数(离群姿态更不敏感)
+_ALLOWED_TEMPORAL_POOLING = {"rms", "median"}
+# 噪声分析处理哪些数据划分:train 连拍 + test 独立照默认都算,逐张来源标注
+_ALLOWED_NOISE_SPLITS = {"train", "test"}
 
 
 @dataclass(frozen=True)
@@ -190,6 +200,43 @@ class CalibrateConfig:
 
 
 @dataclass(frozen=True)
+class NoiseConfig:
+    """第③步测噪声底的全部参数(时域连拍 + Immerkaer 单帧 + 注入实验)。
+
+    白话背景:这一步回答"这批照片天生的噪声有多大",分三条线——
+    同姿态连拍互减实测时域波动;单张照片用 Immerkaer 方法估计像素噪声;
+    往真实照片上加已知强度的噪声重跑检测器,量出"像素噪声传到角点上
+    被放大成多大的定位误差"(传递曲线)。下面的字段控制这三条线怎么跑。
+
+    注入实验的合成加噪图不落盘(640 张 × 三十多个副本会有几十 GB),
+    靠 (图像, σ, 随机种子) 三元组精确复现——所以种子必须落在配置里。
+    """
+
+    # Immerkaer 估计的主线口径:std = 整图标准式;robust = 稳健中位数式。
+    # 默认 robust:JPEG 压缩痕迹与图像纹理会把 std 式抬高,中位数天然压低
+    # 结构区域的权重(研究 Pitfall 5);两种估计值都会逐张落盘供对照
+    immerkaer_variant: str = "robust"
+    # 注入实验 σ 网格的下限/上限(单位:灰阶,即像素噪声的标准差)。
+    # None = 自动锚定:下限取 max(0.25, 实测中位数σ/4)、上限取
+    # min(128, 实测中位数σ×32),覆盖实测噪声邻域并向上延伸到检测器失效区;
+    # 写死正数可覆盖自动锚定
+    injection_sigma_min: float | None = None
+    injection_sigma_max: float | None = None
+    injection_n_levels: int = 8      # σ 对数网格档数(另加一个 σ=0 参照档,不计入本数)
+    injection_n_repeats: int = 4     # 每档重复次数,压掉注入随机性(研究定 3–5)
+    injection_seed: int = 20261018   # 随机种子:逐张逐档逐重复可精确复现的根
+    # 并行进程上限:注入实验按图像切任务并行跑"加噪-检测";封顶 8 给系统留核
+    # (总核时估算见 03-RESEARCH Pattern 2);1 = 不开子进程,当前进程顺序跑
+    injection_max_workers: int = min(8, os.cpu_count() or 1)
+    # 逐姿态 σ 汇成全局标量时用哪种统计量:rms = 方均根(标量噪声假设下
+    # 的自然聚合,推荐);median = 中位数(个别离群姿态不拖总数)
+    temporal_pooling: str = "rms"
+    # 处理哪些数据划分:train 连拍与 test 独立照都算(研究开放问题 4 裁定),
+    # 逐张来源标注;只想算训练集可改成 [train]
+    noise_splits: tuple[str, ...] = ("train", "test")
+
+
+@dataclass(frozen=True)
 class MosaicConfig:
     """汇总拼图的布局参数(拼图只是索引,不是逐帧副本的替代)。"""
 
@@ -218,6 +265,7 @@ class CalibrationConfig:
     ingest: IngestConfig = field(default_factory=IngestConfig)
     corners: CornersConfig = field(default_factory=CornersConfig)
     calibrate: CalibrateConfig = field(default_factory=CalibrateConfig)
+    noise: NoiseConfig = field(default_factory=NoiseConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
 
 
@@ -486,6 +534,90 @@ def _parse_calibrate(raw: dict) -> CalibrateConfig:
                            fisheye=_parse_fisheye(section))
 
 
+def _parse_noise(raw: dict) -> NoiseConfig:
+    """解析 noise 段:主线口径、注入网格、重复数、种子、并行上限全部白名单校验。
+
+    注入实验是全项目最重的资源开关(网格 × 重复 × 并行一起放大),
+    档数/重复数/进程上限在这里用硬范围拦下,防止一个手滑的配置把
+    机器占满(研究 §Pitfall:DoS 自伤防线)。
+    """
+    cfg = NoiseConfig()
+    section = _check_is_dict(raw.get("noise", {}), "noise")
+
+    variant = section.get("immerkaer_variant", cfg.immerkaer_variant)
+    if variant not in _ALLOWED_IMMERKAER_VARIANTS:
+        _fail("noise.immerkaer_variant", variant,
+              f"可选:{sorted(_ALLOWED_IMMERKAER_VARIANTS)}"
+              f"(std = 整图标准式;robust = 稳健中位数式,默认主线)")
+
+    sigma_min = section.get("injection_sigma_min", cfg.injection_sigma_min)
+    sigma_max = section.get("injection_sigma_max", cfg.injection_sigma_max)
+    for name, value in (("noise.injection_sigma_min", sigma_min),
+                        ("noise.injection_sigma_max", sigma_max)):
+        if value is not None and (not isinstance(value, int | float)
+                                  or isinstance(value, bool) or value <= 0):
+            _fail(name, value,
+                  "留空(null,自动按实测噪声锚定)或 > 0 的数(注入 σ 网格上下限,灰阶)")
+    if sigma_min is not None and sigma_max is not None and sigma_max <= sigma_min:
+        _fail("noise.injection_sigma_min", (sigma_min, sigma_max),
+              f"网格下限必须小于上限(injection_sigma_max = {sigma_max!r}),"
+              f"否则对数网格没有跨度")
+
+    n_levels = section.get("injection_n_levels", cfg.injection_n_levels)
+    if (not isinstance(n_levels, int) or isinstance(n_levels, bool)
+            or not 3 <= n_levels <= 16):
+        _fail("noise.injection_n_levels", n_levels,
+              "必须是 3 到 16 的整数(σ 对数网格档数,不含 σ=0 参照档;"
+              "档太少曲线不准,档太多纯浪费算力)")
+
+    n_repeats = section.get("injection_n_repeats", cfg.injection_n_repeats)
+    if (not isinstance(n_repeats, int) or isinstance(n_repeats, bool)
+            or not 3 <= n_repeats <= 5):
+        _fail("noise.injection_n_repeats", n_repeats,
+              "必须是 3 到 5 的整数(每档重复次数,少于 3 次压不掉注入随机性,"
+              "多于 5 次算力收益趋平)")
+
+    seed = section.get("injection_seed", cfg.injection_seed)
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        _fail("noise.injection_seed", seed,
+              "必须是 >= 0 的整数(注入实验随机种子,换种子 = 换一批加噪副本)")
+
+    workers = section.get("injection_max_workers", cfg.injection_max_workers)
+    cpu = os.cpu_count() or 1
+    if (not isinstance(workers, int) or isinstance(workers, bool)
+            or not 1 <= workers <= cpu):
+        _fail("noise.injection_max_workers", workers,
+              f"必须是 1 到 {cpu} 的整数(并行进程上限,本机 CPU 核数 = {cpu};"
+              f"超过核数只会互相抢资源)")
+
+    pooling = section.get("temporal_pooling", cfg.temporal_pooling)
+    if pooling not in _ALLOWED_TEMPORAL_POOLING:
+        _fail("noise.temporal_pooling", pooling,
+              f"可选:{sorted(_ALLOWED_TEMPORAL_POOLING)}"
+              f"(rms = 方均根,标量噪声假设下的自然聚合;median = 中位数)")
+
+    splits = section.get("noise_splits", cfg.noise_splits)
+    if (not isinstance(splits, (list, tuple)) or not splits
+            or not all(isinstance(x, str) for x in splits)):
+        _fail("noise.noise_splits", splits, "必须是非空的划分名单(如 [train, test])")
+    bad_splits = [x for x in splits if x not in _ALLOWED_NOISE_SPLITS]
+    if bad_splits:
+        _fail("noise.noise_splits", bad_splits,
+              f"含有不认识的划分名;可选:{sorted(_ALLOWED_NOISE_SPLITS)}")
+
+    return NoiseConfig(
+        immerkaer_variant=variant,
+        injection_sigma_min=None if sigma_min is None else float(sigma_min),
+        injection_sigma_max=None if sigma_max is None else float(sigma_max),
+        injection_n_levels=n_levels,
+        injection_n_repeats=n_repeats,
+        injection_seed=seed,
+        injection_max_workers=workers,
+        temporal_pooling=pooling,
+        noise_splits=tuple(splits),
+    )
+
+
 def _parse_visualization(raw: dict) -> VisualizationConfig:
     section = _check_is_dict(raw.get("visualization", {}), "visualization")
     quality = section.get("jpeg_quality", VisualizationConfig.jpeg_quality)
@@ -556,5 +688,6 @@ def load_calibration(path: Path | str) -> CalibrationConfig:
         ingest=IngestConfig(precheck=_parse_precheck(ingest_section)),
         corners=_parse_corners(top),
         calibrate=_parse_calibrate(top.get("calibrate", {})),
+        noise=_parse_noise(top),
         visualization=_parse_visualization(top),
     )
