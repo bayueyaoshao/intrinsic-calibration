@@ -29,11 +29,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from calib.solve.scipy_solver import (
-    _auto_f_scale,
-    is_practically_converged,
-    solve_with_scipy,
-)
 
 from calib.io.config import BoardSpec, ScipyConfig
 from calib.models import create_model
@@ -49,6 +44,11 @@ from calib.solve.result import (
     load_result,
     make_failure,
     save_result,
+)
+from calib.solve.scipy_solver import (
+    _auto_f_scale,
+    is_practically_converged,
+    solve_with_scipy,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
