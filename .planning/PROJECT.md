@@ -14,7 +14,7 @@
 
 <!-- Shipped and confirmed valuable. -->
 
-(None yet — ship to validate)
+- [x] 四类候选相机模型:针孔+Brown(k1k2p1p2 / k1k2k3p1p2 / 有理模型 k1–k6p1p2)与鱼眼等距 KB4,统一 CameraModel 抽象 + 注册机制,新模型零侵入扩充 — *Validated in Phase 2: 模型层 M1–M4 + 双求解后端 + 产物血缘(投影与 OpenCV 一致 ~5e-13px,解析雅可比经数值验证,玩具模型零侵入注册实测通过,2026-10-18)*
 
 ### Active
 
@@ -24,7 +24,6 @@
 - [ ] 噪声底分析:利用同姿态 8 连拍实测时域噪声;缺失时退化为单帧估计(Immerkaer/平坦区域),报告中标注来源
 - [ ] Fisher 信息 / CRLB 可达精度预测:标定前预测每个内参的方差理论下界,并检测位姿分布退化(如 fx–cy 耦合)
 - [ ] 角点提取寻优:候选方法/参数在合成退化实验下对比定位误差,用数据证明当前条件最优
-- [ ] 四类候选相机模型:针孔+Brown(k1k2p1p2 / k1k2k3p1p2 / 有理模型 k1–k6p1p2)与鱼眼等距 KB4,统一 CameraModel 抽象 + 注册机制,新模型零侵入扩充
 - [ ] 抗过拟合标定:按姿态切分 train/val,K 折交叉验证,模型选择只看 held-out 泛化误差(辅以 BIC、参数可辨识性)
 - [ ] 多优化器对比:不同非线性优化方法/鲁棒核策略,验证是否按预期提升精度
 - [ ] 四类评估实验:K 折交叉验证(按姿态)、重复张分组(每姿态各取第 i 张分组分别标定,得到纯噪声影响+CRLB 实证校验)、bootstrap ×N、留一姿态 ×N(问题姿态定位)
@@ -102,4 +101,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-16 after requirements finalization*
+*Last updated: 2026-10-18 — Phase 2 complete(M1–M4 模型层 + 双求解后端 + 血缘落盘已验证;下一步 Phase 3 噪声底 + Fisher/CRLB)*
