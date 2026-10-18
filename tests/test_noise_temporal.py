@@ -14,12 +14,23 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+import calib.noise.artifacts as artifacts_module
 from calib.io.config import NoiseConfig
+from calib.noise.artifacts import (
+    IMMERKAER_NPZ_NAME,
+    REPORT_KEYS,
+    TEMPORAL_NPZ_NAME,
+    load_noise_report,
+    make_failure_report,
+    save_noise_report,
+)
 from calib.noise.temporal import load_corners_rows, pose_groups, temporal_noise
 
 N_POINTS = 88  # 与真实棋盘同规格(11×8 内角点)
@@ -78,8 +89,11 @@ def _burst_npz(tmp_path, name: str, spec: list[tuple[str, int, float, int]],
         seed += 10
         for r in range(n_frames):
             detected = r < n_detected
-            row = truth + rng.normal(0.0, sigma, size=(N_POINTS, 2))
-            if not detected:
+            # 只给检出的帧抽噪声:这样"4 帧抹掉 1 帧"与"只写 3 帧"两版里,
+            # 同样那 3 张检出帧的噪声逐位一致,行为 4 的对照才成立
+            if detected:
+                row = truth + rng.normal(0.0, sigma, size=(N_POINTS, 2))
+            else:
                 row = np.full((N_POINTS, 2), np.nan)
             image_ids.append(f"{pose_id}_r{r}")
             uv_rows.append(row)
@@ -186,21 +200,27 @@ def test_behavior3_jitter_separation_with_clamped_flag(tmp_path):
 
 def test_behavior4_undetected_frames_excluded_bitwise(tmp_path):
     """同一姿态 4 帧里抹掉 1 帧(整行 NaN + detected=False):
-    结果与"只有 3 帧"的版本逐位一致。"""
-    # 版本 A:4 帧全检出(种子 7)
+    逐角点 σ 表与"只写那 3 张检出帧"的版本逐位一致。"""
+    # 版本 A:4 帧全检出(种子 7,前 3 帧的噪声与版本 B 的检出帧相同)
     npz_a, records_a, sigmas_a = _burst_npz(
         tmp_path, "b4a", [("pX", 4, 0.8, 4)], seed0=7)
     # 版本 B:同种子同 4 帧,但第 1 帧标未检出(检出帧数 = 3)
     npz_b, records_b, sigmas_b = _burst_npz(
         tmp_path, "b4b", [("pX", 4, 0.8, 3)], seed0=7)
+    # 版本 C:只有 3 帧、全检出(与 B 的 3 张检出帧同种子同噪声)
+    npz_c, records_c, sigmas_c = _burst_npz(
+        tmp_path, "b4c", [("pX", 3, 0.8, 3)], seed0=7)
 
     ra = temporal_noise(npz_a, records_a, sigmas_a, _fake_interp(0.2), _cfg())
     rb = temporal_noise(npz_b, records_b, sigmas_b, _fake_interp(0.2), _cfg())
+    rc = temporal_noise(npz_c, records_c, sigmas_c, _fake_interp(0.2), _cfg())
     pa = _by_pose(ra)["pX"]
     pb = _by_pose(rb)["pX"]
+    pc = _by_pose(rc)["pX"]
 
-    np.testing.assert_array_equal(pa["sigma_per_corner"], pb["sigma_per_corner"])
-    assert pa["sigma_pose"] == pb["sigma_pose"]
+    # 抹掉的帧绝不进波动统计:4 帧版(剔除 1 帧)与 3 帧版逐位一致
+    np.testing.assert_array_equal(pb["sigma_per_corner"], pc["sigma_per_corner"])
+    assert pb["sigma_pose"] == pc["sigma_pose"]
     assert pa["n_detected"] == 4 and pb["n_detected"] == 3
 
 
@@ -241,12 +261,13 @@ def test_test_split_images_get_per_image_transfer_entries(tmp_path):
     """cfg.noise_splits 含 test 时:test 每张独立照一条折算记录,
     source 全为 immerkaer_transfer、每轴 σ 命中假曲线。"""
     npz, records, sigmas = _burst_npz(tmp_path, "tt", [("pA", 4, 0.5, 4)])
-    for k in range(2):
+    for k, robust_sigma in enumerate((3.0, 2.5)):
         image_id = f"solo_t{k}"
         records.append({"image_id": image_id, "path": f"x/{image_id}.jpg",
                         "split": "test", "pose_id": image_id,
                         "repeat_idx": 0, "n_repeats": 1})
-        sigmas[image_id] = {"sigma_std": 3.0, "sigma_robust": 2.5}
+        # 主线口径默认 robust:两档不同的稳健值用于断言"取的正是主线口径"
+        sigmas[image_id] = {"sigma_std": 99.0, "sigma_robust": robust_sigma}
 
     result = temporal_noise(npz, records, sigmas, _fake_interp(1.0),
                             _cfg(splits=("train", "test")))
@@ -325,7 +346,109 @@ def test_temporal_noise_missing_immerkaer_sigma_raises(tmp_path):
 def test_temporal_noise_npz_row_without_train_record_raises(tmp_path):
     """角点行在照片清单里找不到(多半串了轮):中文报错点名,不硬算。"""
     npz, records, sigmas = _burst_npz(tmp_path, "mm2", [("pA", 4, 0.5, 4)])
-    alien = dict(records[0])
-    alien["image_id"] = "来自另一轮的照片"
-    with pytest.raises(ValueError, match="来自另一轮的照片"):
-        temporal_noise(npz, [alien], sigmas, _fake_interp(0.2), _cfg())
+    shortlist = [r for r in records if r["image_id"] != "pA_r2"]
+    with pytest.raises(ValueError, match="pA_r2"):
+        temporal_noise(npz, shortlist, sigmas, _fake_interp(0.2), _cfg())
+
+
+# ---- 产物契约:noise.json 落盘 / 读回 / 失败报告 ----
+
+def _sample_report() -> dict:
+    """一份最小但结构齐全的成功报告(带两个私有明细键)。"""
+    return {
+        "schema_version": "noise-v1",
+        "created": "2026-10-18T00:00:00Z",
+        "lineage": {},
+        "sigma_detector_corner": 0.12,
+        "sigma_temporal_corner": 0.34,
+        "n_poses_temporal": 1,
+        "n_poses_fallback": 1,
+        "per_source_counts": {"temporal": 1, "immerkaer_transfer": 1},
+        "outlier_poses": [{"pose_id": "pB", "sigma_pose": 0.5}],
+        "splits": {"train": {"n_poses": 2},
+                   "test": {"n_images": 1, "per_image": []}},
+        "transfer_curve": {"path": "transfer_curve.json"},
+        "injection": {"n_images": 2},
+        "meta": {},
+        "failure_note": None,
+        "_temporal_detail": {
+            "pose_ids": ["pA", "pB"],
+            "sigma_per_corner_all": np.zeros((2, 3, 2)),
+            "sources": ["temporal", "immerkaer_transfer"],
+            "sigma_pose": np.asarray([0.1, 0.5]),
+            "sigma_detector": np.asarray([0.1, 0.1]),
+            "sigma_jitter": np.asarray([0.0, 0.0]),
+            "clamped": np.asarray([False, True]),
+            "n_frames": np.asarray([4, 1]),
+            "n_detected": np.asarray([4, 1]),
+        },
+        "_immerkaer_detail": {
+            "image_ids": ["i0", "i1"],
+            "sigma_std": np.asarray([1.0, 2.0]),
+            "sigma_robust": np.asarray([1.5, 2.5]),
+            "split": ["train", "test"],
+        },
+    }
+
+
+def test_save_and_load_roundtrip_contract(tmp_path):
+    """save → load 往返:契约键一个不少,明细 npz 键名/形状对,血缘旁车在;
+    私有明细键绝不进 json,只留路径引用(汇总是索引不是替代,D-13)。"""
+    lineage = {"created": "2026-10-18T00:00:00Z", "round_id": "run_x"}
+    paths = save_noise_report(tmp_path, _sample_report(), lineage)
+    assert paths["noise_json"] == tmp_path / "noise.json"
+    assert paths["temporal_npz"] == tmp_path / TEMPORAL_NPZ_NAME
+    assert paths["immerkaer_npz"] == tmp_path / IMMERKAER_NPZ_NAME
+
+    loaded = load_noise_report(tmp_path)
+    for key in REPORT_KEYS:
+        assert key in loaded["report"], f"缺契约键:{key}"
+    assert loaded["report"]["splits"]["train"]["detail_npz"] == TEMPORAL_NPZ_NAME
+    assert loaded["report"]["meta"]["immerkaer_detail_npz"] == IMMERKAER_NPZ_NAME
+    assert loaded["report"]["lineage"] == lineage
+    assert loaded["temporal"]["sigma_per_corner_all"].shape == (2, 3, 2)
+    assert loaded["temporal"]["clamped"].dtype == bool
+    assert loaded["immerkaer"]["image_ids"].tolist() == ["i0", "i1"]
+    assert loaded["immerkaer"]["sigma_robust"].tolist() == [1.5, 2.5]
+    # 血缘旁车:每份明细 npz 的 meta.json 带同一份指纹(产物来源可考,T-03-03-03)
+    for name in (TEMPORAL_NPZ_NAME, IMMERKAER_NPZ_NAME):
+        meta = json.loads(
+            (tmp_path / f"{Path(name).stem}.meta.json").read_text(encoding="utf-8"))
+        assert meta["lineage"] == lineage
+
+
+def test_make_failure_report_structure_and_empty_note_rejected(tmp_path):
+    """失败契约:结构键全在、数值字段一律 None、空说明当场拒;
+    失败报告照常落盘(没有明细,npz 路径为 None)。"""
+    failure = make_failure_report(
+        {"created": "t", "round_id": "r"}, "注入实验失败:读不到角点文件")
+    for key in REPORT_KEYS:
+        assert key in failure
+    assert failure["sigma_detector_corner"] is None
+    assert failure["sigma_temporal_corner"] is None
+    assert failure["n_poses_temporal"] is None
+    assert failure["failure_note"].strip()
+    assert failure["per_source_counts"] == {} and failure["outlier_poses"] == []
+
+    paths = save_noise_report(tmp_path / "fail", failure,
+                              {"created": "t", "round_id": "r"})
+    assert paths["temporal_npz"] is None and paths["immerkaer_npz"] is None
+    reloaded = load_noise_report(tmp_path / "fail")
+    assert reloaded["temporal"] is None and reloaded["immerkaer"] is None
+
+    with pytest.raises(ValueError, match="failure_note"):
+        make_failure_report({}, "   ")
+
+
+def test_save_noise_report_missing_contract_keys_raises(tmp_path):
+    """顶层契约键缺失:写盘前当场中文报错,不许残缺的 json 落盘。"""
+    with pytest.raises(AssertionError, match="契约键缺失"):
+        save_noise_report(tmp_path / "bad",
+                          {"schema_version": "noise-v1"}, {})
+
+
+def test_artifacts_module_has_no_cli_dependency():
+    """库层不依赖 CLI 层:artifacts.py 源码里不许出现 typer(白话:算数的
+    模块不许反过来管命令行打印,依赖只能单向)。"""
+    source = Path(artifacts_module.__file__).read_text(encoding="utf-8")
+    assert "typer" not in source
