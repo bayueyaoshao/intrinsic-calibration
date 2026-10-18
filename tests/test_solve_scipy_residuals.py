@@ -278,3 +278,59 @@ def test_kb4_point_jacobian_near_axis_limit():
             np.testing.assert_allclose(
                 jac[k, :, axis], numeric, rtol=1e-6, atol=1e-9,
                 err_msg=f"KB4 近轴点 {pt} 的像素导数(第 {axis} 轴)对中心差分不一致")
+
+
+# ---- D-08:残差单一来源(投影只经模型层)----
+
+def test_residual_single_source_monkeypatch_lock(monkeypatch):
+    """D-08 行为锁:给 model.project 的返回值整体加 +0.25 像素(u 分量),
+    残差的全部 u 行(偶数行)必须恰好平移 0.25、v 行不动——证明残差
+    逐点调用的投影就是模型层的 project,别处没有第二份投影数学。
+    测试末尾显式还原并复核残差回到原值,保证没留下污染。"""
+    obs, model, params, rvecs, tvecs = _random_truth_obs("m2", n_views=2, seed=29)
+    residual_fn = make_residual_fn(model, obs)
+    theta = pack_theta(model, params, rvecs, tvecs)
+    before = residual_fn(theta)
+
+    original_project = model.project
+
+    def shifted_project(pts_cam, params_):
+        uv = original_project(pts_cam, params_)
+        return uv + np.array([0.25, 0.0])  # 只动 u,留 v 当对照
+
+    monkeypatch.setattr(model, "project", shifted_project)
+    after = residual_fn(theta)
+
+    diff = after - before
+    np.testing.assert_allclose(diff[0::2], 0.25, rtol=0, atol=1e-12,
+                               err_msg="投影加 0.25px,u 行残差应恰好平移 0.25")
+    np.testing.assert_allclose(diff[1::2], 0.0, atol=1e-12,
+                               err_msg="投影只动了 u 分量,v 行残差不该动")
+
+    # 显式还原后复核:残差回到原值(替身没有留下任何痕迹)
+    monkeypatch.undo()
+    np.testing.assert_array_equal(residual_fn(theta), before)
+
+
+def test_scipy_side_sources_have_no_opencv_projection_calls():
+    """D-08 源码级锁定:residuals.py 与 scipy_solver.py 的源码里不出现
+    OpenCV 投影函数的名字——scipy 侧的投影只准经模型层,第二份投影
+    数学(哪怕是借 OpenCV 的)都不许出现,出现即打破"理论算的和求解
+    用的同一套数学"。"""
+    for name in ("residuals.py", "scipy_solver.py"):
+        source = (REPO_ROOT / "src" / "calib" / "solve" / name).read_text(
+            encoding="utf-8")
+        assert "projectPoints" not in source, \
+            f"{name} 出现了 OpenCV 投影函数名——投影必须只经模型层(D-08)"
+
+
+def test_numdifftools_never_in_production_sources():
+    """D-10 源码级锁定:numdifftools(数值差分基准)只准进 tests/,solve/
+    与 models/ 的产品代码里出现即违规——产品路径的雅可比必须是解析式,
+    差分只配当测试里的对照答案。"""
+    for module in ("solve", "models"):
+        for py_file in sorted((REPO_ROOT / "src" / "calib" / module).rglob("*.py")):
+            source = py_file.read_text(encoding="utf-8")
+            assert "numdifftools" not in source, \
+                f"{py_file.relative_to(REPO_ROOT)} 出现 numdifftools——" \
+                f"数值差分只准进测试,产品路径雅可比必须解析式(D-10)"
