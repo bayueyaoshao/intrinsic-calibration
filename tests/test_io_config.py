@@ -422,6 +422,82 @@ def test_config_source_uses_safe_load_only():
     assert "yaml.load(" not in source
 
 
+# ---- 第⑤步理论精度极限:fisher 段进配置(D-12:参数只从 config 读)----
+
+def test_fisher_defaults_when_section_missing(tmp_path):
+    """fisher 段整体缺省:全部用内置默认(与随仓库 yaml 一致)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
+    cfg = load_calibration(p)
+    assert cfg.fisher.models == ("m1", "m2", "m3", "m4")
+    assert cfg.fisher.cond_warning == 1e4
+    assert cfg.fisher.cond_degenerate == 1e6
+    assert cfg.fisher.sigma_band_rel == pytest.approx(0.267)
+    assert cfg.fisher.linearization_check is True
+    assert cfg.fisher.crosscheck_enabled is True
+
+
+def test_fisher_repo_yaml_values():
+    """真实 calibration.yaml 的 fisher 段:逐键与随仓库默认一致。"""
+    cfg = load_calibration(REAL_CALIB)
+    assert cfg.fisher.models == ("m1", "m2", "m3", "m4")
+    assert cfg.fisher.cond_warning == 1e4
+    assert cfg.fisher.cond_degenerate == 1e6
+    assert cfg.fisher.sigma_band_rel == pytest.approx(0.267)
+    assert cfg.fisher.linearization_check is True
+    assert cfg.fisher.crosscheck_enabled is True
+
+
+def test_fisher_bad_model_name_chinese_error(tmp_path):
+    """models 里混入不认识的短名:报错点名 fisher.models 并列出可选清单。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("fisher:\n  models: [m1, m9]\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "fisher.models" in message
+    assert "m9" in message and "可选" in message
+
+
+def test_fisher_cond_threshold_le_one_rejected(tmp_path):
+    """条件数阈值 ≤ 1:条件数是"最软方向与最硬方向的比值",恒 ≥ 1,
+    阈值 ≤ 1 没有物理意义,配置层直接拦下。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("fisher:\n  cond_warning: 0.5\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="fisher\\.cond_warning"):
+        load_calibration(p)
+
+
+def test_fisher_cond_order_violation(tmp_path):
+    """警戒线 ≥ 退化线:分档失去意义,报错点名两个字段。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text(
+        "fisher:\n  cond_warning: 1.0e8\n  cond_degenerate: 1.0e6\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "fisher.cond_warning" in message and "cond_degenerate" in message
+
+
+def test_fisher_sigma_band_rel_zero_rejected(tmp_path):
+    """敏感性带半宽 ≤ 0(或 ≥ 1):带失去意义,报错点名字段。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("fisher:\n  sigma_band_rel: 0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="fisher\\.sigma_band_rel"):
+        load_calibration(p)
+
+
+def test_fisher_bool_field_rejects_int(tmp_path):
+    """布尔键写 1/0(yaml 手写常见笔误):必须报错并点名字段。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("fisher:\n  linearization_check: 1\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    assert "fisher.linearization_check" in str(exc_info.value)
+
+
 # ---- 血缘指纹(ITER-01 地基)----
 
 def test_sha256_file_matches_hashlib(tmp_path):

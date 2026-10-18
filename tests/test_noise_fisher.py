@@ -16,6 +16,7 @@ CRLB 实证校验"无关——这里锁的是"数学没算错"这根桩。
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,12 +25,15 @@ import numpy as np
 import pytest
 from scipy.optimize import least_squares
 from scipy.sparse import csr_matrix
+from scipy.spatial.transform import Rotation
 
 from calib.io.config import BoardSpec
 from calib.models import create_model
 from calib.models.base import transform_to_camera
 from calib.noise.fisher import (
     SIGMA_BAND_REL_8,
+    aggregate_observations,
+    build_aggregated_observation_set,
     crlb_se,
     marginalized_fisher,
     sensitivity_band,
@@ -397,3 +401,198 @@ def test_numdifftools_never_in_calib_source():
             for p in (repo_root / "src" / "calib").rglob("*.py")
             if "numdifftools" in p.read_text(encoding="utf-8")]
     assert not hits, f"src/calib 里出现 numdifftools 引用(D-10 违规):{hits}"
+
+
+# ==== 以下为 80 姿态聚合观测集与聚合位姿(03-05,D-01/D-02)====
+
+# 小棋盘(3×2 = 6 个角点)——聚合逻辑不关心角点数,数组小跑得快
+_SMALL_BOARD = BoardSpec(cols=3, rows=2)
+_P = _SMALL_BOARD.cols * _SMALL_BOARD.rows
+
+
+def _write_corners_npz(path: Path, image_ids: list[str], uv: np.ndarray,
+                       detected: np.ndarray, source: list[str]) -> Path:
+    """按 corners 产物的落盘格式写一份合成角点文件(体例照 corners/artifacts.py)。"""
+    np.savez(path, image_ids=np.asarray(image_ids),
+             uv=np.asarray(uv, dtype=np.float64),
+             detected=np.asarray(detected, dtype=bool),
+             source=np.asarray(source))
+    return path
+
+
+def _burst_records(ids_per_pose: dict[str, list[str]]) -> list[dict]:
+    """按姿态造 manifest 记录片段(image_id/pose_id/split/n_repeats)。"""
+    records = []
+    for pose_id, ids in ids_per_pose.items():
+        for k, image_id in enumerate(ids):
+            records.append({"image_id": image_id, "pose_id": pose_id,
+                            "split": "train", "repeat_idx": k,
+                            "n_repeats": len(ids)})
+    return records
+
+
+# ---- 行为 1:uv 逐点均值逐位一致 + detected_agg = 全部帧检出 + 来源留痕 ----
+
+def test_aggregate_observations_uv_mean_matches_hand_calculation(tmp_path):
+    """合成 2 姿态 × 3 帧(同一角点真值加已知小扰动)→
+
+    - uv_agg 与手算"检出帧逐点均值"逐位一致(D-02:均值只吃检出帧);
+    - detected_agg = 该姿态全部帧检出(有一帧没检出就记 False);
+    - 来源列表逐姿态留痕(哪些帧进了均值,可审计)。
+    """
+    base = np.array([[100.0 + 3.0 * i, 200.0 + 2.0 * i] for i in range(_P)])
+    # pose A:3 帧,第 2 帧未检出(整行 NaN)→ 均值只吃第 1、3 帧
+    uv_a = np.stack([base + 0.10, np.full((_P, 2), np.nan), base - 0.06])
+    # pose B:3 帧全检出
+    uv_b = np.stack([base + 0.20, base + 0.30, base + 0.40])
+    uv = np.concatenate([uv_a, uv_b])
+    detected = np.array([True, False, True, True, True, True])
+    ids = ["a1", "a2", "a3", "b1", "b2", "b3"]
+    sources = ["sb", "sb", "classic_fallback", "sb", "sb", "sb"]
+    npz = _write_corners_npz(tmp_path / "corners_train_sb.npz",
+                             ids, uv, detected, sources)
+
+    # 每帧一份"外参"(位姿):解侧只含检出帧(与真实标定产物同构)
+    rng = np.random.default_rng(7)
+    rvecs_all = rng.uniform(-0.1, 0.1, (5, 3))
+    tvecs_all = rng.uniform(-10, 10, (5, 3))
+    image_ids_all = ["a1", "a3", "b1", "b2", "b3"]
+    records = _burst_records({"poseA": ["a1", "a2", "a3"],
+                              "poseB": ["b1", "b2", "b3"]})
+
+    agg = aggregate_observations(
+        npz, records, rvecs_all, tvecs_all, image_ids_all,
+        image_size=(640, 480))
+
+    # uv 均值逐位一致:pose A 只吃检出的第 1、3 帧
+    expect_a = (uv[0] + uv[2]) / 2.0
+    np.testing.assert_array_equal(agg["poses"]["poseA"]["uv_agg"], expect_a,
+                                  err_msg="poseA 的逐点均值与手算不一致")
+    expect_b = (uv[3] + uv[4] + uv[5]) / 3.0
+    np.testing.assert_array_equal(agg["poses"]["poseB"]["uv_agg"], expect_b,
+                                  err_msg="poseB 的逐点均值与手算不一致")
+
+    # detected_agg = 该姿态全部帧检出
+    assert agg["poses"]["poseA"]["detected_agg"] is False
+    assert agg["poses"]["poseB"]["detected_agg"] is True
+
+    # 来源列表逐姿态留痕(只记进了均值的帧)
+    assert agg["poses"]["poseA"]["sources"] == ["sb", "classic_fallback"]
+    assert agg["poses"]["poseB"]["sources"] == ["sb", "sb", "sb"]
+
+    # 聚合位姿:与逐帧外参的手算均值一致(平移逐位;旋转与 scipy 对照)
+    np.testing.assert_array_equal(
+        agg["poses"]["poseA"]["t_mean"],
+        (tvecs_all[0] + tvecs_all[1]) / 2.0)
+    np.testing.assert_allclose(
+        agg["poses"]["poseA"]["rot_mean"],
+        Rotation.from_rotvec(rvecs_all[[0, 1]]).mean().as_rotvec(),
+        atol=1e-15)
+
+
+# ---- 行为 2:聚合位姿红线——旋转均值,绝不逐分量平均 rodrigues ----
+
+def test_aggregate_pose_rotation_mean_is_not_component_mean():
+    """对两个转角较大的 rodrigues 向量(各绕不同轴 0.5 rad):
+
+    - 聚合旋转与 scipy Rotation.mean() 对照一致(实现即用弦长均值);
+    - 与"逐分量平均"的结果显著不同(两者旋转差 > 1e-3 弧度)——
+      把"rodrigues 向量不是线性空间,逐分量平均不是旋转平均"这条禁令
+      用数字锁死,谁改回逐分量平均谁就红。
+    """
+    rvecs = np.array([[0.5, 0.0, 0.0], [0.0, 0.5, 0.0]])
+    tvecs = np.zeros((2, 3))
+    base = np.zeros((_P, 2))
+    uv = np.stack([base, base])
+    ids = ["x1", "x2"]
+    npz = _write_corners_npz(_rot_test_npz_path(), ids, uv,
+                             np.array([True, True]), ["sb", "sb"])
+    records = _burst_records({"poseX": ids})
+    agg = aggregate_observations(npz, records, rvecs, tvecs, ids,
+                                 image_size=(64, 48))
+    rot_mean = agg["poses"]["poseX"]["rot_mean"]
+
+    # 与 scipy 弦长均值一致(逐位)
+    np.testing.assert_array_equal(
+        rot_mean, Rotation.from_rotvec(rvecs).mean().as_rotvec(),
+        err_msg="聚合旋转不是 scipy Rotation.mean() 的弦长均值")
+
+    # 与逐分量平均显著不同(红线:差 > 1e-3 弧度)
+    naive = rvecs.mean(axis=0)
+    angle = float((Rotation.from_rotvec(naive)
+                   * Rotation.from_rotvec(rot_mean).inv()).magnitude())
+    assert angle > 1e-3, (
+        f"逐分量平均与旋转均值的差只有 {angle:.2e} rad,红线断言(>1e-3)"
+        f"失去分辨力;或实现已退化成逐分量平均")
+
+
+def _rot_test_npz_path() -> Path:
+    """行为 2 用例的角点文件路径(固定文件名,内容每次覆盖,无残留影响)。"""
+    d = Path(tempfile.mkdtemp(prefix="aggregate_rot_"))
+    return d / "corners.npz"
+
+
+# ---- 行为 3:σ 折减 n_repeats=8 → sigma_scale = 1/√8(iid 假设) ----
+
+def test_sigma_scale_records_iid_reduction_for_8_frame_burst(tmp_path):
+    """8 帧连拍全检出 → n_repeats=8、sigma_scale = 1/√8。
+
+    折减成立的前提是 iid(连拍各帧噪声互不相关)——连拍若相关,√8
+    折减不成立。这不是缺陷:640 全帧版与 80 聚合版的 CRLB 差值,要量化的
+    正是"连拍相关性吃掉多少信息"(D-01 的设计意图),阶段四的重复张
+    分组实验是它的实测对照。
+    """
+    base = np.zeros((_P, 2))
+    uv = np.stack([base + 0.01 * k for k in range(8)])
+    ids = [f"f{k}" for k in range(8)]
+    npz = _write_corners_npz(tmp_path / "c8.npz", ids, uv,
+                             np.ones(8, dtype=bool), ["sb"] * 8)
+    records = _burst_records({"pose8": ids})
+    agg = aggregate_observations(npz, records,
+                                 np.zeros((8, 3)), np.zeros((8, 3)), ids,
+                                 image_size=(64, 48))
+    entry = agg["poses"]["pose8"]
+    assert entry["n_repeats"] == 8
+    assert entry["sigma_scale"] == pytest.approx(1.0 / np.sqrt(8.0))
+    assert entry["detected_agg"] is True
+
+
+# ---- 行为 4:聚合观测集通过 ObservationSet 全部形状/有限值断言 ----
+
+def test_build_aggregated_observation_set_passes_all_checks(tmp_path):
+    """全检出的聚合 → build_aggregated_observation_set 构造的观测集:
+
+    六字段齐全、image_points (V,P,2) 全有限、image_ids == pose_ids
+    (一姿态一视图)、corner_source 全记 "pose_mean"。
+    """
+    base = np.array([[50.0 + i, 60.0 + i] for i in range(_P)])
+    uv = np.stack([base + 0.1, base + 0.3])
+    ids = ["g1", "g2"]
+    npz = _write_corners_npz(tmp_path / "g.npz", ids, uv,
+                             np.array([True, True]), ["sb", "sb"])
+    agg = aggregate_observations(npz, _burst_records({"poseG": ids}),
+                                 np.zeros((2, 3)), np.zeros((2, 3)), ids,
+                                 image_size=(640, 480))
+    obs = build_aggregated_observation_set(_SMALL_BOARD, agg)
+    # 一姿态一视图:一个姿态占一行
+    assert obs.image_ids == ("poseG",)
+    assert obs.image_points.shape == (1, _P, 2)
+    assert np.isfinite(obs.image_points).all()
+    assert obs.image_ids == obs.pose_ids
+    assert set(obs.corner_source) == {"pose_mean"}
+    assert obs.object_points.shape == (_P, 3)
+    assert obs.image_size == (640, 480)
+
+
+def test_build_aggregated_observation_set_rejects_undetected_pose(tmp_path):
+    """带未检出帧的聚合进构造器:中文报错点名姿态,绝不带病进 Fisher。"""
+    base = np.zeros((_P, 2))
+    uv = np.stack([base, np.full((_P, 2), np.nan)])
+    ids = ["h1", "h2"]
+    npz = _write_corners_npz(tmp_path / "h.npz", ids, uv,
+                             np.array([True, False]), ["sb", "sb"])
+    agg = aggregate_observations(npz, _burst_records({"poseH": ids}),
+                                 np.zeros((1, 3)), np.zeros((1, 3)), ["h1"],
+                                 image_size=(64, 48))
+    with pytest.raises(AssertionError, match="poseH"):
+        build_aggregated_observation_set(_SMALL_BOARD, agg)
