@@ -47,6 +47,15 @@ _RESULT_FIELDS = (
     "init_from", "lineage",
 )
 
+# result.json 的结构键契约:失败时也要一个不少(数值键全 null)。位姿与残差
+# 不在 JSON 里——它们是 npz 三件套的另外两件(阶段一 calibration.json 体例 +
+# 新增 model_id/solver/solver_meta/params/init_from/lineage)
+_RESULT_JSON_KEYS = (
+    "lineage", "model_id", "solver", "solver_meta", "params",
+    "image_ids", "image_size", "n_views", "n_points_per_view",
+    "init_from", "converged", "failure_note", "rms_overall", "per_view_rms",
+)
+
 
 def _synthetic_obs(n_views: int = 3, noise_px: float = 0.05, seed: int = 5):
     """合成小观测集:已知 M1 参数与逐视图位姿,投影生成角点(可加微小噪声)。
@@ -144,7 +153,7 @@ def test_failure_saves_json_null_numeric_keys(tmp_path):
     out = save_result(tmp_path, failure)
 
     doc = json.loads((out / "result.json").read_text(encoding="utf-8"))
-    for key in _RESULT_FIELDS:
+    for key in _RESULT_JSON_KEYS:
         assert key in doc, f"失败落盘缺结构键:{key}"
     assert doc["converged"] is False
     assert doc["rms_overall"] is None and doc["per_view_rms"] is None
