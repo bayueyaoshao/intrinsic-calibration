@@ -521,24 +521,26 @@ def aggregate_pose(rvecs: np.ndarray, tvecs: np.ndarray):
 | A5 | 80 姿态聚合位姿用 Rotation.mean()+平移均值;对 FIM 是二阶影响(8 帧位姿差异本来就在抖动量级) | Pattern 3 | 低:线性化点敏感性检查(建议纳入)顺带覆盖 |
 | A6 | 交叉验证需在 fisher 阶段重跑 OpenCV(每针孔模型 ~2 分钟),因阶段二产物未存 stdDev | Pattern 4 | 低:calibrateCamera 无随机性,可断言与已存 mX__opencv 参数一致 |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **OpenCV σ̂ 的精确估计式**(A1)
+> 以下 4 个问题均已按规划落定处置方案(2026-10-18 计划校验时回填标记):
+
+1. **OpenCV σ̂ 的精确估计式**(A1)— **已解决(协议规避)**:主判据定为尺度归一结构比对,落 03-04 crosscheck.py;σ̂ 估计式不追,不设门槛。
    - What we know: 实测存在公共尺度因子,量级 = 残差噪声;结构比对协议完全绕开。
    - What's unclear: SSE/(2N) vs 无偏式的确切选择(两者在 640 视图下差 <0.1%)。
    - Recommendation: 不追;主判据用结构比对。若执行时顺手(一次实验即可钉死)记录进发现,不设门槛。
 
-2. **M3 有理模型 stdDev 是否对齐到个位数百分比**
+2. **M3 有理模型 stdDev 是否对齐到个位数百分比** — **已解决(D-07 分档)**:按 D-07"尽力对齐、不对上按发现记录";合成小场景先行单测提前暴露,落 03-04 test_noise_crosscheck。
    - What we know: M3 投影 parity 已锁;OpenCV 有理模型内部雅可比行为未实测。
    - What's unclear: 真实 640 视图上有理模型的 stdDev 结构比对结果。
    - Recommendation: 按 D-07"尽力+记录";合成小场景先行单测(test_noise_crosscheck)提前暴露。
 
-3. **注入曲线高 σ 段的检测器失效形态**(SB 直接拒绝还是漂移)
+3. **注入曲线高 σ 段的检测器失效形态**(SB 直接拒绝还是漂移)— **已解决(设计落盘)**:曲线数据按"失败帧/兜底帧/正常帧"分档统计落盘(03-01 injection.py),形态裁决留阶段五解读。
    - What we know: 网格上限设计到 σ_med×32,失败率与兜底计数都落盘。
    - What's unclear: 失效是"检不出"还是"检出但漂移大"——两种形态曲线都有效,但解读不同。
    - Recommendation: 曲线数据里把"失败帧/兜底帧/正常帧"分开统计(设计已含),阶段五解读时再裁决。
 
-4. **test 切分(65 张独立照片)是否进 `calib noise`**
+4. **test 切分(65 张独立照片)是否进 `calib noise`** — **已解决(默认行为)**:处理双切分 `noise_splits=("train","test")`,逐张来源标注;03-03 落地 test 65 张单帧路径。
    - What we know: 它们天然全部是单帧路径(Immerkaer);pipeline 契约输入是"corners.npz + 图像"未限定切分。
    - What's unclear: 用户是否要 test 的噪声底(为阶段四 test 评分留口径)。
    - Recommendation: 处理双切分,逐张来源标注;成本≈忽略不计,产物完整。规划时作为默认行为写明。
