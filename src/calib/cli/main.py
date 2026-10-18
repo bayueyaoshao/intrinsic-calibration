@@ -28,7 +28,14 @@ from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
-from calib.noise.artifacts import make_failure_report, save_noise_report
+from calib.noise.artifacts import (
+    load_noise_report,
+    make_failure_crlb,
+    make_failure_report,
+    save_crlb_report,
+    save_noise_report,
+)
+from calib.noise.fisher import run_fisher_matrix
 from calib.noise.immerkaer import immerkaer_sigma
 from calib.noise.injection import run_injection_experiment
 from calib.noise.temporal import temporal_noise
@@ -42,7 +49,7 @@ from calib.solve.observation import excluded_image_ids, load_observation_set
 from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
 from calib.visualization.mosaic import write_mosaics
-from calib.visualization.noise_figs import plot_transfer_curve
+from calib.visualization.noise_figs import plot_spectrum, plot_transfer_curve
 from calib.visualization.overlay import (
     render_all,
     render_flagged_review,
@@ -991,7 +998,170 @@ def calibrate() -> None:
 
 @app.command(help="⑤ 算理论精度极限:标定前预测这批数据最好能做到什么程度,并检查摆拍位置是否有缺陷(Fisher 信息/CRLB)")
 def fisher() -> None:
-    _not_implemented(5, "算理论精度极限")
+    """流水线第⑤步:算 CRLB 理论精度极限(16 份矩阵:2 观测集 × 2 σ 口径 × N 模型)。
+
+    步骤:读配置 → 找最新一轮 corners / noise / calibration 产物(血缘优先
+    防串轮)→ 编排 run_fisher_matrix:640 全帧正式版 + 80 姿态聚合对照版
+    (D-01/D-02),逐模型取 mX__scipy 线性化点(D-06),组装边缘化 Fisher
+    信息矩阵 → 每个模型 4 份 CRLB 记录(带 Σ 敏感性带与特征谱)→ OpenCV
+    stdDev 交叉验证(D-07,附加产物,失败不阻塞)→ crlb.json 契约落盘 +
+    逐模型 Fisher 明细 npz → 特征谱图 → 中途失败也照常落盘失败报告 →
+    打印中文汇总表。
+    """
+    started = datetime.now(UTC)
+    board = load_board(BOARD_PATH)
+    cfg = load_calibration(CALIBRATION_PATH)
+    fisher_cfg = cfg.fisher
+
+    # 上游产物:最新一轮 corners / noise / calibration(各阶段独立跑,找最新)
+    corners_run = latest_run_dir(OUTPUT_ROOT, "corners")
+    manifest_path = _manifest_path_for(corners_run, "sb")
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    records = [r for r in manifest["images"] if r["split"] == "train"]
+    corners_npz = corners_run / "corners_train_sb.npz"
+
+    noise_run = latest_run_dir(OUTPUT_ROOT, "noise")
+    noise_report = load_noise_report(noise_run)["report"]
+    calib_run = latest_run_dir(OUTPUT_ROOT, "calibration")
+
+    round_id = f"run_{started.strftime('%Y%m%d_%H%M%S')}"
+    out_dir = OUTPUT_ROOT / "fisher" / round_id
+
+    # 血缘指纹:上游 = 角点产物 + 数据清单 + 噪声底 + 每个模型的线性化点
+    # 产物(scipy result/extrinsics;opencv result 在时就在)
+    upstream: dict = {
+        "corners_train_sb.npz": corners_npz,
+        "manifest.json": manifest_path,
+        "noise.json": noise_run / "noise.json",
+    }
+    for model_id in fisher_cfg.models:
+        # 标定产物按组合子目录存放(m{X}__scipy/result.json),不在 run 根下
+        for rel in (f"{model_id}__scipy/result.json",
+                    f"{model_id}__scipy/extrinsics.npz",
+                    f"{model_id}__opencv/result.json"):
+            candidate = calib_run / rel
+            if candidate.is_file():
+                upstream[rel] = candidate
+    lineage = make_lineage(
+        config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH},
+        upstream=upstream,
+        round_id=round_id,
+    )
+
+    typer.echo(f"开始算 CRLB 理论精度极限:{len(fisher_cfg.models)} 个模型 × "
+               f"2 个观测集(640 全帧 / 80 姿态聚合)× 2 个 σ 口径"
+               f"(detector/temporal)……")
+    typer.echo(f"  上游:corners {corners_run.name} / noise {noise_run.name} / "
+               f"calibration {calib_run.name}(血缘已登记)")
+
+    def _report(row: dict) -> None:
+        flag_text = row["flag"] or "正常"
+        typer.echo(f"  完成 {row['model']} × {row['obs_set']} × {row['sigma']}"
+                   f" 口径:{row['status']}(分档:{flag_text})")
+
+    try:
+        report = run_fisher_matrix(
+            corners_npz, manifest_path, records, noise_report, calib_run,
+            board, fisher_cfg, exclude_images=cfg.exclude_images,
+            progress=_report)
+        report["created"] = lineage["created"]
+        report["meta"].update({
+            "corners_run": corners_run.name,
+            "noise_run": noise_run.name,
+            "calibration_run": calib_run.name,
+            "duration_s": round(
+                (datetime.now(UTC) - started).total_seconds(), 1),
+        })
+        paths = save_crlb_report(out_dir, report, lineage)
+    except Exception as e:  # 故意宽接:失败契约,失败也落盘(T-03-05-04 同体例)
+        note = f"CRLB 阶段中途失败:{type(e).__name__}——{e}"
+        save_crlb_report(out_dir, make_failure_crlb(lineage, note), lineage)
+        typer.echo(f"算 CRLB 失败(失败报告已照常落盘,数值字段为 null):{note}")
+        typer.echo(f"  失败报告:{out_dir / 'crlb.json'}")
+        raise typer.Exit(code=1) from e
+
+    # ---- 特征谱图(附加产物:单张图失败只提示,不拦主产物)----
+    figures_dir = out_dir / "figures"
+    n_figs = 0
+    for model_id, model_block in report["models"].items():
+        for obs_name, by_sigma in model_block["observation_sets"].items():
+            for sigma_name, record in by_sigma.items():
+                if record.get("status") != "ok":
+                    continue
+                try:
+                    plot_spectrum(model_id, record,
+                                  figures_dir / f"spectrum_{model_id}"
+                                  f"_{obs_name}_{sigma_name}.png")
+                    n_figs += 1
+                except Exception as e:  # noqa: BLE001  # 故意宽接:图是附加产物
+                    typer.echo(f"  特征谱图未生成({model_id}×{obs_name}"
+                               f"×{sigma_name},不影响数据产物):"
+                               f"{type(e).__name__}——{e}")
+
+    # ---- 中文汇总表:逐模型 × 观测集 × σ 口径,CRLB 逐参数中位数一行读全
+    #      (照 calibrate() 对比表体例;失败组合照样占一行,留痕不中断)----
+    typer.echo("CRLB 矩阵完成,16 份记录与逐模型 Fisher 明细已写盘。")
+    typer.echo(f"  {'模型':<6}{'观测集':<10}{'σ口径':<10}{'CRLB中位数(px)':<16}"
+               f"{'条件数':<12}{'分档':<12}")
+    for model_id, model_block in report["models"].items():
+        for obs_name in ("views640", "poses80"):
+            for sigma_name in ("detector", "temporal"):
+                record = model_block["observation_sets"][obs_name][sigma_name]
+                if record["status"] == "ok":
+                    se = np.asarray(record["se"], dtype=float)
+                    median_text = f"{float(np.median(se)):.4f}"
+                    cond_text = f"{record['condition_number']:.2e}"
+                    flag_text = {"warning": "warning", "degenerate": "退化",
+                                 "": "正常"}.get(record["flag"],
+                                                 record["flag"])
+                else:
+                    median_text = "—"
+                    cond_text = "—"
+                    flag_text = (record["failure_note"] or "")[:20] + "……"
+                typer.echo(f"  {model_id:<6}{obs_name:<10}{sigma_name:<10}"
+                           f"{median_text:<16}{cond_text:<12}{flag_text:<12}")
+
+    typer.echo("  白话注解:")
+    typer.echo("  - CRLB 中位数是\"这批数据天生最准能到多少\"的逐参数标准差"
+               "理论下界取中位数;σ 越大界越松,所以双口径并排看。")
+    typer.echo("  - 条件数是\"最软方向与最硬方向之比\":越大说明有些参数组合"
+               "方向上精度越差;达到警戒线记 warning,达到退化线记退化(要上报的发现)。")
+
+    # 交叉验证结论一行(D-07:M1/M2 硬门槛、M3 尽力、其余只记录)
+    typer.echo("  OpenCV stdDev 交叉验证:")
+    for model_id, model_block in report["models"].items():
+        cc = model_block.get("opencv_crosscheck") or {}
+        if not cc:
+            typer.echo(f"    {model_id}:未生成")
+            continue
+        compare = cc.get("compare") or {}
+        max_dev = compare.get("max_rel_dev")
+        dev_text = f"{max_dev:.2%}" if max_dev is not None else "—"
+        verdict = cc.get("verdict") or cc.get("status") or "—"
+        note_text = (cc.get("verdict_note") or cc.get("failure_note") or "")
+        typer.echo(f"    {model_id}:{verdict}(max_rel_dev = {dev_text},"
+                   f"n_unbounded = {compare.get('n_unbounded', '—')})"
+                   f"{'——' + note_text if note_text else ''}")
+
+    # 软方向要点(640 × detector 正式口径)
+    typer.echo("  最软方向要点(views640 × detector 口径):")
+    for model_id, model_block in report["models"].items():
+        record = model_block["observation_sets"]["views640"]["detector"]
+        tops = record.get("top_directions") or []
+        if not tops:
+            typer.echo(f"    {model_id}:未算出")
+            continue
+        item = tops[0]
+        desc = "、".join(
+            f"{name}({loading:+.2f})"
+            for name, loading in zip(item.get("params") or [],
+                                     item.get("loadings") or []))
+        typer.echo(f"    {model_id}:{desc}")
+
+    typer.echo(f"  CRLB 产物:{out_dir}")
+    typer.echo(f"  汇总报告:{paths['crlb_json']}(特征谱图 {n_figs} 张:"
+               f"{figures_dir})")
 
 
 @app.command(help="⑥ 防作弊考试:用没见过的新题考试、换着分组复测、逐一抽查,用数据挑出最合适的相机模型")

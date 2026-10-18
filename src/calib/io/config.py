@@ -237,6 +237,36 @@ class NoiseConfig:
 
 
 @dataclass(frozen=True)
+class FisherConfig:
+    """第⑤步算理论精度极限(CRLB)的全部参数(CLI 零参数,D-12)。
+
+    白话背景:这一步回答"这批数据天生最准能到多少"——在标定解的邻域
+    把问题拉直(线性化),算 Fisher 信息矩阵(数据里"关于参数的信息量"),
+    取逆开方得到每个内参标准差的理论下界(CRLB)。下面的字段控制
+    算哪些模型、什么时候算"这个摆位有退化"、以及敏感性带开多宽。
+    """
+
+    # 算哪些模型的 CRLB:默认四个全跑(阶段二"全矩阵多存"风格,
+    # 阶段四选型直接引用不回头补算,D-05)
+    models: tuple[str, ...] = ("m1", "m2", "m3", "m4")
+    # 条件数警戒线:条件数 = 信息矩阵"最软方向与最硬方向之比",越大说明
+    # 有些参数组合越难分辨。达到警戒线记 warning(该组合方向上精度差)
+    cond_warning: float = 1e4
+    # 条件数退化线:达到它判 degenerate(该摆位基本定不住这些参数组合)
+    # 校验要求 warning < degenerate(分档必须有序)
+    cond_degenerate: float = 1e6
+    # Σ 敏感性带的相对半宽:σ(角点噪声)由 8 张连拍估出时自带约 ±26.7%
+    # 的相对不确定度(1/√14),CRLB 随之乘 (1±半宽) 成"带",不输出裸下界
+    sigma_band_rel: float = 0.267
+    # 是否做线性化点敏感性检查:在 OpenCV 解的点上重算一遍 CRLB,与
+    # scipy 精化点的结果比相对差(预期 <1%;差异大 = 解未收敛透的信号)
+    linearization_check: bool = True
+    # 是否做 OpenCV stdDev 交叉验证(把我们的精度界与 OpenCV 自己报的
+    # 标准差对账,两套数学互相印证);失败不阻塞 CRLB 主产物
+    crosscheck_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class MosaicConfig:
     """汇总拼图的布局参数(拼图只是索引,不是逐帧副本的替代)。"""
 
@@ -266,6 +296,7 @@ class CalibrationConfig:
     corners: CornersConfig = field(default_factory=CornersConfig)
     calibrate: CalibrateConfig = field(default_factory=CalibrateConfig)
     noise: NoiseConfig = field(default_factory=NoiseConfig)
+    fisher: FisherConfig = field(default_factory=FisherConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
 
 
@@ -618,6 +649,66 @@ def _parse_noise(raw: dict) -> NoiseConfig:
     )
 
 
+def _parse_fisher(raw: dict) -> FisherConfig:
+    """解析 fisher 段:模型清单、条件数分档阈值、敏感性带半宽、两个开关。
+
+    校验要点:模型短名走白名单(与 calibrate.models 同一份清单);
+    条件数阈值必须 > 1(条件数 = 最软方向与最硬方向之比,恒 ≥ 1);
+    警戒线必须小于退化线(分档有序);敏感性带半宽在 0 到 1 之间;
+    布尔键先判 isinstance bool 再拒其余(yaml 手写 1/0 当布尔是常见笔误)。
+    """
+    cfg = FisherConfig()
+    section = _check_is_dict(raw.get("fisher", {}), "fisher")
+
+    models = section.get("models", cfg.models)
+    if (not isinstance(models, (list, tuple)) or not models
+            or not all(isinstance(x, str) for x in models)):
+        _fail("fisher.models", models, "必须是非空的模型短名名单(如 [m1, m2, m3, m4])")
+    bad_models = [x for x in models if x not in _ALLOWED_MODEL_IDS]
+    if bad_models:
+        _fail("fisher.models", bad_models,
+              f"含有不认识的模型短名;可选:{sorted(_ALLOWED_MODEL_IDS)}")
+
+    cond_warning = section.get("cond_warning", cfg.cond_warning)
+    if (not isinstance(cond_warning, int | float) or isinstance(cond_warning, bool)
+            or cond_warning <= 1):
+        _fail("fisher.cond_warning", cond_warning,
+              "必须是 > 1 的数(条件数警戒线;条件数 = 最软方向与最硬方向的比值,"
+              "恒 ≥ 1,≤ 1 没有物理意义)")
+    cond_degenerate = section.get("cond_degenerate", cfg.cond_degenerate)
+    if (not isinstance(cond_degenerate, int | float) or isinstance(cond_degenerate, bool)
+            or cond_degenerate <= 1):
+        _fail("fisher.cond_degenerate", cond_degenerate,
+              "必须是 > 1 的数(条件数退化线)")
+    if cond_warning >= cond_degenerate:
+        _fail("fisher.cond_warning", (cond_warning, cond_degenerate),
+              f"警戒线必须小于退化线(cond_degenerate = {cond_degenerate!r}),"
+              f"否则分档失去意义")
+
+    band_rel = section.get("sigma_band_rel", cfg.sigma_band_rel)
+    if (not isinstance(band_rel, int | float) or isinstance(band_rel, bool)
+            or not 0 < band_rel < 1):
+        _fail("fisher.sigma_band_rel", band_rel,
+              "必须是 0 到 1 之间的小数(Σ 敏感性带的相对半宽,如 0.267 ≈ ±27%)")
+
+    # 注意顺序:先判 bool 再拒其余(整数 1/0 是 yaml 手写时最常见的笔误)
+    lin_check = section.get("linearization_check", cfg.linearization_check)
+    if not isinstance(lin_check, bool):
+        _fail("fisher.linearization_check", lin_check,
+              "必须是 true 或 false(是否做线性化点敏感性检查)")
+    crosscheck = section.get("crosscheck_enabled", cfg.crosscheck_enabled)
+    if not isinstance(crosscheck, bool):
+        _fail("fisher.crosscheck_enabled", crosscheck,
+              "必须是 true 或 false(是否做 OpenCV stdDev 交叉验证)")
+
+    return FisherConfig(models=tuple(models),
+                        cond_warning=float(cond_warning),
+                        cond_degenerate=float(cond_degenerate),
+                        sigma_band_rel=float(band_rel),
+                        linearization_check=lin_check,
+                        crosscheck_enabled=crosscheck)
+
+
 def _parse_visualization(raw: dict) -> VisualizationConfig:
     section = _check_is_dict(raw.get("visualization", {}), "visualization")
     quality = section.get("jpeg_quality", VisualizationConfig.jpeg_quality)
@@ -689,5 +780,6 @@ def load_calibration(path: Path | str) -> CalibrationConfig:
         corners=_parse_corners(top),
         calibrate=_parse_calibrate(top.get("calibrate", {})),
         noise=_parse_noise(top),
+        fisher=_parse_fisher(top),
         visualization=_parse_visualization(top),
     )
