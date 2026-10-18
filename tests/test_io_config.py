@@ -247,6 +247,140 @@ def test_bad_corner_route_rejected(tmp_path):
     assert "可选" in str(exc_info.value)
 
 
+# ---- 第③步噪声段:参数进配置(D-12),白名单 + 硬范围防线 ----
+
+def _write_noise(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "calibration.yaml"
+    p.write_text(f"noise:\n{text}", encoding="utf-8")
+    return p
+
+
+def test_noise_defaults_from_repo_yaml():
+    """真实 calibration.yaml 的 noise 段:稳健式主线、8 档 × 4 重复、
+    种子与并行上限与随仓库文件一致,网格上下限留空 = 自动锚定。"""
+    import os
+
+    cfg = load_calibration(REAL_CALIB)
+    assert cfg.noise.immerkaer_variant == "robust"
+    assert cfg.noise.injection_sigma_min is None
+    assert cfg.noise.injection_sigma_max is None
+    assert cfg.noise.injection_n_levels == 8
+    assert cfg.noise.injection_n_repeats == 4
+    assert cfg.noise.injection_seed == 20261018
+    assert cfg.noise.injection_max_workers == min(8, os.cpu_count() or 1)
+    assert cfg.noise.temporal_pooling == "rms"
+    assert cfg.noise.noise_splits == ("train", "test")
+
+
+def test_noise_section_defaults_when_missing(tmp_path):
+    """整个 noise 段缺省:用内置默认(与随仓库 yaml 一致)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
+    cfg = load_calibration(p)
+    assert cfg.noise.immerkaer_variant == "robust"
+    assert cfg.noise.injection_n_levels == 8
+    assert cfg.noise.injection_n_repeats == 4
+
+
+def test_noise_empty_section_ok(tmp_path):
+    """noise: 写成空段(键全缺):走内置默认,不报错。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("noise: {}\n", encoding="utf-8")
+    cfg = load_calibration(p)
+    assert cfg.noise.temporal_pooling == "rms"
+    assert cfg.noise.noise_splits == ("train", "test")
+
+
+def test_noise_full_keys_parsed(tmp_path):
+    """noise 段写全键:全部键逐一生效(网格上下限写死数值覆盖自动锚定)。"""
+    p = _write_noise(
+        tmp_path,
+        "  immerkaer_variant: std\n"
+        "  injection_sigma_min: 4.0\n"
+        "  injection_sigma_max: 96.0\n"
+        "  injection_n_levels: 6\n"
+        "  injection_n_repeats: 5\n"
+        "  injection_seed: 7\n"
+        "  injection_max_workers: 1\n"
+        "  temporal_pooling: median\n"
+        "  noise_splits: [train]\n",
+    )
+    cfg = load_calibration(p)
+    assert cfg.noise.immerkaer_variant == "std"
+    assert cfg.noise.injection_sigma_min == 4.0
+    assert cfg.noise.injection_sigma_max == 96.0
+    assert cfg.noise.injection_n_levels == 6
+    assert cfg.noise.injection_n_repeats == 5
+    assert cfg.noise.injection_seed == 7
+    assert cfg.noise.injection_max_workers == 1
+    assert cfg.noise.temporal_pooling == "median"
+    assert cfg.noise.noise_splits == ("train",)
+
+
+def test_bad_immerkaer_variant_rejected(tmp_path):
+    """immerkaer_variant 非法值:报错点名 noise.immerkaer_variant 并列可选。"""
+    p = _write_noise(tmp_path, "  immerkaer_variant: median_of_means\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "noise.immerkaer_variant" in message
+    assert "可选" in message and "robust" in message
+
+
+def test_bad_temporal_pooling_rejected(tmp_path):
+    """temporal_pooling 非法值:报错点名 noise.temporal_pooling 并列可选。"""
+    p = _write_noise(tmp_path, "  temporal_pooling: mean\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "noise.temporal_pooling" in message
+    assert "可选" in message and "rms" in message
+
+
+def test_n_repeats_two_rejected(tmp_path):
+    """injection_n_repeats = 2:低于硬下限 3(压不掉注入随机性),报错点名。"""
+    p = _write_noise(tmp_path, "  injection_n_repeats: 2\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "noise.injection_n_repeats" in message
+    assert "3" in message  # 消息里带合法范围
+
+
+def test_max_workers_over_cpu_rejected(tmp_path):
+    """injection_max_workers 超过本机核数:配置层拦下(DoS 自伤防线)。"""
+    import os
+
+    cpu = os.cpu_count() or 1
+    p = _write_noise(tmp_path, f"  injection_max_workers: {cpu + 1}\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "noise.injection_max_workers" in message
+    assert str(cpu) in message  # 消息里带本机核数上限
+
+
+def test_sigma_max_le_min_rejected(tmp_path):
+    """网格上限 <= 下限:对数网格没有跨度,报错点名 noise.injection_sigma_min。"""
+    p = _write_noise(
+        tmp_path, "  injection_sigma_min: 8.0\n  injection_sigma_max: 8.0\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "noise.injection_sigma_min" in message
+    assert "8.0" in message  # 消息里带实际值
+
+
+def test_bad_noise_splits_rejected(tmp_path):
+    """noise_splits 混入 "val":报错点名 noise.noise_splits 并列可选。"""
+    p = _write_noise(tmp_path, "  noise_splits: [train, val]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "noise.noise_splits" in message
+    assert "可选" in message and "test" in message
+
+
 def test_yaml_syntax_error_chinese_error_with_path(tmp_path):
     """yaml 语法错误(缩进用了 tab):报错必须是带文件路径的中文 ValueError,
     附 PyYAML 原始信息(行号/列号对定位有用),而不是裸抛英文堆栈。
