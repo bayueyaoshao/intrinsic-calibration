@@ -171,6 +171,12 @@ None - 纯本地数值模块,无外部服务。
 供应链已在计划威胁表(T-02-01-SC)审计为 [OK],Task 3 的 grep 锁定确认
 src/ 无引用。
 
+## Self-Check: PASSED
+
+- 6 个关键文件全部存在(base/pinhole_brown/kb4/两测试文件/SUMMARY 本体)
+- 4 个提交全部在库:5de031b / 98ca90a / fcf41ba / 5ede73e
+- 最终回归:uv run pytest -m "not integration" -q = 181 passed(阶段一 103 + 本计划 78)
+
 ---
 *Phase: 02-m1-m4*
 *Completed: 2026-10-18*
