@@ -21,7 +21,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### 噪声与可达精度 (NOI)
 
-- [ ] **NOI-01**: 时域噪声底(同姿态连拍相减)+ Immerkaer 单帧退化路径,来源标注;重复数 <2 的姿态自动退化为单帧估计
+- [x] **NOI-01**: 时域噪声底(同姿态连拍相减)+ Immerkaer 单帧退化路径,来源标注;重复数 <2 的姿态自动退化为单帧估计(03-03;真实数据 80 姿态全来源标注,test 65 张独立照全走折算)
 - [ ] **NOI-02**: 像素噪声→角点定位误差映射(受控注入实验,建立经验传递曲线)
 - [ ] **NOI-03**: Fisher 信息/CRLB——每个内参方差理论下界 + 位姿分布退化检测;外参经 Schur 消元边际化;实测误差低于 CRLB 判定为系统偏差信号
 
@@ -115,7 +115,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MOD-02 | Phase 2 | Shipped (Phase 2)(02-01 四类模型:M1/M2 针孔布朗、M3 有理、M4 鱼眼 KB4;OpenCV 投影一致性测试与数值雅可比校验把关) |
 | SOL-01 | Phase 2 | Shipped (Phase 2)(02-03/02-04 求解器统一接口 + OpenCV 初始化 → scipy least_squares 精化双后端,CalibrationResult 同构落盘) |
 | ITER-01 | Phase 2 | Shipped (Phase 2)(02-05 全矩阵编排:run 目录内 result.json/comparison.json 全带血缘(配置指纹+上游哈希+时间戳);02-06 存疑复核表延续同一契约) |
-| NOI-01 | Phase 3 | Pending |
+| NOI-01 | Phase 3 | Shipped (Phase 3)(03-03 temporal_noise 时域实测 + 单帧退化 + 抖动分离;真实数据 80/80 姿态来源标注,noise.json + 全保真明细落盘) |
 | NOI-02 | Phase 3 | Pending |
 | NOI-03 | Phase 3 | Pending |
 | EVA-01 | Phase 4 | Pending |
