@@ -377,6 +377,21 @@ class _ToyNoAdapterModel(CameraModel):
         jac[:, 1, 3] = 1.0
         return jac
 
+    def project_point_jacobian(self, pts_cam: np.ndarray,
+                               params: np.ndarray) -> np.ndarray:
+        # 纯针孔无畸变:du/dX=fx/z、du/dZ=−fx·x/z²,教科书写照
+        pts = np.asarray(pts_cam, dtype=np.float64)
+        p = np.asarray(params, dtype=np.float64).ravel()
+        x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+        jac = np.empty((pts.shape[0], 2, 3), dtype=np.float64)
+        jac[:, 0, 0] = p[0] / z
+        jac[:, 0, 1] = 0.0
+        jac[:, 0, 2] = -p[0] * x / (z * z)
+        jac[:, 1, 0] = 0.0
+        jac[:, 1, 1] = p[1] / z
+        jac[:, 1, 2] = -p[1] * y / (z * z)
+        return jac
+
     def unproject(self, uv: np.ndarray, params: np.ndarray) -> np.ndarray:
         arr = np.asarray(uv, dtype=np.float64)
         p = np.asarray(params, dtype=np.float64).ravel()

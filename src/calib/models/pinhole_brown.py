@@ -142,7 +142,7 @@ class _PinholeBrown(CameraModel):
         y = pts[:, 1] / z
         r2 = x * x + y * y
         dist = p[4:]
-        rad, drad_dr2, drad_dk = _radial_and_derivs(r2, dist)
+        rad, _drad_dr2, drad_dk = _radial_and_derivs(r2, dist)
         p1, p2 = dist[2], dist[3]
         xd = x * rad + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
         yd = y * rad + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
@@ -164,6 +164,46 @@ class _PinholeBrown(CameraModel):
         jac[:, 1, 6] = fy * (r2 + 2.0 * y * y)
         jac[:, 0, 7] = fx * (r2 + 2.0 * x * x)
         jac[:, 1, 7] = fy * 2.0 * x * y
+        return jac
+
+    def project_point_jacobian(self, pts_cam: np.ndarray,
+                               params: np.ndarray) -> np.ndarray:
+        """投影对相机坐标系点的解析雅可比:(N,3)+(P,) → (N,2,3),float64。
+
+        链式 = 畸变核对归一化坐标的 2×2 导数(与 unproject 牛顿迭代里的
+        那份 2×2 公式逐字相同——同一份公式两处用,保证正逆解导数一致)
+        乘上 归一化坐标对相机点的导数(∂x/∂X=1/z、∂x/∂Z=−x/z 这组除法链)。
+        针孔族在光轴上没有奇异点(z>0 已由 project 断言),无需特判。
+        """
+        pts = as_points3d(pts_cam)
+        p = as_params(params, self.model_id, self.param_names)
+        fx, fy = p[0], p[1]
+        z = pts[:, 2]
+        if not np.all(z > 0.0):
+            raise AssertionError(
+                f"模型 {self.model_id} 的 project_point_jacobian 收到 Z<=0 的点:"
+                f"针孔投影要除以 Z,Z 必须全为正。请检查点的坐标系。"
+            )
+        x = pts[:, 0] / z
+        y = pts[:, 1] / z
+        r2 = x * x + y * y
+        dist = p[4:]
+        rad, drad_dr2, _drad_dk = _radial_and_derivs(r2, dist)
+        p1, p2 = dist[2], dist[3]
+
+        # 2×2 畸变核导数(与 unproject 牛顿迭代的雅可比同式):a12 对称共用
+        a11 = rad + 2.0 * x * x * drad_dr2 + 2.0 * p1 * y + 6.0 * p2 * x
+        a12 = 2.0 * x * y * drad_dr2 + 2.0 * p1 * x + 2.0 * p2 * y
+        a22 = rad + 2.0 * y * y * drad_dr2 + 6.0 * p1 * y + 2.0 * p2 * x
+
+        jac = np.empty((pts.shape[0], 2, 3), dtype=np.float64)
+        inv_z = 1.0 / z
+        jac[:, 0, 0] = fx * a11 * inv_z
+        jac[:, 0, 1] = fx * a12 * inv_z
+        jac[:, 0, 2] = -fx * (a11 * x + a12 * y) * inv_z
+        jac[:, 1, 0] = fy * a12 * inv_z
+        jac[:, 1, 1] = fy * a22 * inv_z
+        jac[:, 1, 2] = -fy * (a12 * x + a22 * y) * inv_z
         return jac
 
     def unproject(self, uv: np.ndarray, params: np.ndarray) -> np.ndarray:

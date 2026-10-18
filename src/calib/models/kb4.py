@@ -99,6 +99,56 @@ class FisheyeKB4(CameraModel):
                                          out=np.zeros(n), where=safe)
         return jac
 
+    def project_point_jacobian(self, pts_cam: np.ndarray,
+                               params: np.ndarray) -> np.ndarray:
+        """投影对相机坐标系点的解析雅可比:(N,3)+(P,) → (N,2,3),float64。
+
+        u = fx·x·s + cx(v 同理),s = θd/r。对 q∈{x,y,z} 逐个链式:
+          ∂u/∂x = fx·(s + x·∂s/∂x),∂u/∂y = fx·x·∂s/∂y,∂u/∂z = fx·x·∂s/∂z;
+          ∂s/∂q = (dθd/dθ·∂θ/∂q·r − θd·∂r/∂q)/r²。
+        代入 ∂θ/∂x = z·x/((r²+z²)·r) 后 r 恰好约掉,整理成
+          ∂s/∂x = x·B/r²,B = dθd/dθ·z/(r²+z²) − θd/r;
+          ∂s/∂z = −dθd/dθ/(r²+z²)(r 全约掉,全平面无奇点,不用保护);
+        dθd/dθ = 1+3k1θ²+5k2θ⁴+7k3θ⁶+9k4θ⁸——与 unproject 牛顿迭代的
+        f'(θ) 同式,正逆解共用一份导数。
+
+        近轴(r<1e-12)解析极限(Pitfall 4,s→1/z 的泰勒展开取首项):
+          ∂s/∂x = ∂s/∂y = 0,∂s/∂z = −1/z²
+          ⇒ ∂u/∂X = fx/z、∂u/∂Y = 0、∂u/∂Z = −fx·x/z²(v 对应 fy)。
+        """
+        pts = as_points3d(pts_cam)
+        p = as_params(params, self.model_id, self.param_names)
+        fx, fy = p[0], p[1]
+        k = p[4:]
+        x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+        n = pts.shape[0]
+        r = np.hypot(x, y)
+        theta = np.arctan2(r, z)
+        t2 = theta * theta
+        theta_d = theta * (1.0 + k[0] * t2 + k[1] * t2**2
+                           + k[2] * t2**3 + k[3] * t2**4)
+        dthd_dtheta = (1.0 + 3.0 * k[0] * t2 + 5.0 * k[1] * t2**2
+                       + 7.0 * k[2] * t2**3 + 9.0 * k[3] * t2**4)
+
+        r2 = r * r
+        denom = r2 + z * z
+        near = r < _NEAR_AXIS_EPS
+        safe = ~near
+        s = np.divide(theta_d, r, out=1.0 / z, where=safe)
+        bracket = dthd_dtheta * z / denom - s          # r→0 时 → 0(各取极限相消)
+        ds_dx = np.divide(x * bracket, r2, out=np.zeros(n), where=safe)
+        ds_dy = np.divide(y * bracket, r2, out=np.zeros(n), where=safe)
+        ds_dz = -dthd_dtheta / denom                    # r 已约掉,无奇点
+
+        jac = np.empty((n, 2, 3), dtype=np.float64)
+        jac[:, 0, 0] = fx * (s + x * ds_dx)
+        jac[:, 0, 1] = fx * x * ds_dy
+        jac[:, 0, 2] = fx * x * ds_dz
+        jac[:, 1, 0] = fy * y * ds_dx
+        jac[:, 1, 1] = fy * (s + y * ds_dy)
+        jac[:, 1, 2] = fy * y * ds_dz
+        return jac
+
     def unproject(self, uv: np.ndarray, params: np.ndarray) -> np.ndarray:
         """反投影:像素 → 单位射线方向 (N,3),真逆解(θ 反解牛顿迭代)。
 
@@ -156,7 +206,7 @@ class FisheyeKB4(CameraModel):
                          [0.0, p[1], p[3]],
                          [0.0, 0.0, 1.0]], dtype=np.float64)
 
-    def opencv_adapter(self) -> "_KB4OpenCVAdapter":
+    def opencv_adapter(self) -> _KB4OpenCVAdapter:
         return _KB4OpenCVAdapter(self)
 
 

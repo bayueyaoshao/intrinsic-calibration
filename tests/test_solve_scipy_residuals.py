@@ -31,6 +31,12 @@ from pathlib import Path
 import numdifftools as nd  # D-10:数值差分基准,只进测试,绝不进 src/calib
 import numpy as np
 import pytest
+
+from calib.io.config import BoardSpec
+from calib.models import create_model
+from calib.models.base import transform_to_camera
+from calib.solve.baseline import build_object_points
+from calib.solve.observation import ObservationSet
 from calib.solve.residuals import (
     make_jacobian_fn,
     make_residual_fn,
@@ -39,12 +45,6 @@ from calib.solve.residuals import (
     row_index,
     unpack_theta,
 )
-
-from calib.io.config import BoardSpec
-from calib.models import create_model
-from calib.models.base import transform_to_camera
-from calib.solve.baseline import build_object_points
-from calib.solve.observation import ObservationSet
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -91,7 +91,7 @@ def test_pack_unpack_roundtrip_bitwise(model_id):
     θ 布局 = [内参 (P,) | 视图 0 的 (ω,t) 6 个 | 视图 1 的 6 个 | …],
     4 个模型参数个数不同(8/9/12/8),装箱长度随之变化,逐模型验证。
     """
-    obs, model, params, rvecs, tvecs = _random_truth_obs(model_id, n_views=3, seed=5)
+    _obs, model, params, rvecs, tvecs = _random_truth_obs(model_id, n_views=3, seed=5)
     theta = pack_theta(model, params, rvecs, tvecs)
     assert theta.shape == (len(model.param_names) + 6 * 3,), \
         f"{model_id} 装箱长度应为 内参{len(model.param_names)} + 6×3视图 = " \
@@ -136,7 +136,10 @@ def test_sparse_jacobian_matches_numeric_oracles(model_id):
              f"列相对误差 {rel:.2e} 超线 1e-6(公式或列序有误)")
 
     # 基准二:2-point 前向差分(scipy least_squares 的 jac='2-point' 缺省方案,
-    # rel_step = √机器精度),随机抽 60 个行列位置逐项比对——行序错位现形处
+    # rel_step = √机器精度),随机抽 60 个行列位置逐项比对——行序错位现形处。
+    # 容差说明:前向差分自带截断误差 ~(h/2)·f''(h≈1.5e-8),畸变列的 f''
+    # 可到几百,实测偏差约 2e-6;行序错位则是"拿到别行的值",偏差 O(1)。
+    # 两者差 4 个量级,1e-4 的线既放行截断误差又不放过任何错位。
     rng = np.random.default_rng(99)
     f0 = residual_fn(theta)
     machine_eps = np.finfo(np.float64).eps
@@ -148,7 +151,7 @@ def test_sparse_jacobian_matches_numeric_oracles(model_id):
         bumped[cc] += step
         numeric = (residual_fn(bumped) - f0)[rr] / step
         analytic = jac_ana[rr, cc]
-        assert abs(analytic - numeric) <= 1e-6 * max(abs(analytic), abs(numeric), 1.0), \
+        assert abs(analytic - numeric) <= 1e-4 * max(abs(analytic), abs(numeric), 1.0), \
             (f"{model_id} 雅可比位置(行 {rr},列 {cc})解析值 {analytic:.6e} 与 "
              f"2-point 差分 {numeric:.6e} 不一致——行/列序错位或公式有误")
 
