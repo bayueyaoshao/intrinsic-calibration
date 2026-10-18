@@ -1,0 +1,124 @@
+"""Fisher 信息矩阵与 CRLB 理论精度界(σ=1 基准)——本模块只做矩阵代数。
+
+红线(D-10):投影与导数全部来自 models/ 与 solve/residuals.py,本文件
+没有任何第二份数学——雅可比 J 只从 make_jacobian_fn 来,参数装箱只走
+pack_theta;数值差分基准(测试专用那套差分工具)只准出现在 tests/,
+绝不进本模块。
+
+术语白话(首现就地解释):
+- 雅可比 J:残差对参数的偏导数矩阵——"参数动一点,每个角点的像素坐标
+  跟着动多少"。形状 (2·视图数·角点数, 内参个数 + 6·视图数),每行只有
+  全部内参列和本视图的 6 个外参列非零(天然稀疏)。
+- Fisher 信息矩阵:数据里"关于参数的信息量"的矩阵,即 JᵀJ/σ²(σ 是
+  角点噪声的像素标准差)。信息越多参数定得越准,精度下界越好。
+- CRLB(Cramér–Rao 下界):任何无偏估计方法的方差都不会低于它——白话
+  就是"这批数据天生最准能到多少"。逐参数 CRLB 标准差 =
+  σ·sqrt(边际化协方差矩阵的对角元)。
+- Schur 消元(边际化):把不关心的外参从误差计算里合并掉,只留内参的
+  精度界。公式 F_marg = F_θθ − F_θβ·F_ββ⁻¹·F_βθ;分块求逆代数恒等式
+  保证 inv(F_marg) = inv(JᵀJ) 的内参块(测试逐位锁定)。
+- 条件数:矩阵"最软方向与最硬方向的比例",越大说明有些参数组合越难
+  分辨。某视图外参 6×6 信息块条件数接近奇异 = 该姿态在这批角点下
+  不可观测——这是要上报的退化发现,绝不静默绕过。
+
+σ=1 基准:J 不随 σ 变,F = JᵀJ 随 1/σ² 缩放,所以一切 CRLB 在 σ=1 上
+算一次,任意噪声口径(检测器口径/时域口径)的 CRLB 都是一次乘法
+(crlb_se);Σ 敏感性带是纯乘法(sensitivity_band),双口径 × 敏感性带
+全部免费。
+
+规模红线:真实规模(640 视图)下 (P+6V)² 的 JᵀJ 约 118 MB,整体稠密化
+被禁止——本模块全程保持稀疏,只有 P×P 与 P×6V 的小块落成稠密数组;
+批量 6×6 求逆走一次 LAPACK 批调用,不做逐视图 Python 循环求逆。
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from scipy.sparse import csr_matrix
+
+from calib.models.base import CameraModel
+from calib.solve.observation import ObservationSet
+from calib.solve.residuals import make_jacobian_fn, pack_theta
+
+# 位姿 6×6 信息块的奇异警戒线:条件数达到它,说明该视图的位姿在这批
+# 角点下基本定不住(常来自棋盘近似共线的极端视角),必须报错点名
+_POSE_COND_SINGULAR = 1e12
+
+
+def _fisher_marginal_from_jacobian(J: csr_matrix, n_int: int,
+                                   n_views: int) -> tuple[np.ndarray, csr_matrix, float]:
+    """共用分块路线:J(稀疏)→ (F_marg (P,P), F_ββ 稀疏块对角, 最大位姿块条件数)。
+
+    分块只用列切片(J[:, :n_int] 与 J[:, n_int:]),绝不重排行列——行序
+    契约由 residuals.row_index 唯一承载,这里自创下标重排一次,就是
+    "不报错只算错"的结构性事故(Pitfall 3 的结构性防线)。
+
+    F_ββ 保持稀疏(结构保证块对角:本视图残差行只碰本视图外参列);
+    奇异防护在这里做:任何视图 6×6 块条件数 ≥ 1e12 → 中文报错点名该
+    视图序号,绝不静默地用伪逆求个"差不多"的解糊过去;幸存块用
+    np.linalg.inv 一次批量求逆(LAPACK 批调用,禁循环逐个 inv)。
+    """
+    J_int = J[:, :n_int]    # 内参列:前 n_int 列
+    J_pose = J[:, n_int:]   # 外参列:之后按视图每 6 列一组
+    F_tt = (J_int.T @ J_int).toarray()   # (P, P)
+    F_tb = (J_int.T @ J_pose).toarray()  # (P, 6V),小矩阵稠密无妨
+    F_bb = J_pose.T @ J_pose             # 稀疏,块对角(结构保证)
+
+    blocks = np.stack([F_bb[6 * i:6 * i + 6, 6 * i:6 * i + 6].toarray()
+                       for i in range(n_views)])               # (V, 6, 6)
+    conds = np.linalg.cond(blocks)
+    if conds.max() >= _POSE_COND_SINGULAR:
+        raise AssertionError(
+            f"第 {int(conds.argmax())} 个视图的外参信息块条件数 {conds.max():.1e} "
+            f"接近奇异:该姿态的位姿在这批角点下不可观测(这本身是要上报的退化发现),"
+            f"请检查该视图的棋盘可见性与摆放。")
+    blocks_inv = np.linalg.inv(blocks)                         # 批量 6×6 求逆
+
+    # Schur 消元:F_marg = F_θθ − Σᵥ F_θβ[:, v 块]·F_ββ[v 块]⁻¹·F_βθ[v 块, :]
+    # F_tb 按每 6 列一组还原成 (P, V, 6),einsum 一次算完全部视图的贡献
+    # (下标 p/q 是输出的行/列,i/j 是单个 6×6 块内的行列——恒等式测试锁定)
+    ftb3 = F_tb.reshape(n_int, n_views, 6)
+    F_marg = F_tt - np.einsum("pvi,vij,qvj->pq", ftb3, blocks_inv, ftb3)
+    return F_marg, F_bb, float(conds.max())
+
+
+def marginalized_fisher(model: CameraModel, obs: ObservationSet, params,
+                        rvecs, tvecs) -> tuple[np.ndarray, csr_matrix, dict]:
+    """σ=1 基准的边际化 Fisher 信息矩阵(外参经 Schur 消元合并掉)。
+
+    参数:
+        model:  模型实例(create_model 按名取);
+        obs:    观测集——行序契约的唯一承载,F 的行/列与残差严格对齐;
+        params: 内参,(P,) 数组或按参数名的字典(缺名中文报错由
+                pack_theta 承担,不猜位置);
+        rvecs / tvecs: 各 (V,3),逐视图外参(线性化点)。
+
+    返回:(F_marg (P,P) 稠密, F_full (P+6V, P+6V) 稀疏 JᵀJ, 诊断字典)。
+    诊断字典含 max_pose_block_cond / n_views / n_params / param_names。
+
+    用法白话:np.linalg.inv(F_marg) 的对角元开方,就是 σ=1 时每个内参
+    标准差的理论下界;任意噪声口径用 crlb_se 一次乘法折算。
+    """
+    n_points = obs.object_points.shape[0]
+    n_views = len(obs.image_ids)
+    if obs.image_points.ndim != 3 or obs.image_points.shape[1:] != (n_points, 2):
+        raise AssertionError(
+            f"观测角点数组形状不合:期望 (视图数,{n_points},2)(逐视图逐角点的"
+            f"像素坐标),实际是 {obs.image_points.shape}。"
+            f"请检查观测集是否由 load_observation_set 按同一棋盘规格装出。"
+        )
+
+    theta = pack_theta(model, params, rvecs, tvecs)   # 按参数名装箱,缺名中文报错
+    J = make_jacobian_fn(model, obs)(theta)           # D-10:J 只从工厂来
+    n_int = len(model.param_names)
+
+    F_marg, _F_bb, max_cond = _fisher_marginal_from_jacobian(J, n_int, n_views)
+    F_full = (J.T @ J).tocsr()    # 只保持稀疏,绝不整体 toarray(规模红线)
+
+    diagnostics = {
+        "max_pose_block_cond": max_cond,
+        "n_views": n_views,
+        "n_params": n_int,
+        "param_names": tuple(model.param_names),
+    }
+    return F_marg, F_full, diagnostics

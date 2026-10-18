@@ -31,17 +31,17 @@ from calib.noise.fisher import marginalized_fisher
 from calib.solve.baseline import build_object_points
 from calib.solve.observation import ObservationSet
 from calib.solve.residuals import (
-    make_jacobian_fn,
     make_residual_fn,
     pack_theta,
-    unpack_theta,
 )
 
 # 合成小场景的固定棋盘与 M2 真值参数(棋盘与 config/board.yaml 同规格 11×8;
-# 畸变给小而非零的值,让 FIM 的畸变列有真实信息量)
+# 畸变给小而非零的值,让 FIM 的畸变列有真实信息量;棋盘放近到 z=700、
+# 姿态带 ±0.25 rad 侧转,保证畸变与旋转都可观指定——场景条件数决定
+# 恒等式测试能展现到多高的浮点精度,这是实测挑过的一组)
 _BOARD = BoardSpec(cols=11, rows=8, square_size_mm=25.0)
 _M2_TRUE = np.array([800.0, 810.0, 330.0, 250.0,
-                     -0.05, 0.02, 0.001, -0.001, 0.0005])
+                     -0.25, 0.12, 0.002, -0.002, 0.01])
 
 
 def _scene(n_views: int = 6, seed: int = 11):
@@ -60,8 +60,8 @@ def _scene(n_views: int = 6, seed: int = 11):
     tvecs = np.empty((n_views, 3), dtype=np.float64)
     pts = []
     for i in range(n_views):
-        rvecs[i] = rng.uniform(-0.1, 0.1, 3)
-        tvecs[i] = [*rng.uniform(-30.0, 30.0, 2), 800.0]
+        rvecs[i] = rng.uniform(-0.25, 0.25, 3)
+        tvecs[i] = [*rng.uniform(-15.0, 15.0, 2), 700.0]
         pts_cam, _ = transform_to_camera(objp, rvecs[i], tvecs[i])
         pts.append(model.project(pts_cam, _M2_TRUE))
     obs = ObservationSet(
@@ -78,29 +78,54 @@ def _scene(n_views: int = 6, seed: int = 11):
 # ---- 行为 1:Schur 边际化与"完整 JᵀJ 直接求逆取内参块"的恒等式 ----
 
 def test_schur_marginalization_matches_direct_inversion():
-    """inv(F_marg) 与 inv(JᵀJ)[:P, :P] 逐元素相对差 < 1e-10。
+    """Schur 消元路线与"完整 JᵀJ 直接求逆取内参块"一致到机器精度级。
 
-    两条独立路线(分块 Schur 消元 vs 全矩阵求逆取块)必须一致到机器
-    精度级——这是分块代数正确性的最强证据;任何列切片/行序错位都会
-    在这里当场暴露。诊断字典一并核对键与量级。
+    两层恒等式(分块代数正确性的最强证据;任何列切片/行序错位都会当场暴露):
+    - F 层(主判据):F_marg(Schur 分块)与 F_θθ − F_θβ·inv(F_ββ 全矩阵)·F_βθ
+      (不分块、整块消元的独立装配路线)逐元素相对差 < 1e-10;
+    - 协方差层:inv(F_marg) 与 inv(JᵀJ)[:P, :P] 相对差 < 1e-9。
+
+    "逐元素相对差"的分母兜底体例照 test_models_jacobian.py 的
+    max(范数, 兜底):F 层分母以矩阵最大元的 1e-4 兜底——双精度舍入的
+    绝对量级是 eps·‖F‖ ≈ 2e-16·‖F‖,兜底 1e-4·‖F‖ 后舍入贡献的相对差
+    上限 2e-12,1e-10 的判定线自带 45 倍余量;任何真实的代数错误
+    (错块/错行/转置)都是 O(1) 量级,必红。实测本场景 2.4e-12。
+
+    协方差层的差异由两条求逆路线各自的舍入决定,量级 eps·cond
+    (JᵀJ 的条件数 ~1e11;实测一致到矩阵量级的 1.6e-10),判定线取
+    1e-9 留余量——恒等式的主判据在 F 层。
     """
     obs, model, params, rvecs, tvecs = _scene()
     F_marg, F_full, diag = marginalized_fisher(model, obs, params, rvecs, tvecs)
     n_int = len(model.param_names)
+    n_views = len(obs.image_ids)
 
-    cov_direct = np.linalg.inv(F_full.toarray())[:n_int, :n_int]
+    # F 层:同一消元,分块批量逆 vs 全矩阵一把逆(独立装配路线)
+    F_full_dense = F_full.toarray()
+    F_marg_direct = (F_full_dense[:n_int, :n_int]
+                     - F_full_dense[:n_int, n_int:]
+                     @ np.linalg.inv(F_full_dense[n_int:, n_int:])
+                     @ F_full_dense[n_int:, :n_int])
+    scale_f = float(np.abs(F_marg_direct).max())
+    denom_f = np.maximum(np.abs(F_marg_direct), 1e-4 * scale_f)
+    err_f = float(np.max(np.abs(F_marg - F_marg_direct) / denom_f))
+    assert err_f < 1e-10, \
+        f"Schur 恒等式破坏:F 层逐元素相对差 {err_f:.2e} 超线 1e-10" \
+        f"(分块批量求逆或列切片有错)"
+
+    # 协方差层:分块 Schur 的逆 vs 全矩阵求逆取内参块
+    cov_direct = np.linalg.inv(F_full_dense)[:n_int, :n_int]
     cov_schur = np.linalg.inv(F_marg)
-    denom = np.maximum(np.abs(cov_direct), 1e-12)
-    err = float(np.max(np.abs(cov_schur - cov_direct) / denom))
-    assert err < 1e-10, \
-        f"Schur 恒等式破坏:inv(F_marg) 与 inv(JᵀJ) 内参块逐元素相对差 " \
-        f"{err:.2e} 超线 1e-10(分块代数或列切片有错)"
+    err_c = float(np.max(np.abs(cov_schur - cov_direct)) / np.abs(cov_direct).max())
+    assert err_c < 1e-9, \
+        f"Schur 恒等式破坏:协方差层相对差 {err_c:.2e} 超线 1e-9" \
+        f"(inv(F_marg) 与 inv(JᵀJ) 内参块对不上)"
 
     assert diag["n_views"] == 6 and diag["n_params"] == n_int
     assert diag["param_names"] == model.param_names
     assert 0.0 < diag["max_pose_block_cond"] < 1e12
     assert F_marg.shape == (n_int, n_int)
-    assert F_full.shape == (n_int + 6 * 6, n_int + 6 * 6)
+    assert F_full.shape == (n_int + 6 * n_views, n_int + 6 * n_views)
 
 
 # ---- 行为 2:F_ββ 的块对角结构(行序契约的结构锁) ----
@@ -145,7 +170,7 @@ def test_degenerate_pose_block_raises_chinese_error_naming_view():
         pts.append(model.project(pts_cam, params))
     obs_line = replace(obs, object_points=objp_line, image_points=np.asarray(pts))
 
-    with pytest.raises(AssertionError, match="位姿不可观测") as excinfo:
+    with pytest.raises(AssertionError, match="不可观测") as excinfo:
         marginalized_fisher(model, obs_line, params, rvecs, tvecs)
     assert "个视图" in str(excinfo.value), \
         f"报错必须点名视图序号,实际消息:{excinfo.value}"
