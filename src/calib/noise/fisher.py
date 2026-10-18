@@ -33,10 +33,15 @@ pack_theta;数值差分基准(测试专用那套差分工具)只准出现在 tes
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from scipy.sparse import csr_matrix
+from scipy.spatial.transform import Rotation
 
+from calib.io.config import BoardSpec
 from calib.models.base import CameraModel
+from calib.solve.baseline import build_object_points
 from calib.solve.observation import ObservationSet
 from calib.solve.residuals import make_jacobian_fn, pack_theta
 
@@ -271,3 +276,145 @@ def spectrum_report(F_marg: np.ndarray, param_names: tuple[str, ...],
         "top_directions": top_directions,
         "flag": flag,
     }
+
+
+# ==== 80 姿态聚合观测集与聚合位姿(03-05,D-01/D-02)====
+#
+# 为什么要有"80 姿态对照版"(D-01):正式 CRLB 用 640 全帧,与实际标定
+# 同口径;同姿态 8 连拍的角点是相关的(同一摆位连拍),把它们当独立观测
+# 会高估信息量。80 姿态版把每姿态 8 帧聚成 1 个"均值姿态"再算一遍 CRLB,
+# 两版差值 = "连拍相关性吃掉多少信息"——这是有价值的发现,不是缺陷。
+
+def aggregate_observations(corners_npz_path: Path | str, records: list[dict],
+                           rvecs_all: np.ndarray, tvecs_all: np.ndarray,
+                           image_ids_all, image_size=None) -> dict:
+    """同姿态连拍聚合:逐点均值角点 + 旋转均值/平移均值的聚合位姿(D-02)。
+
+    参数:
+        corners_npz_path: sb 路线角点文件(image_ids/uv/detected/source);
+        records:          数据清单里该切分的逐张记录(image_id/pose_id),
+                          顺序必须与角点文件逐行一致(行序契约,错位即报错);
+        rvecs_all/tvecs_all: 标定解的逐帧外参 (V,3);
+        image_ids_all:    与外参逐行对齐的照片编号(解的 image_ids);
+        image_size:       (宽, 高),原样带进返回值供观测集构造用。
+
+    返回 {"poses": {姿态编号: 聚合条目}, "image_size": (宽, 高)},聚合条目含:
+        uv_agg        该姿态检出帧的角点逐点均值 (P,2)——均值只吃检出帧;
+        detected_agg  该姿态是否全部帧检出(有一帧没检出就记 False);
+        rot_mean      聚合旋转 (3,) rodrigues,见下方红线;
+        t_mean        聚合平移 (3,) 算术均值;
+        n_repeats     进均值的帧数(检出帧数);
+        sigma_scale   1/√n_repeats——σ 折减系数。**iid 假设**:连拍各帧
+                      噪声互不相关时,均值的噪声才按 √n 缩小;连拍若相关,
+                      折减不成立。这正是 640 全帧版与 80 聚合版的 CRLB 差值
+                      要量化的"相关性损耗"(D-01 设计意图,不是缺陷);
+        sources       进均值的帧的角点来源列表(逐姿态留痕,可审计)。
+
+    红线(研究 Pitfall 6):聚合旋转用 scipy 的 Rotation.mean()(弦长 L2
+    均值)——**rodrigues 旋转向量逐分量平均不是旋转平均**:rodrigues 向量
+    不是线性空间,转角稍大时逐分量平均会得到错误的转轴与转角,错得离谱。
+    绝不这么干;红线测试(与 scipy 对照 + 与逐分量平均显著不同)锁死。
+    """
+    with np.load(Path(corners_npz_path), allow_pickle=False) as data:
+        npz_ids = [str(x) for x in np.asarray(data["image_ids"]).ravel()]
+        uv = np.asarray(data["uv"], dtype=np.float64)
+        detected = np.asarray(data["detected"], dtype=bool)
+        source = [str(x) for x in np.asarray(data["source"]).ravel()]
+
+    # 行序锁:清单记录与角点文件必须逐行一致(研究 Pitfall 10 的同款防线)
+    rec_ids = [str(r["image_id"]) for r in records]
+    if rec_ids != npz_ids:
+        raise AssertionError(
+            f"数据清单记录与角点文件的照片编号对不上:清单 {len(rec_ids)} 行、"
+            f"角点文件 {len(npz_ids)} 行,或顺序不一致。聚合要求两者逐行一致"
+            f"(行序契约),请确认 records 与角点文件来自同一轮 calib corners/ingest。")
+
+    # 解侧外参按照片编号查表(检不出的帧没有解,进不了位姿均值)
+    ext_map = {str(iid): k for k, iid in enumerate(image_ids_all)}
+
+    # 按姿态分组(同姿态连拍;保持清单里首次出现的顺序,读产物的人好对照)
+    groups: dict[str, list[int]] = {}
+    for k, rec in enumerate(records):
+        groups.setdefault(str(rec["pose_id"]), []).append(k)
+
+    poses: dict[str, dict] = {}
+    for pose_id, idxs in groups.items():
+        det = [k for k in idxs if detected[k]]
+        if not det:
+            raise AssertionError(
+                f"姿态 {pose_id} 的连拍没有任何检出帧,均值聚合无从谈起"
+                f"(该姿态 {len(idxs)} 帧全部未检出)。请检查角点检出率。")
+        uv_agg = uv[det].mean(axis=0)                    # 逐点均值(D-02)
+        detected_agg = bool(detected[idxs].all())        # 全部帧检出才算整
+        # 聚合位姿:只对解里有外参的帧求均值(与线性化点同源,口径一致)
+        sol_rows = [ext_map[npz_ids[k]] for k in det if npz_ids[k] in ext_map]
+        if not sol_rows:
+            raise AssertionError(
+                f"姿态 {pose_id} 的检出帧在标定解里一份外参都对不上"
+                f"(image_ids_all 里没有它的任何照片)。聚合位姿必须与线性化点"
+                f"同源,请确认传入的解与角点文件是同一批数据算出来的。")
+        rs = np.asarray([np.asarray(rvecs_all[k], dtype=np.float64).ravel()
+                         for k in sol_rows])
+        ts = np.asarray([np.asarray(tvecs_all[k], dtype=np.float64).ravel()
+                         for k in sol_rows])
+        rot_mean = Rotation.from_rotvec(rs).mean().as_rotvec()   # 弦长均值,见红线
+        t_mean = ts.mean(axis=0)                                 # 平移算术均值
+        n_repeats = len(det)             # 进均值的帧数(σ 折减按它算)
+        poses[pose_id] = {
+            "uv_agg": uv_agg,
+            "detected_agg": detected_agg,
+            "rot_mean": rot_mean,
+            "t_mean": t_mean,
+            "n_repeats": n_repeats,
+            "sigma_scale": 1.0 / np.sqrt(n_repeats),
+            "sources": [source[k] for k in det],
+        }
+    return {"poses": poses, "image_size": image_size}
+
+
+def build_aggregated_observation_set(board: BoardSpec, aggregate: dict) -> ObservationSet:
+    """把聚合结果装成观测集(与 load_observation_set 同一套校验体例)。
+
+    一姿态一视图:image_ids 记姿态编号(pose_ids 同值,阶段四按姿态切分
+    的连接键自然就位);object_points 复用 build_object_points;image_points
+    逐姿态堆叠 (V, P, 2);corner_source 统一记 "pose_mean"(聚合口径留痕)。
+
+    校验(照 load_observation_set 的中文报错体例):每个姿态必须全部帧检出
+    (带未检出帧的聚合不进 Fisher,缺一角点的"均值姿态"是假观测);
+    角点数组形状与棋盘规格一致且全为有限值;image_size 必须在聚合结果里。
+    """
+    poses: dict[str, dict] = aggregate.get("poses", {})
+    if not poses:
+        raise AssertionError(
+            "聚合结果里没有任何姿态(poses 为空),装不出观测集。"
+            "请先跑 aggregate_observations 并确认输入有检出帧。")
+    image_size = aggregate.get("image_size")
+    if image_size is None:
+        raise AssertionError(
+            "聚合结果里没有 image_size(宽, 高),观测集无法确定图像尺寸。"
+            "请在 aggregate_observations 调用时传 image_size,或手工补上。")
+    n_points = board.cols * board.rows
+    for pose_id, entry in poses.items():
+        if not entry["detected_agg"]:
+            raise AssertionError(
+                f"姿态 {pose_id} 的连拍有未检出帧(detected_agg=False),"
+                f"均值聚合观测不完整——带缺口的均值姿态是假观测,不进 Fisher。"
+                f"请改用全检出的姿态,或回到 calib corners 排查该姿态的检出问题。")
+        if entry["uv_agg"].shape != (n_points, 2):
+            raise AssertionError(
+                f"姿态 {pose_id} 的聚合角点形状不合:期望 ({n_points},2)"
+                f"(棋盘 {board.cols}×{board.rows} 个内角点),"
+                f"实际是 {entry['uv_agg'].shape}。多半是棋盘规格与角点文件"
+                f"不是同一套配置,请核对 board.yaml。")
+        if not np.isfinite(entry["uv_agg"]).all():
+            raise AssertionError(
+                f"姿态 {pose_id} 的聚合角点里混入了非数值(NaN/无穷),"
+                f"聚合输入可疑,请检查角点文件。")
+    return ObservationSet(
+        image_ids=tuple(poses.keys()),
+        pose_ids=tuple(poses.keys()),
+        object_points=build_object_points(board),
+        image_points=np.stack([entry["uv_agg"] for entry in poses.values()]),
+        image_size=(int(image_size[0]), int(image_size[1])),
+        corner_source=("pose_mean",) * len(poses),
+    )

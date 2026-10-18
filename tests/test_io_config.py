@@ -469,10 +469,13 @@ def test_fisher_cond_threshold_le_one_rejected(tmp_path):
 
 
 def test_fisher_cond_order_violation(tmp_path):
-    """警戒线 ≥ 退化线:分档失去意义,报错点名两个字段。"""
+    """警戒线 ≥ 退化线:分档失去意义,报错点名两个字段。
+
+    写法注意:yaml 的指数必须带符号(1.0e+8 才解析成数,1.0e8 是文字)。
+    """
     p = tmp_path / "calibration.yaml"
     p.write_text(
-        "fisher:\n  cond_warning: 1.0e8\n  cond_degenerate: 1.0e6\n",
+        "fisher:\n  cond_warning: 1.0e+8\n  cond_degenerate: 1.0e+6\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError) as exc_info:
