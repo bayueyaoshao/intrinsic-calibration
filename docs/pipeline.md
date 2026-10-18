@@ -53,7 +53,7 @@ flowchart TD
 | ① | 照片入库体检 | `calib ingest` | input_data/, config/ | manifest.json(每张带全部体检数字与判定来源), suspect_originals/(存疑原图副本), suspect_diff_vs_*.txt(跨轮存疑对比表) | io/ | IO-01~03 |
 | ② | 找棋盘角点 | `calib corners` | manifest, 图像, 检测配置 | corners_train/test_×classic/sb.npz(4 份角点;sb 路线含 classic 兜底帧并逐帧记 source 来源), detection_summary.json(检测质量摘要,sb 三口径:纯 SB/兜底/合计), marked_copies/(全部照片的角点标记副本,classic/sb 两套), mosaic/(总览拼图 + 存疑拼图 + 逐格索引), review_sb_failed/(SB 未检出帧:原图+兜底标记+诊断记录), review_suspects/(存疑帧:原图+双检测器标记+中文原因汇总), review_burst_flagged/(连拍点名帧:原图+双检测器标记+波动数值与容差结论)——三个 review 文件夹各为一个文件夹看全的人工复核包,清单为空不生成 | corners/ | COR-01~03 |
 | ③ | 测噪声底 | `calib noise` | corners.npz, 图像 | noise.json | noise/ | NOI-01~02 |
-| ④ | 求解相机内参 | `calib calibrate` | corners.npz, 模型/求解器配置 | baseline_<检测器>_<模型>/calibration.json + residuals.npz(逐帧残差), comparison.json(2×2 对比摘要) | models/, solve/ | MOD-01~02, SOL-01~02 |
+| ④ | 求解相机内参 | `calib calibrate` | corners_train/test_*.npz(某检测器口径的角点), manifest.json, 模型/求解器配置矩阵 | run_<时间戳>/ 下每组合一个子目录(目录名 <模型>__<求解器>,如 m2__scipy、m2__scipy_softl1;内含 result.json + extrinsics.npz + residuals.npz 逐帧残差), comparison.json(全矩阵对比摘要), suspect_review/(存疑帧 vs 正常帧逐帧复核:JSON 结论表 + PNG 对比图,复核失败不影响标定结果) | models/, solve/, visualization/ | MOD-01~02, SOL-01, ITER-01 |
 | ⑤ | 算理论精度极限 | `calib fisher` | corners.npz, noise.json, 标定结果 | crlb.json | noise/ | NOI-03 |
 | ⑥ | 防作弊考试 | `calib evaluate` | corners.npz, 实验配置 | experiments/*.json, 汇总表 | evaluation/ | EVA-01~05 |
 | ⑦ | 误差归因 | `calib analyze` | 任意上游产物 | analysis/*.json | analysis/ | ANA-01~04 |

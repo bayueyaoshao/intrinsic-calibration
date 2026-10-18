@@ -110,10 +110,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | IO-02 | Phase 1 | Shipped (Phase 1)(01-04 三指标比例化体检+双来源存疑判定;只标记不剔除,剔除清单机制归 ITER-02) |
 | IO-03 | Phase 1 | Shipped (Phase 1)(01-01 配置解析与校验,棋盘参数零硬编码、square_size 与内参解耦) |
 | COR-01 | Phase 1 | Shipped (Phase 1)(01-02 双检测器与比例化窗口推导;01-05 全量标记副本与拼图供人工核查) |
-| MOD-01 | Phase 2 | Pending |
-| MOD-02 | Phase 2 | Pending |
-| SOL-01 | Phase 2 | Pending |
-| ITER-01 | Phase 2 | Pending |
+| MOD-01 | Phase 2 | Shipped (Phase 2)(02-01 CameraModel 抽象+注册机制;models/ 单一投影与雅可比,标定评分与存疑复核共用同一实现) |
+| MOD-02 | Phase 2 | Shipped (Phase 2)(02-01 四类模型:M1/M2 针孔布朗、M3 有理、M4 鱼眼 KB4;OpenCV 投影一致性测试与数值雅可比校验把关) |
+| SOL-01 | Phase 2 | Shipped (Phase 2)(02-03/02-04 求解器统一接口 + OpenCV 初始化 → scipy least_squares 精化双后端,CalibrationResult 同构落盘) |
+| ITER-01 | Phase 2 | Shipped (Phase 2)(02-05 全矩阵编排:run 目录内 result.json/comparison.json 全带血缘(配置指纹+上游哈希+时间戳);02-06 存疑复核表延续同一契约) |
 | NOI-01 | Phase 3 | Pending |
 | NOI-02 | Phase 3 | Pending |
 | NOI-03 | Phase 3 | Pending |
@@ -146,4 +146,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-16*
-*Last updated: 2026-10-16 after Phase 1 execution complete (IO-01~03 / COR-01 shipped)*
+*Last updated: 2026-10-18 after Phase 2 execution complete (MOD-01~02 / SOL-01 / ITER-01 shipped,累计 8/32)*
