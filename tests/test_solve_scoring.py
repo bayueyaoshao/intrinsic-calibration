@@ -18,7 +18,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from calib.io.config import BoardSpec
 from calib.models import (
@@ -26,6 +25,7 @@ from calib.models import (
     BUILTIN_MODEL_IDS,
     create_model,
     register_model,
+    registered_model_ids,
 )
 from calib.models.base import CameraModel, transform_to_camera
 from calib.solve.baseline import build_object_points
@@ -37,15 +37,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEPTH = 800.0  # 合成位姿的统一深度(平移误差按它的 1% 量级断言)
 
 
-@pytest.fixture(autouse=True, scope="module")
-def _restore_registry_after_module():
-    """玩具模型用完即摘:本模块收尾兜底,保证全局注册表不留污染
-    (体例照 tests/test_models_registry.py 的卫生条款)。"""
-    yield
-    _REGISTRY.pop("toy_scoring_pinhole", None)
-
-
-@register_model
 class ToyScoringPinhole(CameraModel):
     """玩具模型:纯针孔无畸变,定义同 test_models_registry 的 ToyPinhole
     (换短名避免与那边的注册冲突),证明只估位姿小求解对任何注册模型成立。"""
@@ -223,22 +214,30 @@ def test_score_views_bit_identical_with_compute_result_metrics():
 
 def test_solve_pose_only_works_for_registered_toy_model():
     """玩具模型注册进全局表后,只估位姿小求解不改一行代码即可用:
-    角点由玩具模型投影生成,恢复的位姿与回代 RMS 都到机器精度。"""
-    model = create_model("toy_scoring_pinhole")
-    params = np.asarray(model.default_params((640, 480)), dtype=np.float64)
-    board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
-    objp = build_object_points(board)
-    rng = np.random.default_rng(29)
-    rvec_true, tvec_true = _truth_pose(rng)
-    uv = _project_view(objp, params, rvec_true, tvec_true, model)
+    角点由玩具模型投影生成,恢复的位姿与回代 RMS 都到机器精度。
 
-    rvec, tvec, rms = solve_pose_only(uv, objp, params, model)
+    注册放在测试体内(不用装饰器):模块导入即注册会让玩具模型
+    提前污染全局注册表,踩中 test_models_registry 的泄漏检查——
+    用完即摘,卫生条款照那边的体例。"""
+    register_model(ToyScoringPinhole)
+    try:
+        model = create_model("toy_scoring_pinhole")
+        params = np.asarray(model.default_params((640, 480)), dtype=np.float64)
+        board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+        objp = build_object_points(board)
+        rng = np.random.default_rng(29)
+        rvec_true, tvec_true = _truth_pose(rng)
+        uv = _project_view(objp, params, rvec_true, tvec_true, model)
+
+        rvec, tvec, rms = solve_pose_only(uv, objp, params, model)
+    finally:
+        _REGISTRY.pop("toy_scoring_pinhole", None)
 
     assert rms < 1e-6, f"玩具模型回代 RMS {rms:.2e}px 应到机器精度级"
     assert float(np.linalg.norm(rvec - rvec_true)) < 1e-6
     assert float(np.abs(tvec - tvec_true).max()) < 1e-3
-    # 卫生:玩具模型注册不应挤掉四个内置模型
-    assert set(BUILTIN_MODEL_IDS) <= set(_REGISTRY)
+    # 卫生:玩具模型已摘除,注册表回到只剩四个内置模型
+    assert set(registered_model_ids()) == set(BUILTIN_MODEL_IDS)
 
 
 def test_scoring_source_has_no_specific_models_or_projectpoints():
