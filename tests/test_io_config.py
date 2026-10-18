@@ -65,6 +65,46 @@ def test_sb_fallback_classic_explicit_false(tmp_path):
     assert cfg.corners.sb_fallback_classic is False
 
 
+# ---- 第④步求解矩阵:模型/路径/scipy 参数进配置(D-01/D-12)----
+
+def test_calibrate_matrix_values_from_repo_yaml():
+    """真实 calibration.yaml 的求解矩阵:m1–m4 全矩阵 × 双路径 × 默认 scipy 参数。"""
+    cfg = load_calibration(REAL_CALIB)
+    assert cfg.calibrate.corner_route == "sb"
+    assert cfg.calibrate.models == ("m1", "m2", "m3", "m4")
+    assert cfg.calibrate.solvers == ("opencv", "scipy")
+    assert cfg.calibrate.scipy.method == "trf"
+    assert cfg.calibrate.scipy.tr_solver == "lsmr"
+    assert cfg.calibrate.scipy.losses == ("linear", "soft_l1")
+    assert cfg.calibrate.scipy.f_scale == "auto"
+    assert cfg.calibrate.scipy.max_nfev == 300
+    assert cfg.calibrate.scipy.ftol == 1e-10
+    assert cfg.calibrate.scipy.xtol == 1e-12
+    assert cfg.calibrate.scipy.gtol == 1e-10
+    # 鱼眼段原样保留(阶段一基线复现仍读它)
+    assert cfg.calibrate.fisheye.flags == 2
+
+
+def test_calibrate_matrix_defaults_when_section_missing(tmp_path):
+    """整个 calibrate 段缺省:用内置默认(与随仓库 yaml 一致)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
+    cfg = load_calibration(p)
+    assert cfg.calibrate.corner_route == "sb"
+    assert cfg.calibrate.models == ("m1", "m2", "m3", "m4")
+    assert cfg.calibrate.solvers == ("opencv", "scipy")
+    assert cfg.calibrate.scipy.losses == ("linear", "soft_l1")
+    assert cfg.calibrate.scipy.f_scale == "auto"
+
+
+def test_f_scale_numeric_override(tmp_path):
+    """f_scale 写死数值:0.25 被接受(鱼眼数据量级的实测推荐值)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("calibrate:\n  scipy:\n    f_scale: 0.25\n", encoding="utf-8")
+    cfg = load_calibration(p)
+    assert cfg.calibrate.scipy.f_scale == 0.25
+
+
 # ---- 非法配置:必须抛 ValueError,消息含字段名(中文)----
 
 def _write_board(tmp_path: Path, text: str) -> Path:
@@ -132,6 +172,79 @@ def test_sb_fallback_classic_rejects_int_one(tmp_path):
         load_calibration(p)
     assert "corners.sb_fallback_classic" in str(exc_info.value)
     assert "实际读到的值" in str(exc_info.value)
+
+
+# ---- 求解矩阵非法取值:报错点名字段 + 列出可选(白名单防线)----
+
+def _write_calibrate(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "calibration.yaml"
+    p.write_text(f"calibrate:\n{text}", encoding="utf-8")
+    return p
+
+
+def test_bad_model_name_rejected(tmp_path):
+    """models 里混入 "m5":报错点名 calibrate.models 并给出可选清单。"""
+    p = _write_calibrate(tmp_path, "  models: [m1, m5]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "calibrate.models" in message
+    assert "可选" in message and "m5" in message
+
+
+def test_empty_models_rejected(tmp_path):
+    """models 空名单:矩阵至少要一个模型,报错点名 calibrate.models。"""
+    p = _write_calibrate(tmp_path, "  models: []\n")
+    with pytest.raises(ValueError, match="calibrate.models"):
+        load_calibration(p)
+
+
+def test_bad_solver_name_rejected(tmp_path):
+    """solvers 里混入 "ceres":报错点名 calibrate.solvers 并给出可选清单。"""
+    p = _write_calibrate(tmp_path, "  solvers: [opencv, ceres]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "calibrate.solvers" in message
+    assert "可选" in message and "ceres" in message
+
+
+def test_bad_loss_name_rejected(tmp_path):
+    """losses 里混入 "l1":报错点名 calibrate.scipy.losses 并给出可选清单。"""
+    p = _write_calibrate(tmp_path, "  scipy:\n    losses: [linear, l1]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "calibrate.scipy.losses" in message
+    assert "可选" in message and "l1" in message
+
+
+def test_f_scale_zero_and_negative_rejected(tmp_path):
+    """f_scale = 0 与 -1:不是 "auto" 也不是正数,两条都报错点名 calibrate.scipy.f_scale。"""
+    for bad in ("0", "-1"):
+        p = _write_calibrate(tmp_path, f"  scipy:\n    f_scale: {bad}\n")
+        with pytest.raises(ValueError) as exc_info:
+            load_calibration(p)
+        assert "calibrate.scipy.f_scale" in str(exc_info.value)
+
+
+def test_method_lm_rejected_with_dense_reason(tmp_path):
+    """method: lm:白名单拒绝,报错消息说明稠密雅可比限定(640 视图不可用)。"""
+    p = _write_calibrate(tmp_path, "  scipy:\n    method: lm\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "calibrate.scipy.method" in message
+    assert "稠密" in message and "lm" in message
+
+
+def test_bad_corner_route_rejected(tmp_path):
+    """corner_route 非法值(如 "sift"):报错点名 calibrate.corner_route。"""
+    p = _write_calibrate(tmp_path, "  corner_route: sift\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    assert "calibrate.corner_route" in str(exc_info.value)
+    assert "可选" in str(exc_info.value)
 
 
 def test_yaml_syntax_error_chinese_error_with_path(tmp_path):
