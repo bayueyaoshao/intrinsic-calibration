@@ -21,15 +21,16 @@ import cv2
 import numpy as np
 import typer
 
-from calib.corners.artifacts import CANONICAL_RULE_VERSION, load_corners, save_corners
+from calib.corners.artifacts import CANONICAL_RULE_VERSION, save_corners
 from calib.corners.canonical import burst_consistency
 from calib.corners.detect import detect_classic, detect_sb
 from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
-from calib.solve.baseline import DETECTORS, run_baselines, save_calibration
-from calib.util.lineage import make_lineage, sha256_file
+from calib.solve.matrix import run_calibration_matrix
+from calib.solve.observation import excluded_image_ids, load_observation_set
+from calib.util.lineage import make_lineage
 from calib.visualization.mosaic import write_mosaics
 from calib.visualization.overlay import (
     render_all,
@@ -649,14 +650,16 @@ def noise() -> None:
     _not_implemented(3, "测噪声底")
 
 
-def _manifest_path_for(corners_run: Path) -> Path:
+def _manifest_path_for(corners_run: Path, corner_route: str = "sb") -> Path:
     """定位与角点产物同一轮的数据清单 manifest.json。
 
     优先用角点 meta 里记录的上游清单路径(血缘链闭合:标定对齐的正是
     角点当时用的那份清单,即便之后又跑过新的 ingest 也不串轮);
     记录缺失或文件不在了,才退回最新一轮 ingest 产物。
+    meta 文件名按角点路线取(D-02:默认读 sb 路线那份;
+    corner_route 配回 classic 时行为与旧版一致)。
     """
-    meta_path = corners_run / "corners_train_classic.meta.json"
+    meta_path = corners_run / f"corners_train_{corner_route}.meta.json"
     if meta_path.is_file():
         with open(meta_path, encoding="utf-8") as f:
             meta = json.load(f)
@@ -667,77 +670,79 @@ def _manifest_path_for(corners_run: Path) -> Path:
     return latest_run_dir(OUTPUT_ROOT, "ingest") / "manifest.json"
 
 
-@app.command(help="④ 求解相机内参:两颗检测器的角点 × 针孔/鱼眼两类模型 = 4 个基线并排出结果")
+@app.command(help="④ 求解相机内参:配置矩阵驱动——模型 × OpenCV 原生/OpenCV 初值→scipy 精化"
+                  "(含鲁棒核对照)逐组合并排出结果,三件套带血缘落盘")
 def calibrate() -> None:
-    """流水线第④步:在 train 角点上跑 2×2 = 4 个基线标定(D-10)。
+    """流水线第④步:在 train 角点(sb 路线,D-02)上跑配置矩阵标定(D-01 全矩阵)。
 
-    步骤:读配置 → 找最新一轮 corners 产物,读两份 train 角点
-    (test 65 张留给后续阶段的独立评分,本步不碰)→ 按人工剔除清单
-    逻辑剔除(D-03)→ 四组合循环求解 → 每组合写 calibration.json 与
-    residuals.npz → 汇总写 comparison.json → 打印中文对比表。
+    步骤:读配置 → 找最新一轮 corners 产物,按 corner_route 定位 train 角点
+    与同轮数据清单(血缘优先防串轮)→ 装载观测集(人工剔除清单生效,D-03;
+    test 切分留给后续阶段独立评分,本步不碰)→ 矩阵循环:每模型先 OpenCV
+    初值、再 scipy 各损失核精化 → 逐组合三件套(result.json / extrinsics.npz /
+    residuals.npz)带血缘落盘 → 汇总写 comparison.json → 打印中文对比表。
     """
     started = datetime.now(UTC)
     board = load_board(BOARD_PATH)
     cfg = load_calibration(CALIBRATION_PATH)
+    route = cfg.calibrate.corner_route
 
     corners_run = latest_run_dir(OUTPUT_ROOT, "corners")
-    with open(_manifest_path_for(corners_run), encoding="utf-8") as f:
+    manifest_path = _manifest_path_for(corners_run, route)
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
     width, height = manifest["summary"]["resolution"]
 
-    corners_train = {
-        detector: load_corners(corners_run / f"corners_train_{detector}.npz")
-        for detector in DETECTORS
-    }
-    typer.echo(f"开始基线标定:2×2 = 4 个组合(corners run:{corners_run.name},"
-               f"图像 {width}x{height})……")
-    outcome = run_baselines(corners_train, (int(width), int(height)), cfg, board)
+    corners_npz = corners_run / f"corners_train_{route}.npz"
+    obs = load_observation_set(corners_npz, manifest_path, board, split="train",
+                               exclude_images=cfg.exclude_images)
+    excluded = excluded_image_ids(corners_npz, manifest_path, split="train",
+                                  exclude_images=cfg.exclude_images)
 
     round_id = f"run_{started.strftime('%Y%m%d_%H%M%S')}"
     run_dir = OUTPUT_ROOT / "calibration" / round_id
 
-    # 每组合各写产物;血缘里记下它消费的那份角点文件路径与指纹(T-03-01),
-    # 以及本轮实际被人工剔除的照片名单(T-03-02,谁剔了什么可审计)
-    comparison = []
-    for detector in DETECTORS:
-        npz_path = corners_run / f"corners_train_{detector}.npz"
-        for model in ("pinhole", "fisheye"):
-            name = f"baseline_{detector}_{model}"
-            result = outcome["baselines"][name]
-            lineage = make_lineage(
-                config_files={"board.yaml": BOARD_PATH,
-                              "calibration.yaml": CALIBRATION_PATH},
-                upstream={npz_path.name: npz_path},
-                round_id=round_id,
-            )
-            lineage["corners_file"] = str(npz_path)
-            lineage["corners_sha256"] = sha256_file(npz_path)
-            lineage["excluded_images"] = outcome["excluded_images"]
-            save_calibration(run_dir, name, result, lineage)
-            comparison.append({
-                "name": name,
-                "n_views": len(result["image_ids"]),
-                "rms_overall": result["rms_overall"],
-                "converged": result["converged"],
-                "failure_note": result["failure_note"],
-            })
+    losses_text = "/".join(cfg.calibrate.scipy.losses)
+    typer.echo(f"开始矩阵标定:{len(cfg.calibrate.models)} 个模型 × 求解路径 "
+               f"{'/'.join(cfg.calibrate.solvers)}(scipy 损失核:{losses_text})"
+               f"——角点路线 {route}(corners run:{corners_run.name},"
+               f"图像 {width}x{height},可用视图 {len(obs.image_ids)} 个)……")
+    typer.echo("  预期耗时白话(研究实测):全矩阵约 15~25 分钟——OpenCV 每个针孔"
+               "模型约 2 分钟、鱼眼约半分钟,scipy 精化每条十几秒到两分钟;"
+               "每完成一个组合播报一行,请稍等。")
+
+    def _report(row: dict) -> None:
+        if row["converged"]:
+            flag = "收敛"
+        else:
+            flag = f"未收敛({(row['failure_note'] or '')[:30]}……)"
+        typer.echo(f"  完成 {row['name']}:{flag}")
+
+    comparison = run_calibration_matrix(
+        cfg, board, obs, run_dir, corners_npz, round_id,
+        excluded_images=excluded, progress=_report,
+        config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH})
 
     comparison_path = run_dir / "comparison.json"
     with open(comparison_path, "w", encoding="utf-8") as f:
         json.dump(comparison, f, ensure_ascii=False, indent=2)
 
-    # 中文对比表:四组合并排,一眼看出哪组最优、哪组失败(D-10 的直接答案)
-    typer.echo("基线标定完成,2×2 = 4 个组合并排已写盘。")
-    typer.echo(f"  {'组合':<28}{'视图数':<8}{'整体RMS(像素)':<16}{'收敛':<6}")
+    # 中文对比表:按模型分组并排(组内 OpenCV 初值 → scipy 精化相邻,
+    # "精化前后"一眼可比);失败组合照样占一行,留痕不中断
+    typer.echo("矩阵标定完成,逐组合三件套(带血缘)已写盘。")
+    typer.echo(f"  {'组合':<22}{'视图数':<8}{'整体RMS(像素)':<16}{'收敛':<6}")
     for row in comparison:
         rms_text = f"{row['rms_overall']:.4f}" if row["rms_overall"] is not None else "—"
-        flag = "是" if row["converged"] else f"否({row['failure_note'][:24]}……)"
-        typer.echo(f"  {row['name']:<28}{row['n_views']:<8}{rms_text:<16}{flag}")
-    typer.echo("  白话:鱼眼(fisheye)模型假设镜头按'等距投影'成像——入射角越大,"
-               "成像点离中心按角度均匀拉开;普通广角镜头往往不合这个假设,"
-               "求解可能不收敛或误差很大,这属预期内的正常发现,记录下来不中断。")
-    if outcome["excluded_images"]:
-        typer.echo(f"  人工剔除清单生效:本轮剔除 {len(outcome['excluded_images'])} 张"
+        flag = "是" if row["converged"] else f"否({(row['failure_note'] or '')[:24]}……)"
+        typer.echo(f"  {row['name']:<22}{row['n_views']:<8}{rms_text:<16}{flag}")
+    typer.echo("  白话注解:")
+    typer.echo("  - 表里 scipy 与 opencv 的 RMS 对比是\"同一个模型\"内的精化前后比较"
+               "(m1__scipy 对 m1__opencv),不是拿 M1 与 M4 互相比。")
+    typer.echo("  - M1/M2/M3 是针孔模型,在强鱼眼镜头上 RMS 明显高于 M4 属\"模型不合身\""
+               "的预期发现(正式判定在阶段四的防作弊考试),照常记录不中断。")
+    typer.echo("  - soft_l1 是鲁棒核对照路径(把大残差的权重压低,看个别离群角点是否在"
+               "拖动整体);它的收敛按\"实用收敛\"判定,依据全在各 result.json 的 solver_meta。")
+    if excluded:
+        typer.echo(f"  人工剔除清单生效:本轮剔除 {len(excluded)} 张"
                    f"(名单已记进每个产物的血缘)")
     typer.echo(f"  标定产物:{run_dir}")
     typer.echo(f"  对比摘要:{comparison_path}")
