@@ -68,3 +68,57 @@ def plot_transfer_curve(curve: dict, out_path: Path | str) -> Path:
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
+
+
+def plot_spectrum(model_id: str, spectrum: dict, out_path: Path | str) -> Path:
+    """把一份 CRLB 记录的特征谱画成图(PNG),返回图路径。
+
+    输入是 crlb.json 里单条记录中的谱字段(eigvals / condition_number /
+    top_directions / flag)。两张子图:
+    - 左:协方差特征值条形图(对数轴)——每根条是一个"互不相关的方向"
+      上的方差大小,越长说明这个方向上精度越差;
+    - 右:软方向载荷表(文字)——协方差最大特征值对应的参数组合,
+      按 |载荷| 降序列参数名,并标注条件数与退化旗标。
+
+    图内文字按项目要求用通俗中文;数字结论以 crlb.json 为准,图只是
+    同一份数据的可视化。
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    eigvals = np.asarray(spectrum.get("eigvals") or [], dtype=np.float64)
+    cond = spectrum.get("condition_number")
+    flag = spectrum.get("flag") or ""
+    flag_text = {"warning": "警戒线以上", "degenerate": "已判退化"}.get(
+        flag, "正常范围")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.0, 4.2),
+                                   gridspec_kw={"width_ratios": [3, 2]})
+
+    if eigvals.size:
+        idx = np.arange(1, eigvals.size + 1)
+        ax1.bar(idx, np.clip(eigvals, 1.0e-30, None), color="#1f77b4")
+        ax1.set_yscale("log")
+        ax1.set_xlabel("方向编号(按特征值从小到大)")
+        ax1.set_ylabel("协方差特征值(方差大小,对数轴)")
+        ax1.set_title(f"{model_id} 边际化协方差特征谱")
+        ax1.grid(True, axis="y", which="both", alpha=0.3)
+
+    ax2.axis("off")
+    lines = [f"条件数:{cond:.3e}" if cond is not None else "条件数:未算出",
+             f"分档:{flag_text}", "", "最软方向(该组合方向上精度最差):"]
+    for item in spectrum.get("top_directions") or []:
+        params = "、".join(item.get("params") or [])
+        loadings = "、".join(
+            f"{name}:{loading:+.3f}"
+            for name, loading in zip(item.get("params") or [],
+                                     item.get("loadings") or []))
+        lines.append(f"· 参数:{params}")
+        lines.append(f"  载荷:{loadings}")
+    ax2.text(0.0, 1.0, "\n".join(lines), va="top", ha="left", fontsize=10,
+             family=plt.rcParams["font.sans-serif"][0])
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path

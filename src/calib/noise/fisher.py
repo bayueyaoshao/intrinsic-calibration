@@ -42,8 +42,9 @@ from scipy.spatial.transform import Rotation
 from calib.io.config import BoardSpec
 from calib.models.base import CameraModel
 from calib.solve.baseline import build_object_points
-from calib.solve.observation import ObservationSet
+from calib.solve.observation import ObservationSet, load_observation_set
 from calib.solve.residuals import make_jacobian_fn, pack_theta
+from calib.solve.result import load_extrinsics, load_result
 
 # 位姿 6×6 信息块的奇异警戒线:条件数达到它,说明该视图的位姿在这批
 # 角点下基本定不住(常来自棋盘近似共线的极端视角),必须报错点名
@@ -418,3 +419,427 @@ def build_aggregated_observation_set(board: BoardSpec, aggregate: dict) -> Obser
         image_size=(int(image_size[0]), int(image_size[1])),
         corner_source=("pose_mean",) * len(poses),
     )
+
+
+# ==== 16 份 CRLB 矩阵编排(03-05:2 观测集 × 2 σ 口径 × N 模型)====
+#
+# 编排骨架照 solve/matrix.py 的 run_calibration_matrix:配置清单 → 逐模型 →
+# 逐组合落盘不中断——单个组合内部出任何意外(数值奇异、上游产物缺键、
+# 读写失败)都转失败契约记录(结构键全 / 数值 null / 中文 failure_note),
+# 一个模型病了不该拖死整批(T-03-05-04)。
+
+# 一份 CRLB 记录的全部结构键(失败时也一个不少;数值键一律 None)
+CRLB_RECORD_KEYS = (
+    "observation_set", "sigma_source", "sigma_used", "param_names",
+    "se", "band_low", "band_high", "band_rel",
+    "condition_number", "eigvals", "top_directions", "flag",
+    "n_views", "max_pose_block_cond", "status", "failure_note",
+    "sigma_reduction",
+)
+
+# D-07 分级:M1/M2 硬门槛(个位数百分比,执行位取 <10% 留裕量)、
+# M3 尽力对齐(对不上按发现记录)、其余只记录不判读
+_CROSSCHECK_CLASSES: dict[str, tuple[str, float | None]] = {
+    "m1": ("hard", 0.10),
+    "m2": ("hard", 0.10),
+    "m3": ("best_effort", None),
+}
+
+
+def _failure_record(obs_name: str, sigma_name: str, param_names, exc: Exception) -> dict:
+    """失败契约的工厂:结构键全在、数值字段一律 None、中文说明非空。"""
+    note = f"CRLB 组合({obs_name} × {sigma_name} 口径)未算成:{type(exc).__name__}——{exc}"
+    return {
+        "observation_set": obs_name,
+        "sigma_source": sigma_name,
+        "sigma_used": None,
+        "param_names": list(param_names),
+        "se": None,
+        "band_low": None,
+        "band_high": None,
+        "band_rel": None,
+        "condition_number": None,
+        "eigvals": None,
+        "top_directions": [],
+        "flag": "",
+        "n_views": None,
+        "max_pose_block_cond": None,
+        "status": "failed",
+        "failure_note": note,
+        "sigma_reduction": None,
+    }
+
+
+def _load_linearization_point(run_dir: Path, model_id: str, obs) -> tuple[dict, np.ndarray, np.ndarray]:
+    """从 m{X}__scipy 产物装线性化点:params 字典 + 逐视图位姿(D-06)。
+
+    三道对齐断言(T-03-05-02,串轮/错位在这里当场炸,绝不带病算 FIM):
+    - result.json 必须收敛(未收敛 = 没有合格的线性化点,D-06 不许拿
+      softl1/未收敛解凑数);
+    - extrinsics.npz 的 image_ids 与 result.json 逐项相等(行序契约);
+    - image_ids 与观测集逐项相等(F 的行序跟着观测集走,位姿错一行
+      就是不报错只算错的事故)。
+    """
+    scipy_dir = run_dir / f"{model_id}__scipy"
+    if not (scipy_dir / "result.json").is_file():
+        raise AssertionError(
+            f"{model_id} 的线性化点产物不在:{scipy_dir / 'result.json'}。"
+            f"D-06 规定 CRLB 的线性化点取 scipy linear 精化结果,请先跑 calibrate。")
+    doc = load_result(scipy_dir)
+    if not doc.get("converged"):
+        raise AssertionError(
+            f"{model_id}__scipy 未收敛,没有合格的线性化点(D-06:softl1 与"
+            f"未收敛解不作线性化点)。请先在 calibrate 里解决该模型的收敛问题。")
+    ext = load_extrinsics(scipy_dir)
+    if tuple(ext["image_ids"]) != tuple(doc.get("image_ids", ())):
+        raise AssertionError(
+            f"{model_id}__scipy 的 extrinsics.npz 与 result.json 的照片编号对不上"
+            f"(行序契约被破坏),这份线性化点不可信,请重跑该组合。")
+    if tuple(ext["image_ids"]) != tuple(obs.image_ids):
+        raise AssertionError(
+            f"{model_id}__scipy 的照片编号与角点观测集对不上(两边视图清单不一致)。"
+            f"线性化点必须与观测集逐行对齐(行序契约),多半是两次运行之间"
+            f"数据或剔除清单变过,请用同一批产物重算。")
+    params = {str(k): float(v) for k, v in doc["params"].items()}
+    return params, ext["rvecs"], ext["tvecs"]
+
+
+def _sigma_scalars_from_noise(noise_report: dict) -> dict[str, float]:
+    """从 noise.json 读双口径标量 σ(缺键/失败轮中文报错,T-03-05-01)。"""
+    if noise_report.get("failure_note"):
+        raise AssertionError(
+            f"上游 noise.json 是失败轮(failure_note 非空:"
+            f"{noise_report['failure_note']}),没有可用的 σ。请先重跑 calib noise。")
+    sigmas: dict[str, float] = {}
+    for key, name in (("sigma_detector_corner", "检测器口径"),
+                      ("sigma_temporal_corner", "时域口径")):
+        if key not in noise_report:
+            raise AssertionError(
+                f"上游 noise.json 缺键 {key}(双口径标量 σ 的契约键)。"
+                f"多半是 noise.json 与当前代码版本不是同一套契约,"
+                f"请重跑 calib noise 后再算 CRLB。")
+        value = noise_report[key]
+        if value is None or not np.isfinite(float(value)) or float(value) <= 0:
+            raise AssertionError(
+                f"上游 noise.json 的 {key}({name} σ)不是正的有限数:"
+                f"{value!r}。σ 是 CRLB 的乘数,坏值会污染全部 16 份结果,"
+                f"请重跑 calib noise。")
+        sigmas[key] = float(value)
+    return sigmas
+
+
+def _crosscheck_section(model, obs640: ObservationSet, params: dict,
+                        rvecs: np.ndarray, tvecs: np.ndarray,
+                        sigma_detector: float | None,
+                        opencv_result: dict | None) -> dict:
+    """OpenCV stdDev 交叉验证段(M1/M2 硬门槛、M3 尽力、M4 记结论,D-07)。
+
+    顺带做输入对齐审计(T-03-05-02):crosscheck 内部现场重解的 OpenCV
+    参数,必须与本轮已存的 m{X}__opencv/result.json 在 float32 容差内一致
+    ——calibrateCamera 没有随机性,不一致 = 喂进去的观测与阶段二不是同一
+    批,这模型的一切结果都可疑,当场中文报错。CRLB 记录本身不受牵连
+    (FIM 只吃几何),但交叉验证段整体记 status="failed"——对不上账的
+    模型不许有"验证通过"的假结论。
+    """
+    # 延迟导入:crosscheck.py 反过来 import 本模块的 Fisher 零件,
+    # 模块顶层互引会成环,这里只在用到交叉验证时才装
+    from calib.noise.crosscheck import crosscheck_model
+
+    cc = crosscheck_model(model, obs640,
+                          linearization=(params, rvecs, tvecs),
+                          sigma_detector=sigma_detector)
+    if cc["status"] == "ok":
+        if opencv_result is None:
+            raise AssertionError(
+                f"{model.model_id} 的交叉验证需要对账 m{model.model_id}__opencv/"
+                f"result.json,但该产物不在——无法确认喂进交叉验证的观测与"
+                f"阶段二是同一批(输入没对齐 = 一切结果可疑),请先跑 calibrate。")
+        saved = {str(k): float(v) for k, v in opencv_result["params"].items()}
+        # cc["params_opencv"] 是按 model.param_names 顺序排布的数组
+        # (交叉验证把 OpenCV 解换算成我们的参数布局),逐名对账
+        values = np.asarray(cc["params_opencv"], dtype=np.float64).ravel()
+        for name, value in zip(model.param_names, values):
+            if not np.isclose(float(value), saved[name], rtol=1e-6, atol=1e-6):
+                raise AssertionError(
+                    f"{model.model_id} 交叉验证现场重解的 OpenCV 参数 {name}"
+                    f"({value!r})与已存 m{model.model_id}__opencv 产物"
+                    f"({saved[name]!r})超出 float32 容差——calibrateCamera 没有"
+                    f"随机性,不一致说明喂进去的观测与阶段二不是同一批(串轮/"
+                    f"错位),本模型全部结果作废,请对齐上游后重算。")
+    section = {
+        "status": cc["status"],
+        "failure_note": cc["failure_note"],
+        "param_names": list(cc["param_names"]),
+        "opencv_se": (None if cc.get("opencv_se") is None
+                      else np.asarray(cc["opencv_se"]).tolist()),
+        "rms": cc.get("rms"),
+        "se_ours_opencv_point": (None if cc.get("se_ours_opencv_point") is None
+                                 else np.asarray(cc["se_ours_opencv_point"]).tolist()),
+        "se_ours_linearization_point": (
+            None if cc.get("se_ours_linearization_point") is None
+            else np.asarray(cc["se_ours_linearization_point"]).tolist()),
+        "point_sensitivity_max_rel": cc.get("point_sensitivity_max_rel"),
+        "compare": (None if cc.get("compare") is None else {
+            "scale_k": cc["compare"]["scale_k"],
+            "max_rel_dev": cc["compare"]["max_rel_dev"],
+            "n_active": cc["compare"]["n_active"],
+            "n_unbounded": cc["compare"]["n_unbounded"],
+            "per_param_rel_dev": np.asarray(cc["compare"]["per_param_rel_dev"]).tolist(),
+        }),
+        "secondary_report": cc.get("secondary_report"),
+        "fisher_diagnostics": (None if cc.get("fisher_diagnostics") is None else {
+            **cc["fisher_diagnostics"],
+            "param_names": list(cc["fisher_diagnostics"]["param_names"]),
+        }),
+    }
+    # rvecs/tvecs/per_view_errors/params_opencv/opencv_se_raw 不进 crlb.json:
+    # 前两类已有落盘产物(extrinsics.npz / result.json,见血缘),原样复制
+    # 只会让 json 膨胀(汇总只是索引不是替代,D-13)
+    model_class, threshold = _CROSSCHECK_CLASSES.get(
+        model.model_id, ("record_only", None))
+    section["model_class"] = model_class
+    section["threshold_rel"] = threshold
+    if cc["status"] == "ok" and threshold is not None:
+        section["verdict"] = ("pass" if cc["compare"]["max_rel_dev"] < threshold
+                              else "fail")
+        section["verdict_note"] = (
+            f"硬门槛:max_rel_dev < {threshold:.0%}(个位数百分比留裕量的执行位)"
+            f"——实际 {cc['compare']['max_rel_dev']:.3%},判 {section['verdict']}。")
+    else:
+        section["verdict"] = None
+        section["verdict_note"] = ("D-07 尽力档:结果记录在案,不设门槛"
+                                   if model_class == "best_effort" else
+                                   "只记录不判读" if cc["status"] == "ok" else
+                                   str(cc["failure_note"]))
+    return section
+
+
+def run_fisher_matrix(corners_npz_path: Path | str, manifest_path: Path | str,
+                      records: list[dict], noise_report: dict,
+                      calibration_run_dir: Path | str, board: BoardSpec,
+                      cfg, exclude_images: tuple[str, ...] = (),
+                      progress=None) -> dict:
+    """16 份 CRLB 的完整编排:双观测集 × 双 σ 口径 × 逐模型,逐组合落盘不中断。
+
+    参数:
+        corners_npz_path:    sb 路线角点文件(train);
+        manifest_path:       同轮数据清单(load_observation_set 的行序契约入口);
+        records:             该切分的逐张记录(80 姿态聚合用,pose_id 在此);
+        noise_report:        noise.json 读回的字典(双口径标量 σ,T-03-05-01);
+        calibration_run_dir: 阶段二标定产物目录(m{X}__scipy / m{X}__opencv);
+        board:               棋盘规格;
+        cfg:                 FisherConfig(模型清单/阈值/带半宽/开关,D-12);
+        exclude_images:      人工剔除清单(与标定同一份,口径才一致);
+        progress:            每完成一个组合回调一次(库层不依赖 typer)。
+
+    返回 report:{"schema_version": "crlb-v1", "models": {mX: {
+        "observation_sets": {views640/poses80: {detector/temporal: 记录}},
+        "linearization_check": ..., "opencv_crosscheck": ...,
+        "n_repeats_range": [min, max]}, "meta": {...}, "failure_note": None}。
+    created / lineage 由调用方(CLI)组装后一并 save_crlb_report 落盘。
+    """
+    # 库层不得依赖命令行框架(typer):进度回调由 CLI 注入(共享模式 7)
+    from calib.models import create_model
+
+    sigmas = _sigma_scalars_from_noise(noise_report)
+    sigma_detector = sigmas["sigma_detector_corner"]
+    sigma_temporal = sigmas["sigma_temporal_corner"]
+
+    # 640 全帧版:正式口径,与实际标定同一份观测集(行序契约入口)
+    obs640 = load_observation_set(corners_npz_path, manifest_path, board,
+                                  split="train", exclude_images=exclude_images)
+
+    report: dict = {
+        "schema_version": "crlb-v1",
+        "models": {},
+        "meta": {
+            "corner_route": "sb",
+            "n_views_640": len(obs640.image_ids),
+            "sigma_detector_corner": sigma_detector,
+            "sigma_temporal_corner": sigma_temporal,
+        },
+        "failure_note": None,
+    }
+    n_ok = n_failed = 0
+
+    for model_id in cfg.models:
+        model_entry: dict = {
+            "observation_sets": {"views640": {}, "poses80": {}},
+            "linearization_check": None,
+            "opencv_crosscheck": None,
+            "n_repeats_range": None,
+            "failure_note": None,
+        }
+        report["models"][model_id] = model_entry
+        try:
+            model = create_model(model_id)
+            params, rvecs, tvecs = _load_linearization_point(
+                calibration_run_dir, model_id, obs640)
+
+            # -- 640 正式版 FIM(σ=1 基准;双口径只是一次乘法)--
+            F640, _full640, diag640 = marginalized_fisher(
+                model, obs640, params, rvecs, tvecs)
+
+            # -- 80 姿态对照版:聚合观测 + 聚合位姿 + σ/√n 折减 --
+            # 聚合按线性化点的行序(逐帧位姿来自同一份 extrinsics,天然对齐)
+            ext_ids = tuple(str(x) for x in
+                            load_extrinsics(calibration_run_dir
+                                            / f"{model_id}__scipy")["image_ids"])
+            aggregate = aggregate_observations(
+                corners_npz_path, records, rvecs, tvecs, ext_ids,
+                image_size=obs640.image_size)
+            obs80 = build_aggregated_observation_set(board, aggregate)
+            scales = [entry["sigma_scale"] for entry in aggregate["poses"].values()]
+            n_reps = [entry["n_repeats"] for entry in aggregate["poses"].values()]
+            scale80 = float(np.mean(scales))
+            model_entry["n_repeats_range"] = [int(min(n_reps)), int(max(n_reps))]
+            # iid 折减假设:σ/√n 只在连拍各帧噪声互不相关时成立;连拍若相关,
+            # 折减不成立——640/80 两版 CRLB 的差值量化的正是这份相关性损耗
+            sigma_reduction = {
+                "sigma_scale_mean": scale80,
+                "n_repeats_min": int(min(n_reps)),
+                "n_repeats_max": int(max(n_reps)),
+                "iid_note": "80 姿态版的 σ 按逐点均值折减 σ/√n(iid 假设:"
+                            "连拍各帧噪声互不相关);连拍若相关则折减不成立,"
+                            "640 全帧版与 80 聚合版的差值 = 连拍相关性损耗(D-01)。",
+            }
+
+            obs_sets = {
+                "views640": {"obs": obs640, "reduce": 1.0, "F_marg": F640,
+                             "diag": diag640, "reduction": None},
+                "poses80": {"obs": obs80, "reduce": scale80, "F_marg": None,
+                            "diag": None, "reduction": sigma_reduction},
+            }
+            for obs_name in ("views640", "poses80"):
+                spec_set = obs_sets[obs_name]
+                if obs_name == "poses80":
+                    F80, _full80, diag80 = marginalized_fisher(
+                        model, obs80, params,
+                        np.stack([aggregate["poses"][pid]["rot_mean"]
+                                  for pid in obs80.image_ids]),
+                        np.stack([aggregate["poses"][pid]["t_mean"]
+                                  for pid in obs80.image_ids]))
+                    spec_set["F_marg"] = F80
+                    spec_set["diag"] = diag80
+                for sigma_name, sigma_value in (
+                        ("detector", sigma_detector),
+                        ("temporal", sigma_temporal)):
+                    try:
+                        sigma_used = sigma_value * spec_set["reduce"]
+                        se = crlb_se(spec_set["F_marg"], sigma_used)
+                        band = sensitivity_band(se, cfg.sigma_band_rel)
+                        spec = spectrum_report(
+                            spec_set["F_marg"], model.param_names,
+                            cfg.cond_warning, cfg.cond_degenerate)
+                        record = {
+                            "observation_set": obs_name,
+                            "sigma_source": sigma_name,
+                            "sigma_used": sigma_used,
+                            "param_names": list(model.param_names),
+                            "se": se,
+                            "band_low": band["low"],
+                            "band_high": band["high"],
+                            "band_rel": band["rel"],
+                            "condition_number": spec["condition_number"],
+                            "eigvals": spec["eigvals"],
+                            "top_directions": spec["top_directions"],
+                            "flag": spec["flag"],
+                            "n_views": len(spec_set["obs"].image_ids),
+                            "max_pose_block_cond": spec_set["diag"]["max_pose_block_cond"],
+                            "status": "ok",
+                            "failure_note": None,
+                            "sigma_reduction": spec_set["reduction"],
+                        }
+                        n_ok += 1
+                    except Exception as e:  # noqa: BLE001  单组合任何异常转失败契约
+                        record = _failure_record(obs_name, sigma_name,
+                                                 model.param_names, e)
+                        n_failed += 1
+                    model_entry["observation_sets"][obs_name][sigma_name] = record
+                    if progress:
+                        progress({"model": model_id, "obs_set": obs_name,
+                                  "sigma": sigma_name, "status": record["status"],
+                                  "condition_number": record["condition_number"],
+                                  "flag": record["flag"]})
+
+            # -- 线性化点敏感性检查(D-06 背书;超限是发现,不阻塞)--
+            if cfg.linearization_check:
+                try:
+                    ocv_dir = Path(calibration_run_dir) / f"{model_id}__opencv"
+                    doc_cv = load_result(ocv_dir)
+                    if not doc_cv.get("converged"):
+                        model_entry["linearization_check"] = {
+                            "rel_diff": None,
+                            "note": f"{model_id}__opencv 未收敛,换点检查跳过。"}
+                    else:
+                        ext_cv = load_extrinsics(ocv_dir)
+                        if tuple(ext_cv["image_ids"]) != tuple(obs640.image_ids):
+                            raise AssertionError(
+                                f"{model_id}__opencv 的照片编号与观测集对不上,"
+                                f"换点检查跳过不得(输入没对齐),请对齐上游重算。")
+                        F_cv, _f, _d = marginalized_fisher(
+                            model, obs640,
+                            {str(k): float(v) for k, v in doc_cv["params"].items()},
+                            ext_cv["rvecs"], ext_cv["tvecs"])
+                        se_a = crlb_se(F640, 1.0)     # σ=1 基准;相对差与 σ 无关
+                        se_b = crlb_se(F_cv, 1.0)
+                        finite = np.isfinite(se_a) & np.isfinite(se_b)
+                        rel = float(np.max(
+                            np.abs(se_b[finite] - se_a[finite]) / se_a[finite]))
+                        model_entry["linearization_check"] = {
+                            "rel_diff": rel,
+                            "n_compared": int(finite.sum()),
+                            "note": "scipy 精化点 vs OpenCV 解点的 CRLB 最大相对差"
+                                    "(预期 <1%;超限 = 解未收敛透的信号,按发现记录)。",
+                        }
+                except Exception as e:  # noqa: BLE001  检查是附加产物,失败不阻塞
+                    model_entry["linearization_check"] = {
+                        "rel_diff": None,
+                        "note": f"线性化点检查未跑成:{type(e).__name__}——{e}"}
+
+            # -- OpenCV stdDev 交叉验证(D-07 分级;对齐审计在此)--
+            if cfg.crosscheck_enabled:
+                try:
+                    ocv_dir = Path(calibration_run_dir) / f"{model_id}__opencv"
+                    opencv_result = (load_result(ocv_dir)
+                                     if (ocv_dir / "result.json").is_file() else None)
+                    model_entry["opencv_crosscheck"] = _crosscheck_section(
+                        model, obs640, params, rvecs, tvecs, sigma_detector,
+                        opencv_result)
+                except Exception as e:  # noqa: BLE001  交叉验证失败转契约记录
+                    model_entry["opencv_crosscheck"] = {
+                        "status": "failed",
+                        "failure_note": (f"{model_id} 的 stdDev 交叉验证未跑成:"
+                                         f"{type(e).__name__}——{e}"),
+                        "model_class": _CROSSCHECK_CLASSES.get(
+                            model_id, ("record_only", None))[0],
+                        "verdict": None, "verdict_note": None,
+                        "compare": None,
+                    }
+
+            # FIM 明细挂在本模型名下(save 侧按模型取出转 npz,绝不进 json)
+            model_entry["_fisher_detail"] = {
+                "F_marg_views640": F640,
+                "F_marg_poses80": obs_sets["poses80"]["F_marg"],
+                "eigvals_cov": np.linalg.eigvalsh(np.linalg.inv(F640)),
+                "eigvecs_cov": np.linalg.eigh(np.linalg.inv(F640))[1],
+                "param_names": list(model.param_names),
+            }
+        except Exception as e:  # noqa: BLE001  模型级失败:该模型全部组合转失败契约
+            model_entry["failure_note"] = (
+                f"{model_id} 的 CRLB 全部组合未算成:{type(e).__name__}——{e}")
+            for obs_name in ("views640", "poses80"):
+                for sigma_name in ("detector", "temporal"):
+                    if sigma_name not in model_entry["observation_sets"][obs_name]:
+                        model_entry["observation_sets"][obs_name][sigma_name] = \
+                            _failure_record(obs_name, sigma_name,
+                                            create_model(model_id).param_names, e)
+                        n_failed += 1
+            if progress:
+                progress({"model": model_id, "obs_set": "*", "sigma": "*",
+                          "status": "failed", "condition_number": None,
+                          "flag": "model_failed"})
+
+    report["meta"]["n_records_ok"] = n_ok
+    report["meta"]["n_records_failed"] = n_failed
+    return report

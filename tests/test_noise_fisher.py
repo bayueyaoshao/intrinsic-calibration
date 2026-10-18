@@ -16,6 +16,7 @@ CRLB 实证校验"无关——这里锁的是"数学没算错"这根桩。
 
 from __future__ import annotations
 
+import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -27,15 +28,18 @@ from scipy.optimize import least_squares
 from scipy.sparse import csr_matrix
 from scipy.spatial.transform import Rotation
 
-from calib.io.config import BoardSpec
+from calib.io.config import BoardSpec, FisherConfig
 from calib.models import create_model
 from calib.models.base import transform_to_camera
+from calib.noise.artifacts import CRLB_KEYS, load_crlb_report, make_failure_crlb, save_crlb_report
 from calib.noise.fisher import (
+    CRLB_RECORD_KEYS,
     SIGMA_BAND_REL_8,
     aggregate_observations,
     build_aggregated_observation_set,
     crlb_se,
     marginalized_fisher,
+    run_fisher_matrix,
     sensitivity_band,
     spectrum_report,
     weighted_fisher,
@@ -48,6 +52,7 @@ from calib.solve.residuals import (
     pack_theta,
     unpack_theta,
 )
+from calib.solve.result import CalibrationResult, save_result
 
 # 合成小场景的固定棋盘与 M2 真值参数(棋盘与 config/board.yaml 同规格 11×8;
 # 畸变给小而非零的值,让 FIM 的畸变列有真实信息量;棋盘放近到 z=700、
@@ -596,3 +601,273 @@ def test_build_aggregated_observation_set_rejects_undetected_pose(tmp_path):
                                  image_size=(64, 48))
     with pytest.raises(AssertionError, match="poseH"):
         build_aggregated_observation_set(_SMALL_BOARD, agg)
+
+
+# ==== 以下为 16 份 CRLB 矩阵编排与 crlb.json 契约(03-05)====
+
+_M1_TRUE = np.array([800.0, 810.0, 330.0, 250.0, -0.2, 0.1, 0.001, -0.001])
+_TRUE_PARAMS = {"m1": _M1_TRUE, "m2": _M2_TRUE}
+
+
+def _write_npz(path: Path, obs: ObservationSet) -> Path:
+    """按 corners 产物的落盘格式把观测集写成角点文件(全检出 sb 来源)。"""
+    np.savez(path, image_ids=np.asarray(obs.image_ids),
+             uv=np.asarray(obs.image_points, dtype=np.float64),
+             detected=np.ones(len(obs.image_ids), dtype=bool),
+             source=np.asarray(["sb"] * len(obs.image_ids)))
+    return path
+
+
+def _mini_inputs(tmp_path: Path, models: tuple[str, ...]):
+    """搭迷你矩阵编排的全部输入:合成场景 → 角点 npz + manifest.json +
+    逐模型 m{X}__scipy 三件套(真值参数 + 真值位姿,合成场景的天然线性化点)。
+
+    返回 (corners_npz, manifest_path, records, noise_report, board, run_dir)。
+    """
+    obs, _model, _params, rvecs, tvecs = _scene(n_views=6, seed=11)
+    board = _BOARD
+    corners_npz = _write_npz(tmp_path / "corners_train_sb.npz", obs)
+
+    manifest = {
+        "images": [
+            {"image_id": iid, "pose_id": pid, "split": "train",
+             "path": f"input_data/train/{pid}/{iid}.jpg"}
+            for iid, pid in zip(obs.image_ids, obs.pose_ids)
+        ],
+        "summary": {"resolution": [640, 480]},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False)
+
+    n_points = obs.object_points.shape[0]
+    for model_id in models:
+        m = create_model(model_id)
+        result = CalibrationResult(
+            converged=True, failure_note=None, model_id=model_id,
+            solver="scipy", solver_meta={},
+            params={name: float(v) for name, v
+                    in zip(m.param_names, _TRUE_PARAMS[model_id])},
+            rvecs=rvecs, tvecs=tvecs, rms_overall=0.0,
+            per_view_rms=np.zeros(len(obs.image_ids)),
+            image_ids=obs.image_ids, image_size=(640, 480),
+            n_views=len(obs.image_ids), n_points_per_view=n_points,
+            init_from=None, lineage={})
+        save_result(tmp_path / f"{model_id}__scipy", result,
+                    np.zeros((len(obs.image_ids), n_points, 2)))
+
+    records = manifest["images"]
+    noise_report = {"sigma_detector_corner": 0.30,
+                    "sigma_temporal_corner": 0.50}
+    return (corners_npz, manifest_path, records, noise_report, board,
+            tmp_path)
+
+
+def test_mini_fisher_matrix_four_addressable_records_and_roundtrip(tmp_path):
+    """1 模型 × 2 观测集 × 2 σ 口径的迷你矩阵:编排、落盘、读回全链路。
+
+    - 4 份记录逐份可寻址且全部 ok;
+    - Σ 带恒等式逐份成立(band_low == se×(1−rel),rel 从记录读不写死);
+    - save → load 读回逐位一致;_fisher_detail 不进 json,转逐模型 npz
+      (F 矩阵形状 (P,P),param_names 齐全)。
+    """
+    corners_npz, manifest_path, records, noise_report, board, run_dir = (
+        _mini_inputs(tmp_path, ("m2",)))
+    cfg = FisherConfig(models=("m2",), linearization_check=False,
+                       crosscheck_enabled=False)
+
+    report = run_fisher_matrix(corners_npz, manifest_path, records,
+                               noise_report, run_dir, board, cfg)
+
+    assert report["schema_version"] == "crlb-v1"
+    assert report["failure_note"] is None
+    assert report["meta"]["n_records_ok"] == 4
+    assert report["meta"]["n_records_failed"] == 0
+    for obs_name in ("views640", "poses80"):
+        for sigma_name in ("detector", "temporal"):
+            record = report["models"]["m2"]["observation_sets"][obs_name][sigma_name]
+            assert record["status"] == "ok"
+            se = np.asarray(record["se"], dtype=float)
+            np.testing.assert_allclose(
+                record["band_low"], se * (1.0 - record["band_rel"]),
+                rtol=1e-12, err_msg=f"{obs_name}×{sigma_name} 的带下沿恒等式不成立")
+            np.testing.assert_allclose(
+                record["band_high"], se * (1.0 + record["band_rel"]),
+                rtol=1e-12, err_msg=f"{obs_name}×{sigma_name} 的带上沿恒等式不成立")
+    # 双 σ 口径只是同一条 F 矩阵上的一次乘法:se 比值 == σ 比值(逐参数)
+    rec = report["models"]["m2"]["observation_sets"]["views640"]
+    ratio = (np.asarray(rec["temporal"]["se"])
+             / np.asarray(rec["detector"]["se"]))
+    np.testing.assert_allclose(
+        ratio, noise_report["sigma_temporal_corner"]
+        / noise_report["sigma_detector_corner"], rtol=1e-12)
+
+    # 落盘 + 读回(明细 npz 转 _fisher_detail,json 只留路径引用)。
+    # created / lineage 由调用方组装(CLI 的职责,契约键因此齐整)
+    out_dir = tmp_path / "fisher_out"
+    lineage = {"created": "2026-10-18T00:00:00+00:00", "upstream": {}}
+    report["created"] = lineage["created"]
+    paths = save_crlb_report(out_dir, report, lineage)
+    assert paths["crlb_json"] == out_dir / "crlb.json"
+    assert paths["detail_npz"]["m2"] == out_dir / "fisher_m2.npz"
+
+    with open(paths["crlb_json"], encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert "_fisher_detail" not in on_disk["models"]["m2"]
+    assert on_disk["models"]["m2"]["detail_npz"] == "fisher_m2.npz"
+    for key in CRLB_KEYS:
+        assert key in on_disk, f"crlb.json 缺契约键 {key}"
+
+    loaded = load_crlb_report(out_dir)
+    for obs_name in ("views640", "poses80"):
+        for sigma_name in ("detector", "temporal"):
+            a = report["models"]["m2"]["observation_sets"][obs_name][sigma_name]
+            b = loaded["report"]["models"]["m2"]["observation_sets"][obs_name][sigma_name]
+            np.testing.assert_allclose(np.asarray(a["se"]), np.asarray(b["se"]),
+                                       rtol=1e-15)
+    detail = loaded["detail"]["m2"]
+    n_params = len(create_model("m2").param_names)
+    assert detail["F_marg_views640"].shape == (n_params, n_params)
+    assert detail["F_marg_poses80"].shape == (n_params, n_params)
+    assert list(detail["param_names"]) == list(create_model("m2").param_names)
+
+
+def test_mini_fisher_matrix_failure_isolation(tmp_path, monkeypatch):
+    """单模型注入故障(marginalized_fisher 抛错):该模型 4 份全转失败契约,
+    其余模型照常——一个模型病了不拖死整批(T-03-05-04)。"""
+    import calib.noise.fisher as fisher_mod
+
+    corners_npz, manifest_path, records, noise_report, board, run_dir = (
+        _mini_inputs(tmp_path, ("m1", "m2")))
+    cfg = FisherConfig(models=("m1", "m2"), linearization_check=False,
+                       crosscheck_enabled=False)
+
+    real = fisher_mod.marginalized_fisher
+
+    def flaky(model, *args, **kwargs):
+        if model.model_id == "m2":
+            raise RuntimeError("注入的故障:特征分解奇异")
+        return real(model, *args, **kwargs)
+
+    monkeypatch.setattr(fisher_mod, "marginalized_fisher", flaky)
+
+    report = run_fisher_matrix(corners_npz, manifest_path, records,
+                               noise_report, run_dir, board, cfg)
+
+    assert report["meta"]["n_records_ok"] == 4
+    assert report["meta"]["n_records_failed"] == 4
+    for obs_name in ("views640", "poses80"):
+        for sigma_name in ("detector", "temporal"):
+            record = report["models"]["m2"]["observation_sets"][obs_name][sigma_name]
+            assert record["status"] == "failed"
+            assert set(CRLB_RECORD_KEYS) <= set(record), (
+                "失败记录结构键不全")
+            assert record["failure_note"] and "注入的故障" in record["failure_note"]
+            assert record["se"] is None and record["condition_number"] is None
+    # m1 不受牵连
+    assert all(
+        report["models"]["m1"]["observation_sets"][o][s]["status"] == "ok"
+        for o in ("views640", "poses80") for s in ("detector", "temporal"))
+
+
+def test_crlb_json_contract_inf_and_failure_note(tmp_path):
+    """crlb.json 契约补充:顶层契约键一个不少;失败契约工厂拒绝空说明,
+    失败报告 save → load 读回结构完整。"""
+    report = {
+        "schema_version": "crlb-v1", "created": None, "lineage": {},
+        "models": {}, "meta": {}, "failure_note": None,
+    }
+    out_dir = tmp_path / "f"
+    save_crlb_report(out_dir, report, {"created": "t"})
+    loaded = load_crlb_report(out_dir)
+    for key in CRLB_KEYS:
+        assert key in loaded["report"], f"crlb.json 缺契约键 {key}"
+
+    with pytest.raises(ValueError, match="failure_note"):
+        make_failure_crlb({}, "   ")
+
+    failure = make_failure_crlb({"created": "t"}, "Fisher 信息矩阵奇异:测试说明")
+    assert failure["models"] == {} and failure["failure_note"]
+    save_crlb_report(tmp_path / "g", failure, {"created": "t"})
+    failure_back = load_crlb_report(tmp_path / "g")["report"]
+    assert failure_back["failure_note"] and failure_back["meta"] == {}
+
+
+def test_inf_se_survives_json_roundtrip(tmp_path):
+    """零信息参数的 CRLB = inf:save → load 逐位保真(契约自己的选择:
+    Python json 的 Infinity 约定,本项目产物由本项目读回)。"""
+    report = {
+        "schema_version": "crlb-v1", "created": "t", "lineage": {},
+        "models": {
+            "m2": {
+                "observation_sets": {
+                    "views640": {"detector": {
+                        "se": [0.5, float("inf")],
+                        "band_low": [0.4, float("inf")],
+                        "status": "ok", "failure_note": None,
+                    }},
+                    "poses80": {},
+                },
+                "detail_npz": None, "failure_note": None,
+            },
+        },
+        "meta": {}, "failure_note": None,
+    }
+    out_dir = tmp_path / "inf_case"
+    save_crlb_report(out_dir, report, {"created": "t"})
+    back = load_crlb_report(out_dir)["report"]
+    se = back["models"]["m2"]["observation_sets"]["views640"]["detector"]["se"]
+    assert se[0] == 0.5 and se[1] == float("inf")
+
+
+def test_opencv_params_mismatch_fails_crosscheck_not_crlb(tmp_path):
+    """T-03-05-02 对账断言:已存 m2__opencv 参数被换成垃圾值 →
+    交叉验证段记 failed(中文说明),CRLB 4 份记录不受牵连照常 ok。"""
+    corners_npz, manifest_path, records, noise_report, board, run_dir = (
+        _mini_inputs(tmp_path, ("m2",)))
+    # 伪造一份参数对不上的 m2__opencv 产物(calibrateCamera 无随机性,
+    # 垃圾参数 = 输入串轮的信号,必须当场炸出来)
+    m2 = create_model("m2")
+    garbage = CalibrationResult(
+        converged=True, failure_note=None, model_id="m2", solver="opencv",
+        solver_meta={}, params={name: 12345.0 for name in m2.param_names},
+        rvecs=np.zeros((6, 3)), tvecs=np.zeros((6, 3)), rms_overall=0.0,
+        per_view_rms=np.zeros(6),
+        image_ids=tuple(f"img_{k:02d}" for k in range(6)),
+        image_size=(640, 480), n_views=6,
+        n_points_per_view=_BOARD.cols * _BOARD.rows,
+        init_from=None, lineage={})
+    save_result(run_dir / "m2__opencv", garbage,
+                np.zeros((6, _BOARD.cols * _BOARD.rows, 2)))
+
+    cfg = FisherConfig(models=("m2",), linearization_check=False,
+                       crosscheck_enabled=True)
+    report = run_fisher_matrix(corners_npz, manifest_path, records,
+                               noise_report, run_dir, board, cfg)
+
+    cc = report["models"]["m2"]["opencv_crosscheck"]
+    assert cc["status"] == "failed"
+    assert "一致" in (cc["failure_note"] or ""), (
+        "对账失败说明应点名参数不一致")
+    assert report["meta"]["n_records_ok"] == 4
+    assert report["meta"]["n_records_failed"] == 0
+
+
+def test_fisher_matrix_and_artifacts_have_no_typer_and_cli_help_unchanged():
+    """静态红线:库层(fisher.py / artifacts.py)不 import typer(进度回调注入);
+    CLI 的 fisher 命令 help 文案与空壳期一字不差(计划明文要求)。"""
+    import inspect
+
+    import calib.noise.artifacts as artifacts_mod
+    import calib.noise.fisher as fisher_mod
+    from calib.cli import main as cli_mod
+
+    for mod in (fisher_mod, artifacts_mod):
+        src = inspect.getsource(mod)
+        assert "import typer" not in src, f"{mod.__name__} 库层不许依赖 typer"
+
+    src = inspect.getsource(cli_mod)
+    expected_help = (
+        'help="⑤ 算理论精度极限:标定前预测这批数据最好能做到什么程度,'
+        '并检查摆拍位置是否有缺陷(Fisher 信息/CRLB)"')
+    assert expected_help in src, "calib fisher 的 help 文案被改动(计划明文不许)"
