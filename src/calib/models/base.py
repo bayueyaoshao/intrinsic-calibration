@@ -62,6 +62,25 @@ class CameraModel(ABC):
         """
 
     @abstractmethod
+    def project_point_jacobian(self, pts_cam: np.ndarray,
+                               params: np.ndarray) -> np.ndarray:
+        """投影对**相机坐标系点**的解析雅可比(外参链式的前半截)。
+
+        pts_cam: (N,3) float64;params: (P,) float64;
+        返回:    (N,2,3) float64——第 (i,k,j) 元是第 i 点的投影坐标 k
+                 对相机坐标分量 j 的偏导数。
+
+        为什么放模型层(02-04 Rule 2 补充的接口):残差对位姿的导数 =
+        d像素/d相机点(本方法,各模型公式不同)× ∂相机点/∂外参
+        (base.transform_to_camera,全模型共享)。前半截若不进模型层,
+        求解侧就只剩数值差分一条路——研究 Don't Hand-Roll 明令禁止,
+        且会把第二份数学搬进 solve/,破坏 D-06 唯一数学源。
+
+        硬契约:光轴附近的奇异点(如 KB4 的 r→0)必须用解析极限顶上,
+        绝不返回 NaN/Inf(0/0 会毒化整个求解,Pitfall 4,测试锁定)。
+        """
+
+    @abstractmethod
     def unproject(self, uv: np.ndarray, params: np.ndarray) -> np.ndarray:
         """反投影:像素坐标 → 归一化射线方向(真逆解,牛顿迭代,无占位)。
 
@@ -100,7 +119,7 @@ class CameraModel(ABC):
         → 求解后端自动走通用初始化路径(default_params 组 K + 逐视图
         solvePnP 估位姿),注册一处即可被两个求解器使用(D-09)。
         """
-        return None
+        return
 
 
 def as_points3d(pts: np.ndarray, what: str = "pts_cam") -> np.ndarray:
@@ -130,27 +149,6 @@ def as_params(params: np.ndarray, model_id: str, param_names: tuple[str, ...]) -
     return p
 
 
-def cross_product_matrix(vecs: np.ndarray) -> np.ndarray:
-    """逐向量构造反对称矩阵 [v]×:(N,3) float64 → (N,3,3) float64。
-
-    [v]× 的作用:向量 w 左乘 [v]× 等于叉积 v×w(叉积 = 两向量张成平行
-    四边形的有向面积)。旋转扰动经过它表达(见 transform_to_camera)。
-    """
-    v = as_points3d(vecs, "vecs")
-    zeros = np.zeros_like(v[:, 0])
-    mat = np.empty((v.shape[0], 3, 3), dtype=np.float64)
-    mat[:, 0, 0] = zeros
-    mat[:, 0, 1] = -v[:, 2]
-    mat[:, 0, 2] = v[:, 1]
-    mat[:, 1, 0] = v[:, 2]
-    mat[:, 1, 1] = zeros
-    mat[:, 1, 2] = -v[:, 0]
-    mat[:, 2, 0] = -v[:, 1]
-    mat[:, 2, 1] = v[:, 0]
-    mat[:, 2, 2] = zeros
-    return mat
-
-
 def transform_to_camera(pts_board: np.ndarray,
                         rvec: np.ndarray,
                         tvec: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -166,10 +164,15 @@ def transform_to_camera(pts_board: np.ndarray,
     返回:      (pts_cam (N,3) float64, dXc_d_pose (N,3,6) float64)——
                dXc_d_pose 的 6 列依序是 ∂Xc/∂ω(3 列)与 ∂Xc/∂t(3 列)。
 
-    公式(左扰动推导,Xc = R·Xb + t):
-        ∂Xc/∂ω = −[Xc]×  (旋转小扰动 δω 使 Xc 移动 −Xc×δω,即 δXc = −[Xc]×·δω;
-                          与 cv2.Rodrigues 的语义实测一致,中心差分验证到 6.7e-10)
+    公式:Xc = R(ω)·Xb + t,R 由 cv2.Rodrigues 算出;∂Xc/∂ω 直接用同一
+    次调用顺手返回的雅可比(布局 rot_jac[k, 3i+j] = ∂R_ij/∂ω_k,实测对
+    中心差分吻合到 ~1e-10,任意大小转角都成立):
+        ∂Xc_i/∂ω_k = Σ_j ∂R_ij/∂ω_k · Xb_j(平移不随 ω 动,逐点 einsum 一次算完)
         ∂Xc/∂t  =  I(平移逐分量直接搬)
+
+    历史教训(02-04 修复,Rule 1):早先版本写 ∂Xc/∂ω = −[Xc]×——那只是
+    ω=0 处的极限形式,一般转角下不对(0.1 rad 的小转角就已偏 70%)。
+    手推旋转导数是研究里点名的坑,此处一律用 cv2 同源的现成雅可比。
     """
     pts = as_points3d(pts_board, "pts_board")
     r = np.asarray(rvec, dtype=np.float64).ravel()
@@ -179,10 +182,11 @@ def transform_to_camera(pts_board: np.ndarray,
             f"rvec/tvec 形状不合:期望各 (3,),实际是 {r.shape} / {t.shape}。"
             f"旋转向量与平移向量必须各给 3 个数(Rodrigues 语义)。"
         )
-    rot, _jac = cv2.Rodrigues(r)  # 旋转不自己推公式:cv2 现成,语义与 OpenCV 全兼容
+    rot, rot_jac = cv2.Rodrigues(r)  # 旋转不自己推公式:cv2 现成,语义与 OpenCV 全兼容
     pts_cam = pts @ rot.T + t
 
     dXc_d_pose = np.empty((pts.shape[0], 3, 6), dtype=np.float64)
-    dXc_d_pose[:, :, 0:3] = -cross_product_matrix(pts_cam)  # ∂Xc/∂ω = −[Xc]×
+    dXc_d_pose[:, :, 0:3] = np.einsum("kij,nj->nik",
+                                      rot_jac.reshape(3, 3, 3), pts)
     dXc_d_pose[:, :, 3:6] = np.eye(3, dtype=np.float64)     # ∂Xc/∂t = I
     return pts_cam, dXc_d_pose
