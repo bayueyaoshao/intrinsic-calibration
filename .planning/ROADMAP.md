@@ -106,7 +106,7 @@ Plans:
   4. FIM 推导的内参 SE 与 OpenCV stdDeviationsIntrinsics 在同模型同 Σ 下一致到个位数百分比(最强交叉验证)
   5. Σ 不确定性(8 样本 ~27% 相对误差)以敏感性方式随 CRLB 一并落盘,不输出裸下界
 
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 
 Plans:
 **Wave 1**
@@ -121,7 +121,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 03-05-PLAN.md — FisherConfig + 80 姿态聚合 + 16 份 CRLB 矩阵 + crlb.json + `calib fisher` 闭环 + 真实数据试车对账(NOI-03 主,D-01/02/05/06/07)
+- [x] 03-05-PLAN.md — FisherConfig + 80 姿态聚合 + 16 份 CRLB 矩阵 + crlb.json + `calib fisher` 闭环 + 真实数据试车对账(NOI-03 主,D-01/02/05/06/07)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -181,7 +181,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 数据基座 + 最小完整标定流程 | 5/5 | Complete   | 2026-10-16 |
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete    | 2026-10-18 |
-| 3. 噪声底 + Fisher/CRLB 可达精度预测 | 4/6 | In Progress|  |
+| 3. 噪声底 + Fisher/CRLB 可达精度预测 | 5/6 | In Progress|  |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
 | 5. 误差预算 + 诊断 + 角点提取寻优 | 0/TBD | Not started | - |
 | 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/TBD | Not started | - |
