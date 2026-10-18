@@ -22,6 +22,21 @@ _ALLOWED_CLASSIC_FLAGS = {"adaptive_thresh", "normalize_image", "fast_check"}
 # 亚像素窗口粒度的合法取值:frame = 每帧一个窗口;corner = 逐角点局部自适应
 _ALLOWED_GRANULARITY = {"frame", "corner"}
 
+# calibrate 段的白名单(全部在本文件校验,CLI 零参数,D-12):
+# 角点路线:标定默认吃 sb 路线(SB 检测为主 + classic 兜底那份,D-02)
+_ALLOWED_CORNER_ROUTES = {"sb", "classic"}
+# 模型短名与模型注册表的内置清单一致(02-01 已注册 m1–m4)
+_ALLOWED_MODEL_IDS = {"m1", "m2", "m3", "m4"}
+# 求解路径:opencv = OpenCV 原生;scipy = OpenCV 初值 → scipy 精化
+_ALLOWED_SOLVERS = {"opencv", "scipy"}
+# 损失核:linear 主线;soft_l1/huber 是鲁棒核(对照路径,压低大残差权重)
+_ALLOWED_LOSSES = {"linear", "soft_l1", "huber"}
+# scipy 优化方法:只允许 trf——'lm' 只支持稠密雅可比,640 视图等价 3.47 GB
+# 内存,实测不可用(研究 §Pattern 2),配错直接在配置层拦下
+_ALLOWED_SCIPY_METHODS = {"trf"}
+# scipy 内部线性求解器:lsmr 是稀疏雅可比的标配搭配(trf 专属)
+_ALLOWED_TR_SOLVERS = {"lsmr"}
+
 
 @dataclass(frozen=True)
 class BoardSpec:
@@ -106,7 +121,11 @@ class CornersConfig:
 
 @dataclass(frozen=True)
 class FisheyeConfig:
-    """鱼眼 KB4 模型的求解参数。
+    """鱼眼 KB4 模型的求解参数(仅供阶段一基线复现)。
+
+    本段只被 solve/baseline.py 的 2×2 基线复现读取;阶段二的 M4 走模型
+    注册机制,flags 由模型适配器自带(= 10 = 每轮重算位姿 + skew 固定 0),
+    不再读这里——保留是为了"阶段一产物可独立重跑"的架构原则。
 
     flags 默认 2 = CALIB_RECOMPUTE_EXTRINSIC(每轮迭代都重算棋盘位姿):
     实测不加它时 OpenCV 只按初始内参算一次位姿,会收敛到 RMS 上百像素的
@@ -119,9 +138,50 @@ class FisheyeConfig:
 
 
 @dataclass(frozen=True)
-class CalibrateConfig:
-    """第④步求解内参参数。"""
+class ScipyConfig:
+    """scipy 精化路径的优化器参数(OpenCV 初值 → scipy least_squares 精化)。
 
+    白话背景:非线性最小二乘 = 反复"按当前参数算残差(重投影位置与实测
+    角点的差)→ 朝让残差变小的方向调参数",直到调不动为止。下面的字段
+    控制"怎么调、什么时候停"。
+
+    method 只允许 trf(信赖域反射法:每步只允许参数在当前解附近一个
+    "可信范围"里动)。scipy 的 'lm' 只支持稠密雅可比(雅可比 = 残差对
+    参数的偏导数矩阵;稠密 = 每个元素都存下来),640 视图的稠密雅可比
+    约需 3.47 GB 内存,实测不可用——配错在配置层直接报错防呆。
+
+    losses:要跑哪些损失核。linear 是主线(普通最小二乘,每个残差原样
+    进代价);soft_l1 / huber 是鲁棒核(把大残差的权重压低,让个别离群
+    角点不那么拖动整体),作对照路径——是否提升精度由数据说话,不预设。
+
+    f_scale:鲁棒核的分界尺度,默认 "auto" = 3 × 1.4826 × MAD。
+    MAD = 中位数绝对差,即用中位数衡量的初值残差波动;1.4826 是把它
+    换算成标准差的惯例系数,再放大 3 倍 ≈ "残差大过波动 3 倍才开始被
+    压低"。也可以写死一个 > 0 的数值覆盖。
+    """
+
+    method: str = "trf"
+    tr_solver: str = "lsmr"
+    losses: tuple[str, ...] = ("linear", "soft_l1")
+    f_scale: str | float = "auto"
+    max_nfev: int = 300
+    ftol: float = 1e-10
+    xtol: float = 1e-12
+    gtol: float = 1e-10
+
+
+@dataclass(frozen=True)
+class CalibrateConfig:
+    """第④步求解内参参数:模型矩阵 × 求解路径,全部在配置里(CLI 零参数,D-12)。"""
+
+    # 角点输入路线(D-02):sb = SB 为主 + classic 兜底那份(默认);
+    # classic = 仅经典检测器那份,留作对照
+    corner_route: str = "sb"
+    # 试车矩阵的模型短名(D-01 全矩阵默认跑齐四个)
+    models: tuple[str, ...] = ("m1", "m2", "m3", "m4")
+    # 求解路径:opencv 原生求解;scipy = OpenCV 结果做初值再精化
+    solvers: tuple[str, ...] = ("opencv", "scipy")
+    scipy: ScipyConfig = field(default_factory=ScipyConfig)
     fisheye: FisheyeConfig = field(default_factory=FisheyeConfig)
 
 
@@ -320,6 +380,100 @@ def _parse_fisheye(raw: dict) -> FisheyeConfig:
     return FisheyeConfig(flags=flags, max_iter=max_iter, epsilon=float(epsilon))
 
 
+def _parse_scipy(raw: dict) -> ScipyConfig:
+    """逐字段校验 calibrate.scipy 段(体例照 _parse_fisheye:字段名 + 白话要求 + 实际值)。"""
+    cfg = ScipyConfig()
+    section = _check_is_dict(raw.get("scipy", {}), "calibrate.scipy")
+
+    method = section.get("method", cfg.method)
+    if method not in _ALLOWED_SCIPY_METHODS:
+        _fail("calibrate.scipy.method", method,
+              f"可选:{sorted(_ALLOWED_SCIPY_METHODS)};"
+              f"scipy 的 'lm' 只支持稠密雅可比,640 视图约 3.47 GB 内存,实测不可用")
+
+    tr_solver = section.get("tr_solver", cfg.tr_solver)
+    if tr_solver not in _ALLOWED_TR_SOLVERS:
+        _fail("calibrate.scipy.tr_solver", tr_solver,
+              f"可选:{sorted(_ALLOWED_TR_SOLVERS)}(稀疏雅可比的标配内部求解器;"
+              f"'exact' 要稠密矩阵,本项目规模不可用)")
+
+    losses = section.get("losses", cfg.losses)
+    if (not isinstance(losses, (list, tuple)) or not losses
+            or not all(isinstance(x, str) for x in losses)):
+        _fail("calibrate.scipy.losses", losses,
+              "必须是非空的损失核名单(如 [linear, soft_l1])")
+    bad_losses = [x for x in losses if x not in _ALLOWED_LOSSES]
+    if bad_losses:
+        _fail("calibrate.scipy.losses", bad_losses,
+              f"含有不认识的损失核;可选:{sorted(_ALLOWED_LOSSES)}")
+
+    f_scale = section.get("f_scale", cfg.f_scale)
+    if isinstance(f_scale, str):
+        if f_scale != "auto":
+            _fail("calibrate.scipy.f_scale", f_scale,
+                  "文字只接受 \"auto\"(= 3×1.4826×MAD,按初值残差自适应);"
+                  "要写死请直接给一个 > 0 的数")
+    elif not isinstance(f_scale, int | float) or isinstance(f_scale, bool) or f_scale <= 0:
+        _fail("calibrate.scipy.f_scale", f_scale,
+              "只接受 \"auto\" 或 > 0 的数(鲁棒核开始压低残差的分界尺度)")
+
+    max_nfev = section.get("max_nfev", cfg.max_nfev)
+    if not isinstance(max_nfev, int) or isinstance(max_nfev, bool) or max_nfev < 1:
+        _fail("calibrate.scipy.max_nfev", max_nfev, "必须是 >= 1 的整数(函数评估次数上限)")
+
+    tolerances = []
+    for name in ("ftol", "xtol", "gtol"):
+        value = section.get(name, getattr(cfg, name))
+        if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0:
+            requirement = {
+                "ftol": "残差变化容差",
+                "xtol": "参数变化容差",
+                "gtol": "梯度(下一步最陡方向)容差",
+            }[name]
+            _fail(f"calibrate.scipy.{name}", value, f"必须是 > 0 的数({requirement})")
+        tolerances.append(float(value))
+
+    return ScipyConfig(method=method, tr_solver=tr_solver, losses=tuple(losses),
+                       f_scale=f_scale, max_nfev=max_nfev,
+                       ftol=tolerances[0], xtol=tolerances[1], gtol=tolerances[2])
+
+
+def _parse_calibrate(raw: dict) -> CalibrateConfig:
+    """解析 calibrate 段:角点路线 + 模型矩阵 + 求解路径 + scipy/fisheye 子段。"""
+    section = _check_is_dict(raw, "calibrate")
+
+    corner_route = section.get("corner_route", CalibrateConfig.corner_route)
+    if corner_route not in _ALLOWED_CORNER_ROUTES:
+        _fail("calibrate.corner_route", corner_route,
+              f"可选:{sorted(_ALLOWED_CORNER_ROUTES)}"
+              f"(D-02:标定默认吃 SB 为主、classic 兜底那份)")
+
+    models = section.get("models", CalibrateConfig.models)
+    if (not isinstance(models, (list, tuple)) or not models
+            or not all(isinstance(x, str) for x in models)):
+        _fail("calibrate.models", models,
+              "必须是非空的模型短名名单(如 [m1, m2, m3, m4])")
+    bad_models = [x for x in models if x not in _ALLOWED_MODEL_IDS]
+    if bad_models:
+        _fail("calibrate.models", bad_models,
+              f"含有不认识的模型短名;可选:{sorted(_ALLOWED_MODEL_IDS)}")
+
+    solvers = section.get("solvers", CalibrateConfig.solvers)
+    if (not isinstance(solvers, (list, tuple)) or not solvers
+            or not all(isinstance(x, str) for x in solvers)):
+        _fail("calibrate.solvers", solvers,
+              "必须是非空的求解路径名单(如 [opencv, scipy])")
+    bad_solvers = [x for x in solvers if x not in _ALLOWED_SOLVERS]
+    if bad_solvers:
+        _fail("calibrate.solvers", bad_solvers,
+              f"含有不认识的求解路径;可选:{sorted(_ALLOWED_SOLVERS)}")
+
+    return CalibrateConfig(corner_route=corner_route,
+                           models=tuple(models), solvers=tuple(solvers),
+                           scipy=_parse_scipy(section),
+                           fisheye=_parse_fisheye(section))
+
+
 def _parse_visualization(raw: dict) -> VisualizationConfig:
     section = _check_is_dict(raw.get("visualization", {}), "visualization")
     quality = section.get("jpeg_quality", VisualizationConfig.jpeg_quality)
@@ -389,6 +543,6 @@ def load_calibration(path: Path | str) -> CalibrationConfig:
         exclude_images=tuple(exclude),
         ingest=IngestConfig(precheck=_parse_precheck(ingest_section)),
         corners=_parse_corners(top),
-        calibrate=CalibrateConfig(fisheye=_parse_fisheye(top.get("calibrate", {}))),
+        calibrate=_parse_calibrate(top.get("calibrate", {})),
         visualization=_parse_visualization(top),
     )

@@ -170,3 +170,35 @@ def make_chessboard_image():
         return img, corners, float(square_px)
 
     return _make
+
+
+@pytest.fixture
+def make_true_views(make_chessboard_image):
+    """真值视角工厂:make_true_views(n_views=8) → (角点列表, 真值 K)。
+
+    造 n_views 个不同位姿的已知真值视角(默认内参 fx=fy=800、主点在画面
+    中心、无畸变,深度统一 800)。深度固定是必须的:合成夹具按
+    "焦距×物理尺寸/距离"反推方格物理边长,各视角深度不一会让物点网格
+    尺度自相矛盾。上提自 test_solve_baseline.py 的 _make_true_views
+    (逻辑不变),供阶段一基线回归与阶段二双求解器测试共用。
+    """
+
+    def _make(n_views: int = 8):
+        rng = numpy.random.default_rng(7)
+        k_true = numpy.array([[800.0, 0.0, 320.0],
+                              [0.0, 800.0, 240.0],
+                              [0.0, 0.0, 1.0]])
+        views = []
+        for _k in range(n_views):
+            rvec = numpy.array([rng.uniform(-0.15, 0.15),
+                                rng.uniform(-0.10, 0.20),
+                                rng.uniform(-0.15, 0.15)])
+            tvec = numpy.array([rng.uniform(-30.0, 30.0),
+                                rng.uniform(-30.0, 30.0),
+                                800.0])
+            _img, corners, _sq = make_chessboard_image(
+                K=k_true, rvec=rvec, tvec=tvec)
+            views.append(corners)
+        return views, k_true
+
+    return _make

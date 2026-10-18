@@ -29,33 +29,9 @@ from calib.solve.baseline import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _make_true_views(make_chessboard_image, n_views: int = 8):
-    """造 n_views 个不同位姿的已知真值视角(默认内参,深度统一 800)。
-
-    返回 (角点列表, 真值 K)。深度固定是必须的:合成夹具按"焦距×物理尺寸/距离"
-    反推方格物理边长,各视角深度不一会让物点网格尺度自相矛盾。
-    """
-    rng = np.random.default_rng(7)
-    k_true = np.array([[800.0, 0.0, 320.0],
-                       [0.0, 800.0, 240.0],
-                       [0.0, 0.0, 1.0]])
-    views = []
-    for _k in range(n_views):
-        rvec = np.array([rng.uniform(-0.15, 0.15),
-                         rng.uniform(-0.10, 0.20),
-                         rng.uniform(-0.15, 0.15)])
-        tvec = np.array([rng.uniform(-30.0, 30.0),
-                         rng.uniform(-30.0, 30.0),
-                         800.0])
-        _img, corners, _sq = make_chessboard_image(
-            K=k_true, rvec=rvec, tvec=tvec)
-        views.append(corners)
-    return views, k_true
-
-
-def test_pinhole_recovers_known_truth(make_chessboard_image):
+def test_pinhole_recovers_known_truth(make_true_views):
     """回归断言:8 个真值视角上,针孔标定的 RMS < 0.5px 且内参误差 < 1%。"""
-    views, _k_true = _make_true_views(make_chessboard_image)
+    views, _k_true = make_true_views()
     # 合成几何里方格物理边长 = 20px × 800深度 / 800焦距 = 20(与 board 一致才不自相矛盾)
     board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
 
@@ -156,7 +132,7 @@ def test_fisheye_never_raises_and_structure_complete():
         assert result["rms_overall"] is None and result["per_view_rms"] is None
 
 
-def test_pinhole_cv2_error_recorded_not_raised(make_chessboard_image, monkeypatch):
+def test_pinhole_cv2_error_recorded_not_raised(make_true_views, monkeypatch):
     """WR-03 锁定:求解器抛 cv2.error 时,针孔分支与鱼眼同构——不抛异常,
     返回完整失败结构(结构键一个不少、数值字段一律 None、中文 failure_note)。
 
@@ -170,7 +146,7 @@ def test_pinhole_cv2_error_recorded_not_raised(make_chessboard_image, monkeypatc
 
     monkeypatch.setattr(cv2, "calibrateCameraExtended", _explode)
 
-    views, _k_true = _make_true_views(make_chessboard_image, n_views=2)
+    views, _k_true = make_true_views(n_views=2)
     board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
 
     result = calibrate_pinhole(views, (640, 480), board)
@@ -195,10 +171,10 @@ def test_fisheye_shape_assertion_raises_chinese_error():
         calibrate_fisheye(bad_views, (640, 480), board, FisheyeConfig())
 
 
-def test_exclude_images_drops_bad_view(make_chessboard_image):
+def test_exclude_images_drops_bad_view(make_true_views):
     """D-03 锁定:剔除清单里的照片被逻辑剔除——注入一张乱序坏角点照片,
     不剔除时标定被带坏,剔除后恢复干净,证明该照片确实没进标定。"""
-    views, _k_true = _make_true_views(make_chessboard_image)
+    views, _k_true = make_true_views()
     board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
     image_size = (640, 480)
     ids = [f"pose_{k:02d}_00{k}" for k in range(len(views))]
@@ -235,9 +211,9 @@ def test_exclude_images_drops_bad_view(make_chessboard_image):
         f"剔除坏照片后 RMS 应恢复到 0.5px 内,实际 {pinhole_ok['rms_overall']:.3f}px"
 
 
-def test_run_baselines_four_combo_names_and_metadata(make_chessboard_image):
+def test_run_baselines_four_combo_names_and_metadata(make_true_views):
     """四个组合名精确 = classic/sb × pinhole/fisheye,且每个结果带落盘元信息。"""
-    views, _k_true = _make_true_views(make_chessboard_image, n_views=4)
+    views, _k_true = make_true_views(n_views=4)
     board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
     data = {
         "image_ids": np.asarray([f"img_{k}" for k in range(4)]),
