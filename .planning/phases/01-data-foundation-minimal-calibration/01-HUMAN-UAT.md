@@ -3,7 +3,7 @@ status: partial
 phase: 01-data-foundation-minimal-calibration
 source: [01-VERIFICATION.md]
 started: 2026-10-16T09:15:00Z
-updated: 2026-10-17T11:20:00Z
+updated: 2026-10-18T04:10:00Z
 ---
 
 ## Current Test
@@ -18,7 +18,7 @@ result: pass(2026-10-17)— 用户检查 marked_copies 与 review_sb_failed(41 �
 
 ### 2. 存疑清单审查(D-05 步骤 2)
 expected: 打开 mosaic/suspect_mosaic.png(89 格)与 output/ingest/run_20261016_085253/suspect_originals/ 任意 2-3 张原图:存疑判定与人工判断大体一致,无误杀(清晰被标)/漏杀(明显糊没标);有异议则调 config 阈值重跑
-result: pass-暂定(2026-10-17)— 用户查看 review_suspects(89 张原图 + 双检测器标记图 + 中文原因汇总)后认为无明显问题,但**最终判定推迟**:等后续阶段模型定下来后,用逐帧重投影残差对比 89 张存疑帧 vs 正常帧,确认存疑帧是否真有害(calibration.json 已有 per_view_rms 逐帧数据,阶段二可做交叉验证)
+result: pass(2026-10-17 人工目检 + 2026-10-18 逐帧残差复核闭环)— 用户查看 review_suspects(89 张原图 + 双检测器标记图 + 中文原因汇总)后认为无明显问题;当时推迟的"存疑帧是否真有害"已由阶段二 02-06 复核定量回答,见下方 Gaps 闭环记录
 
 ### 3. 连拍断言姿态核查(D-05 步骤 3)
 expected: 在 marked_copies/ 翻看连拍断言点名的 3 个姿态(20260717_174622 / 20260720_134806 / 20260720_134914)的 8 连拍:组内波动是连拍间棋盘真实移动(手抖),而非镜像翻转污染
@@ -39,4 +39,4 @@ blocked: 0
 
 ## Gaps
 
-- 存疑帧(89 张)对下游的实际影响待阶段二量化:用 per_view_rms 对比存疑帧 vs 正常帧的残差分布,验证体检指标与真实误差的相关性(兼作阶段五角点寻优的输入证据)
+- ~~存疑帧(89 张)对下游的实际影响待阶段二量化~~ **已闭环(2026-10-18,Phase 2 计划 02-06)**:全矩阵标定 run_20261018_034000 用 m2 精化结果对 705 帧逐帧复核(存疑 89 = train 67 + test 22;正常 616 = train 573 + test 43,test 帧用"只估位姿小求解"同尺打分)。结论**走向 B(两组无差别)**:存疑组误差中位数 0.099px vs 正常组 0.086px,偏差 15.9%,未达 30% 阈值——"看着糊"≠"算得差",存疑帧照常留在数据流中,不剔除。逐帧数字见 output/calibration/run_20261018_034000/suspect_review/suspect_vs_normal.json(对比图 suspect_vs_normal.png 仅作佐证);体检指标与真实误差相关性属"弱相关、非有害",阶段五角点寻优可据此把存疑标记仅作参考权重而非剔除依据
