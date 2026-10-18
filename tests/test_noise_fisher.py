@@ -252,14 +252,25 @@ def test_crlb_scales_strictly_linearly_with_sigma(sigma: float):
     assert np.array_equal(crlb_se(F_marg, sigma), sigma * se_unit), \
         f"σ={sigma} 的 CRLB 不是 σ × SE(1.0) 的逐位结果——乘法缩放被破坏"
 
-    # ②加权重算路线:J/σ 重新组装 FIM,再按 σ=1 开方就是该 σ 的 SE
+    # ②加权重算路线:J/σ 重新组装 FIM,验证两条
+    #  a) F 层(机器精度,主判据):重算 FIM 与 σ=1 结果 ÷ σ² 相对差 < 1e-12
+    #     ——计划 must_have 的"重算加权 FIM 与 σ=1 结果一致到机器精度";
+    #  b) SE 层(过 inv 的下游):重算 FIM 开方与乘法 SE 相对差 < 1e-8。
+    #     J/σ 的逐元乘法引入 ~eps 舍入,经 inv 按条件数放大(本场景
+    #     cond(F_marg) ~5e8),实测 ~3e-10——1e-8 留 30 倍余量。
     F_weighted = weighted_fisher(model, obs, params, rvecs, tvecs, sigma)
+    F_scaled = F_marg / (sigma * sigma)
+    err_f = float(np.max(np.abs(F_weighted - F_scaled)) / np.abs(F_scaled).max())
+    assert err_f < 1e-12, \
+        f"σ={sigma} 加权重算 FIM 与 σ=1 结果÷σ² 的相对差 {err_f:.2e} 超线 1e-12" \
+        f"(F 随 1/σ² 缩放到机器精度的性质被破坏)"
+
     se_weighted = crlb_se(F_weighted, 1.0)
     denom = np.maximum(sigma * se_unit, 1e-300)
     err = float(np.max(np.abs(se_weighted - sigma * se_unit) / denom))
-    assert err < 1e-12, \
-        f"σ={sigma} 加权重算 FIM 与乘法缩放的相对差 {err:.2e} 超线 1e-12" \
-        f"(F 随 1/σ² 缩放的性质被破坏)"
+    assert err < 1e-8, \
+        f"σ={sigma} 加权重算的 SE 与乘法缩放的相对差 {err:.2e} 超线 1e-8" \
+        f"(过 inv 的舍入放大超出预期)"
 
 
 # ---- Σ 敏感性带(±27%,纯乘法) ----
@@ -347,9 +358,13 @@ def test_monte_carlo_std_matches_fim_prediction():
         noisy = obs.image_points + rng.normal(0.0, _MC_SIGMA, obs.image_points.shape)
         obs_k = replace(obs, image_points=noisy)
         jac_fn = make_jacobian_fn(model, obs_k)
+
+        def dense_jac(th, _fn=jac_fn):     # 默认参数绑定本轮工厂,避开迟绑定
+            return _fn(th).toarray()
+
         sol = least_squares(
             make_residual_fn(model, obs_k), theta_true,
-            jac=lambda th: jac_fn(th).toarray(),
+            jac=dense_jac,
             method="trf", xtol=1e-12, ftol=1e-12, gtol=1e-12)
         if sol.status <= 0:
             raise AssertionError(f"蒙特卡洛第 {k} 次合成求解未收敛(status={sol.status})")

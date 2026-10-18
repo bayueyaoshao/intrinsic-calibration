@@ -44,6 +44,23 @@ from calib.solve.residuals import make_jacobian_fn, pack_theta
 # 角点下基本定不住(常来自棋盘近似共线的极端视角),必须报错点名
 _POSE_COND_SINGULAR = 1e12
 
+# Σ 敏感性带的相对半宽:8 样本标准差的相对标准误 1/√(2×(8−1)) = 1/√14
+# ≈ 0.267,即 ±26.7%(03-RESEARCH §Pattern 3 第 4 点)。σ 由同姿态 8 张
+# 连拍估出时,标准差本身带这么大的相对不确定度——报告因此输出
+# "下界 ± 带"而不输出裸下界
+SIGMA_BAND_REL_8: float = 1.0 / np.sqrt(14.0)
+
+
+def _check_sigma(sigma) -> float:
+    """σ 入口校验:必须是正的有限数(角点噪声的像素标准差),否则中文报错。"""
+    sig = float(sigma)
+    if not np.isfinite(sig) or sig <= 0.0:
+        raise AssertionError(
+            f"σ(角点噪声的像素标准差)必须是正的有限数,实际是 {sigma!r}。"
+            f"CRLB 与加权 FIM 都按 σ 的乘除折算,0、负数或非有限值没有物理意义。"
+        )
+    return sig
+
 
 def _fisher_marginal_from_jacobian(J: csr_matrix, n_int: int,
                                    n_views: int) -> tuple[np.ndarray, csr_matrix, float]:
@@ -122,3 +139,126 @@ def marginalized_fisher(model: CameraModel, obs: ObservationSet, params,
         "param_names": tuple(model.param_names),
     }
     return F_marg, F_full, diagnostics
+
+
+def weighted_fisher(model: CameraModel, obs: ObservationSet, params,
+                    rvecs, tvecs, sigma) -> np.ndarray:
+    """按观测噪声 σ 加权的 Fisher 信息矩阵:J/σ 后走与 marginalized_fisher
+    完全相同的分块与 Schur 路线。
+
+    返回的 F_marg 已含 1/σ² 权重,对它按 σ=1 取 crlb_se 开方,得到的
+    就是该 σ 下的逐内参 CRLB 标准差——这是"σ 线性缩放恒等式"测试的
+    重算侧:与"σ=1 结果 × σ"的乘法路线互相独立、互相印证(任一噪声
+    口径都只是一次乘法,不需要重装 FIM;本函数存在是为了让这条性质
+    被独立路线锁死,不进正式主流程)。
+    """
+    sig = _check_sigma(sigma)
+    n_views = len(obs.image_ids)
+    theta = pack_theta(model, params, rvecs, tvecs)
+    J = make_jacobian_fn(model, obs)(theta)           # D-10:J 只从工厂来
+    n_int = len(model.param_names)
+    F_marg, _F_bb, _cond = _fisher_marginal_from_jacobian(J * (1.0 / sig),
+                                                          n_int, n_views)
+    return F_marg
+
+
+def crlb_se(F_marg: np.ndarray, sigma: float) -> np.ndarray:
+    """逐内参 CRLB 标准差向量:σ·sqrt(diag(inv(F_marg)))。
+
+    术语白话:CRLB(Cramér–Rao 下界)= 任何无偏估计方法的方差都不会
+    低于它——"这批数据天生最准能到多少"。
+
+    σ 只作乘法出现(F 与 F_marg 都随 1/σ² 缩放),所以一切 CRLB 在
+    σ=1 基准上算一次,任意噪声口径(检测器口径/时域口径)只是乘数;
+    这条线性缩放恒等式由测试逐位锁定。"逐位"能成立正因为本函数对
+    σ 只做一次乘法、不做任何别的运算。
+    """
+    sig = _check_sigma(sigma)
+    F = np.asarray(F_marg, dtype=np.float64)
+    if F.ndim != 2 or F.shape[0] != F.shape[1]:
+        raise AssertionError(
+            f"F_marg 形状不合:期望 (P,P) 方阵(边际化 Fisher 信息矩阵),"
+            f"实际是 {F.shape}。请确认传入的是 marginalized_fisher 的第一个返回值。"
+        )
+    return sig * np.sqrt(np.diag(np.linalg.inv(F)))
+
+
+def sensitivity_band(se: np.ndarray, rel: float = SIGMA_BAND_REL_8) -> dict:
+    """Σ 不确定性敏感性带:每个 CRLB 标准差乘 (1±rel),纯乘法、不重算 FIM。
+
+    默认半宽 SIGMA_BAND_REL_8(来历见常量注释):σ 由 8 张连拍估出时
+    自带约 ±26.7% 的相对不确定度。返回 {"low", "high", "rel"},
+    low/high 与输入同形状。
+    """
+    arr = np.asarray(se, dtype=np.float64)
+    r = float(rel)
+    if not np.isfinite(r) or not (0.0 < r < 1.0):
+        raise AssertionError(
+            f"敏感性带半宽 rel 必须是 0 到 1 之间的有限数(相对比例),"
+            f"实际是 {rel!r}。"
+        )
+    return {"low": arr * (1.0 - r), "high": arr * (1.0 + r), "rel": r}
+
+
+def spectrum_report(F_marg: np.ndarray, param_names: tuple[str, ...],
+                    cond_warning: float = 1e4,
+                    cond_degenerate: float = 1e6) -> dict:
+    """边际化协方差的特征谱报告:特征值、条件数、"软方向"载荷表、退化旗标。
+
+    术语白话:特征分解 = 把矩阵拆成"一个个互不相关的方向 + 每个方向上
+    的方差大小"。协方差矩阵(即 inv(F_marg))的最大特征值方向,是参数
+    空间的"软方向"——这个参数组合方向上精度最差,典型如 fx–cy 类摆位
+    退化。措辞红线(研究 Pattern 3 第 5 点):报告里说"该组合方向上
+    精度最差",不要写成"强耦合"——耦合是原因,软方向才是可测量的后果。
+
+    参数:cond_warning / cond_degenerate 是条件数分档阈值(默认值放函数
+    参数,03-05 的 FisherConfig 会按 config 覆盖)。
+
+    返回:{"eigvals" 协方差特征值(升序),
+          "condition_number" = λmax(F_marg)/λmin(F_marg),
+          "top_directions" 软方向的逐项说明(按 |载荷| 降序取前 2–3 个
+            参数名与载荷数值),
+          "flag" "" / "warning"(cond ≥ cond_warning)/ "degenerate"
+            (cond ≥ cond_degenerate)}。
+    """
+    F = np.asarray(F_marg, dtype=np.float64)
+    if F.ndim != 2 or F.shape[0] != F.shape[1]:
+        raise AssertionError(
+            f"F_marg 形状不合:期望 (P,P) 方阵,实际是 {F.shape}。"
+            f"请确认传入的是 marginalized_fisher 的第一个返回值。"
+        )
+    if len(param_names) != F.shape[0]:
+        raise AssertionError(
+            f"param_names 个数({len(param_names)})与 F_marg 维度({F.shape[0]})不一致,"
+            f"载荷表没法按参数名标注。请传入与 F_marg 同长、同序的参数名元组"
+            f"(即 model.param_names)。"
+        )
+
+    cov = np.linalg.inv(F_marg)          # 边际化协方差(σ=1 基准)
+    eigvals, eigvecs = np.linalg.eigh(cov)   # 特征值升序(白话见 docstring 开头)
+    f_eigvals = np.linalg.eigvalsh(F)
+    condition_number = float(f_eigvals[-1] / f_eigvals[0])
+
+    # 软方向:协方差最大特征值对应的特征向量,按 |载荷| 降序取前 2–3 个参数
+    top_vec = eigvecs[:, -1]
+    order = np.argsort(-np.abs(top_vec))
+    k = min(3, len(order))
+    top_directions = [{
+        "params": [param_names[int(i)] for i in order[:k]],
+        "loadings": [float(top_vec[int(i)]) for i in order[:k]],
+        "eigval": float(eigvals[-1]),
+    }]
+
+    if condition_number >= cond_degenerate:
+        flag = "degenerate"
+    elif condition_number >= cond_warning:
+        flag = "warning"
+    else:
+        flag = ""
+
+    return {
+        "eigvals": eigvals,
+        "condition_number": condition_number,
+        "top_directions": top_directions,
+        "flag": flag,
+    }
