@@ -20,6 +20,10 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.8",
+    # D-10:numdifftools 只作测试里的数值基准(用差分近似核对解析导数),
+    # 绝不进求解/理论计算路径——src/calib 里出现对它的引用就是违规,
+    # 测试有 grep 锁定(阶段二 02-01 Task 3)
+    "numdifftools>=0.11",
 ]
 
 [project.scripts]
