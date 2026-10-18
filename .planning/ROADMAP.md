@@ -68,7 +68,7 @@ Plans:
   4. 每个阶段产物带血缘指纹(配置哈希 + 上游产物哈希 + 时间戳),任一阶段可在新进程中独立重跑
   5. 注册机制验证:测试中新增一个玩具模型仅通过一处注册即可被求解器使用(零侵入)
 
-**Plans:** 2/6 plans executed
+**Plans:** 3/6 plans executed
 
 Plans:
 **Wave 1**
@@ -78,7 +78,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 02-03-PLAN.md — 配置矩阵化 + CalibrationResult 同构基座 + OpenCVSolver(适配器分派 + 通用初始化兜底,D-09/D-12)
+- [x] 02-03-PLAN.md — 配置矩阵化 + CalibrationResult 同构基座 + OpenCVSolver(适配器分派 + 通用初始化兜底,D-09/D-12)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -161,7 +161,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 数据基座 + 最小完整标定流程 | 5/5 | Complete   | 2026-10-16 |
-| 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 2/6 | In Progress|  |
+| 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 3/6 | In Progress|  |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 0/TBD | Not started | - |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
 | 5. 误差预算 + 诊断 + 角点提取寻优 | 0/TBD | Not started | - |
