@@ -68,13 +68,13 @@ Plans:
   4. 每个阶段产物带血缘指纹(配置哈希 + 上游产物哈希 + 时间戳),任一阶段可在新进程中独立重跑
   5. 注册机制验证:测试中新增一个玩具模型仅通过一处注册即可被求解器使用(零侵入)
 
-**Plans:** 6 plans
+**Plans:** 2/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — 模型层数学核心:M1–M4 投影/雅可比/注册表 + parity/雅可比双重测试锁死(MOD-01/02,D-06/D-07/D-10)
-- [ ] 02-02-PLAN.md — ObservationSet 观测集装载与行序契约(SOL-01 输入侧,D-02)
+- [x] 02-01-PLAN.md — 模型层数学核心:M1–M4 投影/雅可比/注册表 + parity/雅可比双重测试锁死(MOD-01/02,D-06/D-07/D-10)
+- [x] 02-02-PLAN.md — ObservationSet 观测集装载与行序契约(SOL-01 输入侧,D-02)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -161,7 +161,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 数据基座 + 最小完整标定流程 | 5/5 | Complete   | 2026-10-16 |
-| 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 0/6 | Planned | - |
+| 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 2/6 | In Progress|  |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 0/TBD | Not started | - |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
 | 5. 误差预算 + 诊断 + 角点提取寻优 | 0/TBD | Not started | - |
