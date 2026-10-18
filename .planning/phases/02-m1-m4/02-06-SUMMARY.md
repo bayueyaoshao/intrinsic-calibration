@@ -183,6 +183,13 @@ None - 无占位实现;复核所有分支(命中/兜底/空结论/单帧失败)�
 - 阶段四 held-out 评分可直接复用 score_views/solve_pose_only(同尺已由测试锁定)
 - 真实 run 产物已留存主仓库 `output/calibration/run_20261018_034000`(12MB),UAT 引用路径在工作树移除后依然有效
 
+## Self-Check: PASSED
+
+- 6/6 计划产出文件在工作区存在(scoring.py / suspect_compare.py / pipeline.md / 01-HUMAN-UAT.md / REQUIREMENTS.md / 本 SUMMARY)
+- 5/5 提交在分支历史可查:9b2be0d、fb51775、4db065a、6f1178a、c5d5777
+- 工作区干净,无未跟踪遗留;真实 run 产物已留存主仓库(逐字节核对一致)
+- STATE.md / ROADMAP.md 未改动(编排器波次合并后统一写,并行执行器禁改)
+
 ---
 *Phase: 02-m1-m4*
 *Completed: 2026-10-18*
