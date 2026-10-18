@@ -838,7 +838,7 @@ def noise() -> None:
             },
         }
         paths = save_noise_report(out_dir, report, lineage)
-    except Exception as e:  # noqa: BLE001  # 故意宽接:失败契约(T-03-03-04),失败也落盘
+    except Exception as e:  # 故意宽接:失败契约(T-03-03-04),失败也落盘
         note = f"噪声阶段中途失败:{type(e).__name__}——{e}"
         save_noise_report(out_dir, make_failure_report(lineage, note), lineage)
         typer.echo(f"测噪声底失败(失败报告已照常落盘,数值字段为 null):{note}")
