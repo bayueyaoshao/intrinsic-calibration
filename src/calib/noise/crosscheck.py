@@ -177,7 +177,10 @@ def compare_structural(ours_se: np.ndarray, opencv_se: np.ndarray,
         per_param_rel_dev  与输入同长的逐参数相对偏差数组,未参与的位记
                            NaN 占位(便于按参数名对齐读数);
         max_rel_dev        参与参数里最大的相对偏差(主判据就比它);
-        n_active           实际参与比对的参数个数。
+        n_active           实际参与比对的参数个数;
+        n_unbounded        我们侧为 inf 的参数个数(crlb_se 对数值上零
+                           信息的方向记无界,见其注释)——它们不参与比对,
+                           是"数据极限"的诚实记录,不是错误。
     """
     s = np.asarray(ours_se, dtype=np.float64).ravel()
     o = np.asarray(opencv_se, dtype=np.float64).ravel()
@@ -195,26 +198,36 @@ def compare_structural(ours_se: np.ndarray, opencv_se: np.ndarray,
                 f"active_mask 形状 {mask.shape} 与标准差向量形状 {s.shape} 不齐,"
                 f"掩码必须逐参数给布尔值。"
             )
-    if not (np.isfinite(s[mask]).all() and (s[mask] > 0).all()):
+    # NaN 是上游 bug 信号(Fisher 组装出错),直接拦下;inf 是"无信息方向"
+    # 的诚实输出(crlb_se 对数值上零信息的方向记无界),剔除出比对并单独计数。
+    if np.isnan(s[mask]).any():
         raise AssertionError(
-            f"我们的 σ=1 精度界在参与比对的参数上必须全为正的有限值,实际 {s}。"
-            f"出现 0/负数/非有限值说明 Fisher 信息矩阵组装有错,先查上游再比对。"
+            f"我们的 σ=1 精度界出现 NaN(实际 {s})。NaN 只会来自 Fisher "
+            f"信息矩阵组装里的 NaN,是上游错误,先查组装再比对。"
         )
-    if not (np.isfinite(o[mask]).all() and (o[mask] > 0).all()):
+    comparable = mask & np.isfinite(s)
+    unbounded = mask & ~np.isfinite(s)
+    if not (s[comparable] > 0).all():
+        raise AssertionError(
+            f"我们的 σ=1 精度界在参与比对的参数上必须全为正,实际 {s}。"
+            f"出现 0/负数说明 Fisher 信息矩阵组装有错,先查上游再比对。"
+        )
+    if not (np.isfinite(o[comparable]).all() and (o[comparable] > 0).all()):
         raise AssertionError(
             f"OpenCV 标准差在参与比对的参数上必须全为正的有限值,实际 {o}。"
             f"出现 0 说明把被固定选项锁死的参数也放进来了(它的标准差恒 0),"
             f"请先用 active_mask 或按参数表前 P 位取数把它剔除。"
         )
 
-    k = float(np.sum(o[mask] * s[mask]) / np.sum(s[mask] ** 2))
+    k = float(np.sum(o[comparable] * s[comparable]) / np.sum(s[comparable] ** 2))
     rel = np.full(s.shape[0], np.nan)
-    rel[mask] = np.abs(o[mask] / k - s[mask]) / s[mask]
+    rel[comparable] = np.abs(o[comparable] / k - s[comparable]) / s[comparable]
     return {
         "scale_k": k,
         "per_param_rel_dev": rel,
-        "max_rel_dev": float(rel[mask].max()),
-        "n_active": int(mask.sum()),
+        "max_rel_dev": float(rel[comparable].max()),
+        "n_active": int(comparable.sum()),
+        "n_unbounded": int(unbounded.sum()),
     }
 
 

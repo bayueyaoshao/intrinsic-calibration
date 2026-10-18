@@ -191,21 +191,31 @@ def test_m1_fixed_k3_slot_aligned_without_nan(make_true_views):
 def test_m3_best_effort_results_present(make_true_views):
     """M3(12 参数有理模型,D-07 尽力档):协议全程跑通、结果齐全即可,
     不对齐不失败——OpenCV 有理模型内部做法未实测,对不上按发现记录,
-    真实数据的结论由 03-05 落 crlb.json 时给出。"""
+    真实数据的结论由 03-05 落 crlb.json 时给出。
+
+    尽力档允许出现"无信息方向":OpenCV 标定解带 ~1e-10 跑间噪声,20 视图
+    下高阶畸变方向的 Fisher 信息在数值上贴零,该方向精度界记 inf(数据
+    极限)、不参与结构比对、单独计数。任何参数都不允许 NaN(那是组装 bug)。"""
     obs = _noisy_obs(make_true_views, n_views=20)
     model = create_model("m3")
 
     report = crosscheck_model(model, obs)
     assert report["status"] == "ok", f"M3 交叉验证应跑成:{report['failure_note']}"
     cmp = report["compare"]
-    assert cmp["n_active"] == 12
+    # 12 个参数各有归宿:要么参与结构比对,要么标记无界,一个不少
+    assert cmp["n_active"] + cmp["n_unbounded"] == 12
     assert np.isfinite(cmp["scale_k"]) and cmp["scale_k"] > 0
-    assert np.isfinite(cmp["max_rel_dev"]) and cmp["max_rel_dev"] >= 0
-    assert np.isfinite(cmp["per_param_rel_dev"]).all()
-    # 我们的精度界与 OpenCV 解都齐全(结果"有",分级判读留给 03-05)
-    assert report["se_ours_opencv_point"].shape == (12,)
-    assert np.isfinite(report["se_ours_opencv_point"]).all()
-    assert (report["se_ours_opencv_point"] > 0).all()
+    se = report["se_ours_opencv_point"]
+    assert se.shape == (12,)
+    assert np.isnan(se).sum() == 0
+    assert (se > 0).all()
+    finite = np.isfinite(se)
+    assert cmp["n_unbounded"] == int((~finite).sum())
+    if cmp["n_active"] > 0:
+        assert np.isfinite(cmp["max_rel_dev"]) and cmp["max_rel_dev"] >= 0
+        rel = cmp["per_param_rel_dev"]
+        assert np.isfinite(rel[finite]).all()
+        assert np.isnan(rel[~finite]).all()
 
 
 # ---- 行为 4:M4 分支——中文结论记录,且绝不调用 cv2.fisheye ----

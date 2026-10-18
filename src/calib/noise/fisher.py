@@ -180,7 +180,16 @@ def crlb_se(F_marg: np.ndarray, sigma: float) -> np.ndarray:
             f"F_marg 形状不合:期望 (P,P) 方阵(边际化 Fisher 信息矩阵),"
             f"实际是 {F.shape}。请确认传入的是 marginalized_fisher 的第一个返回值。"
         )
-    return sig * np.sqrt(np.diag(np.linalg.inv(F)))
+    var = np.diag(np.linalg.inv(F))
+    # 方差非正时的语义(数据极限,不是组装错误):F 可逆但某参数方向在数值
+    # 上不携带信息(典型:12 参数有理模型在少量视图下的高阶畸变方向),协方差
+    # 对角线被舍入推到 0 以下。CRLB 对无信息方向本就无界,记 inf;NaN 只会
+    # 来自 F 里的 NaN(上游 bug),让它原样穿透。
+    positive = var > 0
+    se = np.full(var.shape, np.inf)
+    se[positive] = sig * np.sqrt(var[positive])
+    se[np.isnan(var)] = np.nan
+    return se
 
 
 def sensitivity_band(se: np.ndarray, rel: float = SIGMA_BAND_REL_8) -> dict:
