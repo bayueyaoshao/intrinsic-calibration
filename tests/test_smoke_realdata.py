@@ -7,10 +7,14 @@
 input_data/train 软链接真实前 3 个姿态目录(24 张)、test 软链接前 5 张,
 然后像真实用户一样依次运行 calib ingest → calib corners → calib calibrate
 (每条命令独立进程)。断言三件事:
-1. 三命令退出码全 0,产物齐全(manifest / 4 份角点 npz / 4 个基线目录);
+1. 三命令退出码全 0,产物齐全(manifest / 4 份角点 npz / 矩阵组合目录);
 2. 血缘链闭合:标定产物记录的角点文件指纹与实际文件一致,角点产物记录的
    数据清单指纹与实际文件一致——链上任何一环被篡改都会在这里显形(T-03-01);
-3. 鱼眼组合即使在小样本上不收敛,产物结构也必须完整(键一个不少)。
+3. 未收敛组合(小样本上模型失配很常见)产物结构也必须完整(键一个不少)。
+
+calibrate 一步跑的是配置矩阵(阶段二演进:模型 × 求解路径 × 损失核,
+仓库默认配置 = 4 模型 × {opencv, scipy(linear), scipy(soft_l1)} 共 12 组合),
+组合目录名与 result.json 键契约见 calib.solve.result / matrix。
 
 软链接只读不复制,尊重 input_data 只读契约。
 """
@@ -31,14 +35,19 @@ pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# 四个基线组合名与 calibration.json 必须齐备的键(失败组合也一样)
-BASELINE_NAMES = (
-    "baseline_classic_pinhole", "baseline_classic_fisheye",
-    "baseline_sb_pinhole", "baseline_sb_fisheye",
+# 矩阵组合目录名(镜像仓库 config/calibration.yaml 默认矩阵:
+# models [m1..m4] × solvers [opencv, scipy] × scipy.losses [linear, soft_l1])
+MATRIX_COMBOS = tuple(
+    f"{model}__{suffix}"
+    for model in ("m1", "m2", "m3", "m4")
+    for suffix in ("opencv", "scipy", "scipy_softl1")
 )
-CALIBRATION_KEYS = ("lineage", "detector", "model", "image_size", "n_views",
-                    "n_points_per_view", "rms_overall", "K", "D",
-                    "per_view_rms", "flags_used", "converged", "failure_note")
+# result.json 必须齐备的键(失败组合也一样,数值键为 null)
+RESULT_JSON_KEYS = (
+    "lineage", "model_id", "solver", "solver_meta", "params",
+    "image_ids", "image_size", "n_views", "n_points_per_view",
+    "init_from", "converged", "failure_note", "rms_overall", "per_view_rms",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -132,19 +141,21 @@ def test_three_commands_relay_and_artifacts_complete(smoke_tree: dict):
                 assert data["uv"].shape == (n_rows, 88, 2)
 
     calibration_run = smoke_tree["calibration_run"]
-    for name in BASELINE_NAMES:
-        assert (calibration_run / name / "calibration.json").is_file(), \
+    for name in MATRIX_COMBOS:
+        assert (calibration_run / name / "result.json").is_file(), \
             f"缺标定产物:{name}"
     comparison = json.loads(
         (calibration_run / "comparison.json").read_text(encoding="utf-8"))
-    assert len(comparison) == 4
+    assert [row["name"] for row in comparison] == list(MATRIX_COMBOS), \
+        "comparison.json 的组合名/顺序与配置矩阵不一致"
 
 
 def test_lineage_chain_closed(smoke_tree: dict):
     """血缘链闭合:标定 → 角点 → 数据清单,每一环的文件指纹都与实际文件一致。
 
     链上任何一环被篡改(换了角点文件、换了清单),指纹就对不上,当场显形。
-    产物里记录的路径是"相对当时工作目录"的,临时树就是当时的工作目录。
+    产物里记录的路径是"相对当时工作目录"的,临时树就是当时的工作目录;
+    scipy 组合多一环:init_result.json 指向同轮同模型的 opencv 初值产物。
     """
     tmp_root = smoke_tree["tmp_root"]
     corners_run = smoke_tree["corners_run"]
@@ -152,7 +163,7 @@ def test_lineage_chain_closed(smoke_tree: dict):
 
     # 第一环:角点产物记录的数据清单指纹 = 实际清单文件
     meta = json.loads(
-        (corners_run / "corners_train_classic.meta.json").read_text(encoding="utf-8"))
+        (corners_run / "corners_train_sb.meta.json").read_text(encoding="utf-8"))
     recorded_manifest = meta["lineage"]["upstream"]["manifest.json"]
     manifest_from_lineage = tmp_root / recorded_manifest["path"]
     assert manifest_from_lineage.is_file()
@@ -160,42 +171,56 @@ def test_lineage_chain_closed(smoke_tree: dict):
     assert recorded_manifest["sha256"] == _sha256(manifest_path), \
         "角点产物记录的清单指纹与实际文件不符,血缘链断裂"
 
-    # 第二环:每个标定组合记录的角点文件路径与指纹 = 本轮实际角点文件
+    # 第二环:每个标定组合记录的角点文件路径与指纹 = 本轮实际角点文件;
+    # scipy 组合另记初值产物指纹(同轮 <模型>__opencv/result.json)
     calibration_run = smoke_tree["calibration_run"]
-    for name in BASELINE_NAMES:
-        calib = json.loads(
-            (calibration_run / name / "calibration.json").read_text(encoding="utf-8"))
-        lineage = calib["lineage"]
-        corners_file = tmp_root / lineage["corners_file"]
-        assert corners_file.is_file()
-        assert corners_file.parent.resolve() == corners_run.resolve(), \
+    corners_npz = corners_run / "corners_train_sb.npz"
+    for name in MATRIX_COMBOS:
+        doc = json.loads(
+            (calibration_run / name / "result.json").read_text(encoding="utf-8"))
+        lineage = doc["lineage"]
+        recorded = lineage["upstream"]["corners_train_sb.npz"]
+        corners_file = tmp_root / recorded["path"]
+        assert corners_file.resolve() == corners_npz.resolve(), \
             f"{name} 引用的角点文件不在本轮 corners 产物目录:{corners_file}"
-        assert lineage["corners_sha256"] == _sha256(corners_file), \
+        assert recorded["sha256"] == _sha256(corners_npz), \
             f"{name} 记录的角点指纹与实际文件不符,血缘链断裂"
         # 剔除名单留痕(T-03-02):键必须在,值为本轮实际剔除的照片编号
         assert "excluded_images" in lineage
+        if name.endswith(("__scipy", "__scipy_softl1")):
+            recorded_init = lineage["upstream"]["init_result.json"]
+            init_file = tmp_root / recorded_init["path"]
+            assert init_file.is_file(), f"{name} 的初值产物不在:{init_file}"
+            assert init_file.parent.name == f"{doc['model_id']}__opencv", \
+                f"{name} 的初值产物不是同模型的 opencv 结果:{init_file.parent.name}"
+            assert recorded_init["sha256"] == _sha256(init_file), \
+                f"{name} 记录的初值指纹与实际文件不符,血缘链断裂"
 
 
-def test_baseline_structure_complete_even_if_fisheye_fails(smoke_tree: dict):
-    """四个组合的产物结构一视同仁:键一个不少;失败组合数值字段为 null
-    但 failure_note 非空,收敛组合必须有 K 与残差文件。"""
+def test_matrix_structure_complete_even_if_not_converged(smoke_tree: dict):
+    """12 个组合的产物结构一视同仁:键一个不少;失败组合数值字段为 null
+    但 failure_note 非空,收敛组合必须有参数字典与位姿/残差两份 npz。"""
     calibration_run = smoke_tree["calibration_run"]
-    for name in BASELINE_NAMES:
-        calib = json.loads(
-            (calibration_run / name / "calibration.json").read_text(encoding="utf-8"))
-        for key in CALIBRATION_KEYS:
-            assert key in calib, f"{name} 缺结构键:{key}"
-        assert calib["n_points_per_view"] == 88
-        if calib["converged"]:
-            assert calib["K"] is not None and calib["rms_overall"] is not None
-            assert calib["failure_note"] is None
+    for name in MATRIX_COMBOS:
+        doc = json.loads(
+            (calibration_run / name / "result.json").read_text(encoding="utf-8"))
+        for key in RESULT_JSON_KEYS:
+            assert key in doc, f"{name} 缺结构键:{key}"
+        assert doc["n_points_per_view"] == 88
+        assert doc["n_views"] >= 2
+        if doc["converged"]:
+            assert doc["rms_overall"] is not None and doc["failure_note"] is None
+            assert doc["params"], f"{name} 收敛却没给任何参数"
+            with np.load(calibration_run / name / "extrinsics.npz",
+                         allow_pickle=False) as data:
+                assert data["rvecs"].shape == (doc["n_views"], 3)
             with np.load(calibration_run / name / "residuals.npz",
                          allow_pickle=False) as data:
-                assert data["residuals"].shape == (calib["n_views"], 88, 2)
-                assert data["image_ids"].shape == (calib["n_views"],)
+                assert data["residuals"].shape == (doc["n_views"], 88, 2)
+                assert data["image_ids"].shape == (doc["n_views"],)
         else:
-            note = calib["failure_note"]
+            note = doc["failure_note"]
             assert isinstance(note, str) and note.strip(), \
                 f"{name} 未收敛却没写中文失败说明"
-            assert calib["K"] is None and calib["D"] is None
-            assert calib["rms_overall"] is None and calib["per_view_rms"] is None
+            assert doc["rms_overall"] is None and doc["per_view_rms"] is None
+            assert doc["params"] == {}
