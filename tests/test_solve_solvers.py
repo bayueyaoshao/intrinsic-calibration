@@ -15,8 +15,9 @@
 - 适配器 flags 对账:M1=128(FIX_K3)/ M2=0 / M3=16384(RATIONAL)/ M4=10
   (每轮重算位姿 + skew 固定 0),记进 solver_meta。
 
-全部用例跑在合成数据上(模型参数/位姿全已知),秒级。02-04 再扩展
-scipy 侧(ScipySolver 与 D-08 残差锁定)。
+全部用例跑在合成数据上(模型参数/位姿全已知),秒级。第三批(02-04):
+scipy 精化后端——实用收敛真值表、f_scale 自动档手算对表、OpenCV 初值
+精化不劣化、无初值走通用初始化、异常进失败契约、双后端结果同构。
 """
 
 from __future__ import annotations
@@ -28,8 +29,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+from calib.solve.scipy_solver import (
+    _auto_f_scale,
+    is_practically_converged,
+    solve_with_scipy,
+)
 
-from calib.io.config import BoardSpec
+from calib.io.config import BoardSpec, ScipyConfig
 from calib.models import create_model
 from calib.models.base import CameraModel, transform_to_camera
 from calib.solve.baseline import build_object_points
@@ -451,3 +457,139 @@ def test_opencv_solver_source_has_no_specific_model_imports():
     assert "from calib.models.kb4" not in source
     assert "from calib.models import" not in source
     assert "CameraModel" in source
+
+
+# ---- 02-04 第三批:scipy 精化后端 ----
+
+def test_is_practically_converged_truth_table():
+    """实用收敛判定真值表(研究 Pitfall 3:鲁棒核 + trf/lsmr 常在代价已
+    走平、残差已到噪声底时报 status=0,一刀切判失败会把好结果扔掉)。
+
+    规则:status>0 直接收;status=0 时要"代价尾部相对改进 < 1e-6(走平)
+    且 RMS 没比 linear 参照差超 5%(鲁棒核没把解压歪)";status=-1 绝不收。
+    """
+    # status > 0:优化器自己报停机条件满足,直接算收敛(哪怕别的指标难看)
+    assert is_practically_converged(
+        status=1, tail_improvement=0.9, rms_final=1.0, rms_linear_ref=0.1) is True
+    assert is_practically_converged(
+        status=3, tail_improvement=1.0, rms_final=None, rms_linear_ref=None) is True
+    # status=0 + 代价走平 + 无 linear 参照:实用收敛
+    assert is_practically_converged(
+        status=0, tail_improvement=1e-9, rms_final=0.3, rms_linear_ref=None) is True
+    # status=0 + 走平 + RMS 比 linear 参照差超 5%:不算(鲁棒核压歪了解)
+    assert is_practically_converged(
+        status=0, tail_improvement=1e-9, rms_final=1.0, rms_linear_ref=0.5) is False
+    # status=0 + 走平 + RMS 与 linear 参照相当(5% 内):算
+    assert is_practically_converged(
+        status=0, tail_improvement=1e-9, rms_final=0.51, rms_linear_ref=0.5) is True
+    # status=0 + 代价还在明显下降:不算(还有肉没吃完就停了)
+    assert is_practically_converged(
+        status=0, tail_improvement=0.5, rms_final=0.3, rms_linear_ref=None) is False
+    # status=-1:优化器报错,绝不判收敛
+    assert is_practically_converged(
+        status=-1, tail_improvement=0.0, rms_final=0.0, rms_linear_ref=None) is False
+
+
+def test_auto_f_scale_hand_computed():
+    """f_scale 自动档 = 3 × 1.4826 × MAD(MAD = 中位数绝对偏差;高斯噪声下
+    MAD×1.4826 恰是标准差的稳健估计,3 倍它就是"3σ 之外才降权")。
+    手算对表;全零残差(合成无噪声数据)MAD=0 会退化,兜底 1.0 像素当量。"""
+    residuals = np.arange(1.0, 11.0)  # 1..10,中位数 5.5
+    # |r−5.5| = [4.5,3.5,2.5,1.5,0.5]×2,MAD = 2.5
+    assert _auto_f_scale(residuals) == pytest.approx(3.0 * 1.4826 * 2.5)
+    # 近零残差:不把尺度缩成 0(那是把所有残差当离群),兜底 1 像素
+    assert _auto_f_scale(np.zeros(64)) == 1.0
+
+
+@pytest.mark.parametrize("loss", ["linear", "soft_l1"])
+def test_solve_with_scipy_refines_opencv_init(make_true_views, loss):
+    """OpenCV 初值进 scipy 精化:RMS 不劣化、fx 对真值不劣化、init_from
+    留痕(模型__来源后端)、判定依据全部进 solver_meta;linear 与 soft_l1
+    两档都过。合成数据无畸变,真值 fx=800。"""
+    views, _k_true = make_true_views()
+    obs = _obs_from_views(views)
+    model = create_model("m2")
+    init = solve_with_opencv(obs, model)
+    assert init.converged
+
+    result = solve_with_scipy(obs, model, ScipyConfig(), init=init, loss=loss)
+
+    assert result.converged is True, f"应实用收敛:{result.failure_note}"
+    assert result.solver == "scipy"
+    assert result.model_id == "m2"
+    assert result.init_from == "m2__opencv"
+    assert result.rms_overall <= init.rms_overall + 1e-9, \
+        f"精化后 RMS {result.rms_overall:.6f} 反而比初值 {init.rms_overall:.6f} 差"
+    err_after = abs(result.params["fx"] - 800.0)
+    err_before = abs(init.params["fx"] - 800.0)
+    assert err_after <= err_before + 1e-6, \
+        f"精化后 fx 误差 {err_after:.6f} 比初值误差 {err_before:.6f} 还大"
+    assert result.per_view_rms.shape == (len(views),)
+    assert result.rvecs.shape == (len(views), 3)
+    # Pitfall 3:判定依据全部留痕,不许静默
+    for key in ("method", "tr_solver", "loss", "f_scale", "status",
+                "nfev", "tail_improvement", "final_cost"):
+        assert key in result.solver_meta, f"solver_meta 缺判定依据:{key}"
+    assert result.solver_meta["loss"] == loss
+    assert result.solver_meta["method"] == "trf"
+    assert result.solver_meta["tr_solver"] == "lsmr"
+
+
+def test_solve_with_scipy_generic_init_when_no_init_given(make_true_views):
+    """不给初值:内部走通用初始化(default_params 组 K + 逐视图 solvePnP),
+    init_from 记 internal_generic。无畸变针孔数据里"焦距小 40% 恰好被各
+    视图深度同比放大吸收"(u = 480·X/(0.6Z)+320 = 800·X/Z+320),所以
+    该路径也能到近零 RMS——这是数据几何的数学事实,不是巧合。"""
+    views, _k_true = make_true_views()
+    obs = _obs_from_views(views)
+    model = create_model("m2")
+
+    result = solve_with_scipy(obs, model, ScipyConfig())
+
+    assert result.converged is True, f"通用初值路径应实用收敛:{result.failure_note}"
+    assert result.init_from == "internal_generic"
+    assert result.rms_overall < 0.5, \
+        f"焦距-深度简并下通用路径 RMS 应近零,实际 {result.rms_overall:.6f}px"
+
+
+def test_solve_with_scipy_error_returns_failure_contract(make_true_views, monkeypatch):
+    """least_squares 抛异常 → make_failure 失败契约:不抛出、结构键齐全、
+    数值字段一律 None、params 为空字典、中文 failure_note 点名 scipy。"""
+    import calib.solve.scipy_solver as scipy_solver_module
+
+    def _explode(*args, **kwargs):
+        raise ValueError("数值爆了")
+
+    monkeypatch.setattr(scipy_solver_module, "least_squares", _explode)
+
+    views, _k_true = make_true_views(n_views=2)
+    obs = _obs_from_views(views)
+    result = solve_with_scipy(obs, create_model("m2"), ScipyConfig())
+
+    assert result.converged is False
+    note = result.failure_note
+    assert isinstance(note, str) and "scipy" in note and note.strip()
+    for attr in ("rms_overall", "per_view_rms", "rvecs", "tvecs"):
+        assert getattr(result, attr) is None, f"失败时 {attr} 必须为 None"
+    assert result.params == {}
+    assert result.image_ids == obs.image_ids
+    assert result.solver == "scipy"
+
+
+def test_result_structure_isomorphic_across_backends(make_true_views):
+    """同一份观测走两个后端,结果同构:同一 CalibrationResult 字段(同一
+    dataclass,天然同构)、params 键都等于模型参数名集合、RMS 都出自同一把
+    回代尺(models.project float64),两边差 < 1e-3px(Pitfall 9)。"""
+    views, _k_true = make_true_views()
+    obs = _obs_from_views(views)
+    model = create_model("m2")
+    r_cv = solve_with_opencv(obs, model)
+    r_sp = solve_with_scipy(obs, model, ScipyConfig(), init=r_cv)
+
+    assert r_cv.converged and r_sp.converged
+    assert set(r_cv.params) == set(r_sp.params) == set(model.param_names)
+    assert r_cv.rms_overall < 0.5 and r_sp.rms_overall < 0.5
+    assert abs(r_cv.rms_overall - r_sp.rms_overall) < 1e-3, \
+        (f"两后端同一把尺回代,RMS 差 "
+         f"{abs(r_cv.rms_overall - r_sp.rms_overall):.6f}px 超 1e-3")
+    assert r_cv.per_view_rms.shape == r_sp.per_view_rms.shape
