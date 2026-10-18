@@ -19,8 +19,14 @@ import pytest
 
 from calib.corners.artifacts import save_corners
 from calib.corners.detect import detect_sb
-from calib.io.config import CalibrationConfig, NoiseConfig, load_board, load_calibration
-from calib.io.dataset import ImageRecord
+from calib.io.config import (
+    CalibrationConfig,
+    CornersConfig,
+    NoiseConfig,
+    load_board,
+    load_calibration,
+)
+from calib.io.dataset import ImageRecord, imread_checked
 from calib.noise.injection import (
     _anchor_grid,
     _seed_for,
@@ -38,24 +44,52 @@ from calib.util.lineage import make_lineage
 COLS, ROWS = 11, 8  # 与真实棋盘同规格(88 个内角点)
 
 
-def _write_chessboard(make_chessboard_image, path: Path, pose_shift: float) -> np.ndarray:
-    """写一张合成棋盘图(轻微改位姿让两张图不完全一样),返回真值角点。"""
+def _write_chessboard(make_chessboard_image, path: Path, pose_shift: float) -> None:
+    """写一张合成棋盘图(轻微改位姿让两张图不完全一样)。"""
     rvec = np.array([0.0, 0.05 + pose_shift, 0.0])
-    img, corners, _sq = make_chessboard_image(rvec=rvec)
+    img, _corners, _sq = make_chessboard_image(rvec=rvec)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(path), img):
         raise RuntimeError(f"测试写图失败:{path}")
-    return corners
 
 
-def _make_baseline_npz(out_dir: Path, records, corners_by_id) -> Path:
-    """把干净合成图的 SB 检出存成与真实产物同构的基线角点 npz。"""
-    ids = [r.image_id for r in records]
-    uv = np.stack([corners_by_id[i] for i in ids])
-    save_corners(out_dir, "train", "sb", ids, uv,
-                 np.full(len(ids), 20.0), np.full(len(ids), 5.0),
-                 np.ones(len(ids), dtype=bool),
-                 source=np.full(len(ids), "sb", dtype="<U16"),
+def _build_baseline_npz(out_dir: Path, records,
+                        corners_override: dict[str, np.ndarray] | None = None) -> Path:
+    """像真实 corners 阶段一样:对写好的图逐张跑 detect_sb,存成基线角点 npz。
+
+    基线必须与真实产物同源(检测器输出,不是投影真值)——真值与检出本就差
+    亚像素级的一点,σ=0 校准行的"位移恒 0"断言抓的正是基线错位。
+    corners_override:个别图塞占位角点(如全黑图:检测必失败,但基线要标
+    "已检出"才能走进"副本检测失败"的留痕路径,而不是"基线缺失"路径)。
+    """
+    ids, uv_rows, sq_rows, win_rows, det_rows, src_rows = [], [], [], [], [], []
+    for r in records:
+        gray = imread_checked(r.path)
+        result = detect_sb(gray, COLS, ROWS, CornersConfig())
+        ids.append(r.image_id)
+        override = (corners_override or {}).get(r.image_id)
+        if result is not None:
+            uv_rows.append(result["uv"])
+            sq_rows.append(result["sq_px"])
+            win_rows.append(result["win_size"])
+            det_rows.append(True)
+            src_rows.append("sb")
+        elif override is not None:
+            uv_rows.append(override)
+            sq_rows.append(20.0)
+            win_rows.append(5.0)
+            det_rows.append(True)
+            src_rows.append("sb")
+        else:
+            uv_rows.append(np.full((COLS * ROWS, 2), np.nan))
+            sq_rows.append(np.nan)
+            win_rows.append(np.nan)
+            det_rows.append(False)
+            src_rows.append("")
+    save_corners(out_dir, "train", "sb", ids, np.asarray(uv_rows),
+                 np.asarray(sq_rows), np.asarray(win_rows),
+                 np.asarray(det_rows, dtype=bool),
+                 source=np.asarray(src_rows, dtype="<U16"),
                  lineage=make_lineage({}, {}, "run_test"))
     return out_dir / "corners_train_sb.npz"
 
@@ -72,14 +106,13 @@ def small_experiment(make_chessboard_image, tmp_path):
     """小样注入地基:2 张合成棋盘图 + 基线角点 npz + 小样 NoiseConfig。"""
     img_dir = tmp_path / "input_data" / "train" / "pose_a"
     records = []
-    corners_by_id = {}
     for k in range(2):
         image_id = f"20260101_00000{k}"
         path = img_dir / f"{image_id}.jpg"
-        corners_by_id[image_id] = _write_chessboard(make_chessboard_image, path, 0.01 * k)
+        _write_chessboard(make_chessboard_image, path, 0.01 * k)
         records.append(ImageRecord(image_id=image_id, path=path, split="train",
                                    pose_id="pose_a", repeat_idx=k, n_repeats=2))
-    npz = _make_baseline_npz(tmp_path / "corners_run", records, corners_by_id)
+    npz = _build_baseline_npz(tmp_path / "corners_run", records)
     cfg = CalibrationConfig(noise=_small_noise_cfg())
     return records, npz, cfg
 
@@ -181,22 +214,23 @@ def test_failed_detection_recorded_not_raised(make_chessboard_image, tmp_path):
     source 记 "",整体不抛异常(部分成功语义,研究 Pitfall 7)。"""
     img_dir = tmp_path / "input_data" / "train" / "pose_a"
     records = []
-    corners_by_id = {}
     for k in range(2):
         image_id = f"20260101_00000{k}"
         path = img_dir / f"{image_id}.jpg"
-        corners_by_id[image_id] = _write_chessboard(make_chessboard_image, path, 0.01 * k)
+        _write_chessboard(make_chessboard_image, path, 0.01 * k)
         records.append(ImageRecord(image_id=image_id, path=path, split="train",
                                    pose_id="pose_a", repeat_idx=k, n_repeats=3))
-    # 第三张:全黑图,基线角点拿第一张的占位(检测必然失败,占位值无关紧要)
+    # 第三张:全黑图(检测必失败);基线塞占位角点并标"已检出",
+    # 让它走进"副本检测失败"的留痕路径(行为 3 的本体)
     black_path = img_dir / "20260101_00002.jpg"
     black_path.parent.mkdir(parents=True, exist_ok=True)
     assert cv2.imwrite(str(black_path), np.zeros((480, 640), dtype=np.uint8))
     records.append(ImageRecord(image_id="20260101_00002", path=black_path,
                                split="train", pose_id="pose_a", repeat_idx=2, n_repeats=3))
-    corners_by_id["20260101_00002"] = corners_by_id["20260101_000000"]
-
-    npz = _make_baseline_npz(tmp_path / "corners_run", records, corners_by_id)
+    dummy = np.stack([np.arange(COLS * ROWS, dtype=np.float64) / 10.0,
+                      np.arange(COLS * ROWS, dtype=np.float64) / 20.0], axis=1)
+    npz = _build_baseline_npz(tmp_path / "corners_run", records,
+                              corners_override={"20260101_00002": dummy})
     cfg = CalibrationConfig(noise=_small_noise_cfg())
 
     result = run_injection_experiment(npz, records, cfg, COLS, ROWS,
@@ -212,7 +246,8 @@ def test_failed_detection_recorded_not_raised(make_chessboard_image, tmp_path):
     per_image = json.loads(
         Path(result["per_image_path"]).read_text(encoding="utf-8"))
     failed = next(r for r in per_image["images"] if r["image_id"] == "20260101_00002")
-    assert failed["n_fail"] == 1 * 1        # 1 档 × 1 重复,全部计入失败
+    # 小样网格 = [σ=0 参照档, σ=4],共 2 档 × 1 重复 = 2 个副本,全部失败
+    assert failed["n_fail"] == 2
     ok = next(r for r in per_image["images"] if r["image_id"] == "20260101_000000")
     assert ok["n_fail"] == 0                # 正常图不受失败副本牵连
 
@@ -300,7 +335,9 @@ def test_full_injection_real_data(tmp_path):
     manifests = sorted((repo / "output" / "ingest").glob("run_*/manifest.json"))
     corners_npzs = sorted((repo / "output" / "corners").glob("run_*/corners_train_sb.npz"))
     if not manifests or not corners_npzs:
-        pytest.fail("真实数据或 corners 产物未就位:请先跑 calib ingest 与 calib corners")
+        # 前提数据缺失是"这里跑不了"(如运行产物不进 git 的独立检出),
+        # 不是发现缺陷——跳过并说明,在主检出上显式运行才会真跑全量
+        pytest.skip("真实数据或 corners 产物未就位:请先跑 calib ingest 与 calib corners")
     manifest = json.loads(manifests[-1].read_text(encoding="utf-8"))
     board = load_board(repo / "config" / "board.yaml")
     cfg = load_calibration(repo / "config" / "calibration.yaml")
