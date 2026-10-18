@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-18T07:32:35.532Z"
+last_updated: "2026-10-18T07:38:24.167Z"
 progress:
   total_phases: 6
   completed_phases: 2
@@ -17,17 +17,17 @@ progress:
 ## Project Reference
 
 - **Core Value:** 对给定的一批标定图像,产出可论证为当前数据下最优的内参(held-out 泛化误差最小 + 参数稳定 + 误差逼近 CRLB),并量化"距离数据极限还有多远"
-- **Current Focus:** Phase 02 — m1-m4
+- **Current Focus:** Phase 03 — fisher-crlb
 - **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md
 
 ## Current Position
 
-Phase: 02 (m1-m4) — EXECUTING
+Phase: 03 (fisher-crlb) — EXECUTING
 Plan: 1 of 6
 
 - **Phase:** 3
 - **Plan:** Not started
-- **Status:** Ready to execute
+- **Status:** Executing Phase 03
 - **Progress:** `[█░░░░░░░░░] 1/6 phases`
 
 ## Performance Metrics

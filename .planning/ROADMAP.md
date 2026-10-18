@@ -106,13 +106,13 @@ Plans:
   4. FIM 推导的内参 SE 与 OpenCV stdDeviationsIntrinsics 在同模型同 Σ 下一致到个位数百分比(最强交叉验证)
   5. Σ 不确定性(8 样本 ~27% 相对误差)以敏感性方式随 CRLB 一并落盘,不输出裸下界
 
-**Plans:** 6 plans(4 waves)
+**Plans:** 2/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — 噪声测量线:NoiseConfig 配置段 + Immerkaer 单帧估计 + 受控注入实验 + 传递曲线(NOI-02 主,NOI-01 单帧半,D-08/09/12/13)
-- [ ] 03-02-PLAN.md — FIM/Schur/CRLB 数学核心(σ=1 基准):分块组装 + 边际化恒等式 + σ 线性缩放 + Σ 带 + 谱/条件数 + 蒙特卡洛(NOI-03 数学,D-10)
+- [x] 03-01-PLAN.md — 噪声测量线:NoiseConfig 配置段 + Immerkaer 单帧估计 + 受控注入实验 + 传递曲线(NOI-02 主,NOI-01 单帧半,D-08/09/12/13)
+- [x] 03-02-PLAN.md — FIM/Schur/CRLB 数学核心(σ=1 基准):分块组装 + 边际化恒等式 + σ 线性缩放 + Σ 带 + 谱/条件数 + 蒙特卡洛(NOI-03 数学,D-10)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -181,7 +181,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 数据基座 + 最小完整标定流程 | 5/5 | Complete   | 2026-10-16 |
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete    | 2026-10-18 |
-| 3. 噪声底 + Fisher/CRLB 可达精度预测 | 0/6 | Planned (4 waves) | - |
+| 3. 噪声底 + Fisher/CRLB 可达精度预测 | 2/6 | In Progress|  |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
 | 5. 误差预算 + 诊断 + 角点提取寻优 | 0/TBD | Not started | - |
 | 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/TBD | Not started | - |
