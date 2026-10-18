@@ -181,6 +181,10 @@ class CalibrateConfig:
     models: tuple[str, ...] = ("m1", "m2", "m3", "m4")
     # 求解路径:opencv 原生求解;scipy = OpenCV 结果做初值再精化
     solvers: tuple[str, ...] = ("opencv", "scipy")
+    # 存疑帧复核(D-04)用哪个模型的精化结果做对照:固定一个模型全量
+    # 对比,不逐模型重复(研究遗留问题 1 的定夺);默认 m2 = 阶段一针孔
+    # 基线同款,与"体检看着糊的帧是不是真有害"这个问题直接衔接
+    suspect_review_model: str = "m2"
     scipy: ScipyConfig = field(default_factory=ScipyConfig)
     fisheye: FisheyeConfig = field(default_factory=FisheyeConfig)
 
@@ -468,8 +472,16 @@ def _parse_calibrate(raw: dict) -> CalibrateConfig:
         _fail("calibrate.solvers", bad_solvers,
               f"含有不认识的求解路径;可选:{sorted(_ALLOWED_SOLVERS)}")
 
+    suspect_review_model = section.get(
+        "suspect_review_model", CalibrateConfig.suspect_review_model)
+    if suspect_review_model not in _ALLOWED_MODEL_IDS:
+        _fail("calibrate.suspect_review_model", suspect_review_model,
+              f"可选:{sorted(_ALLOWED_MODEL_IDS)}"
+              f"(存疑帧复核用哪个模型的精化结果做对照,固定一个模型,不逐模型重复)")
+
     return CalibrateConfig(corner_route=corner_route,
                            models=tuple(models), solvers=tuple(solvers),
+                           suspect_review_model=suspect_review_model,
                            scipy=_parse_scipy(section),
                            fisheye=_parse_fisheye(section))
 

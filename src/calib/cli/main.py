@@ -30,6 +30,7 @@ from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
 from calib.solve.matrix import run_calibration_matrix
 from calib.solve.observation import excluded_image_ids, load_observation_set
+from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
 from calib.visualization.mosaic import write_mosaics
 from calib.visualization.overlay import (
@@ -677,9 +678,11 @@ def calibrate() -> None:
 
     步骤:读配置 → 找最新一轮 corners 产物,按 corner_route 定位 train 角点
     与同轮数据清单(血缘优先防串轮)→ 装载观测集(人工剔除清单生效,D-03;
-    test 切分留给后续阶段独立评分,本步不碰)→ 矩阵循环:每模型先 OpenCV
+    test 切分留给存疑帧复核评分,本步不进标定)→ 矩阵循环:每模型先 OpenCV
     初值、再 scipy 各损失核精化 → 逐组合三件套(result.json / extrinsics.npz /
-    residuals.npz)带血缘落盘 → 汇总写 comparison.json → 打印中文对比表。
+    residuals.npz)带血缘落盘 → 汇总写 comparison.json → 存疑帧复核(D-04:
+    体检判"存疑"的照片 vs 正常照片的逐帧误差全量对比,结论带血缘落盘
+    suspect_review/)→ 打印中文对比表。
     """
     started = datetime.now(UTC)
     board = load_board(BOARD_PATH)
@@ -744,6 +747,27 @@ def calibrate() -> None:
     if excluded:
         typer.echo(f"  人工剔除清单生效:本轮剔除 {len(excluded)} 张"
                    f"(名单已记进每个产物的血缘)")
+
+    # ---- 存疑帧复核(D-04 闭环):矩阵跑完自动生成 suspect_review/ ----
+    # 复核失败不吞标定成功:任何意外只 echo 中文提示,退出语义不变
+    try:
+        review = review_suspects(run_dir, corners_run, manifest_path, board, cfg)
+        if review.get("frame_table"):
+            stats = review["group_stats"]
+            n_suspect = stats["suspect"]["n"]
+            typer.echo(f"  存疑帧复核(对照模型 {review['review_model']},"
+                       f"结果取自 {review['result_used']}):"
+                       f"存疑 {n_suspect} 张 vs 正常 {stats['normal']['n']} 张")
+            if review.get("fallback"):
+                typer.echo(f"    ({review['fallback']})")
+            typer.echo(f"    {review['conclusion']}")
+            typer.echo(f"    逐帧表与对比图:{Path(review['files']['json']).parent}")
+        else:
+            typer.echo(f"  存疑帧复核:{review.get('conclusion', '未生成')}")
+    except Exception as e:  # noqa: BLE001  # 故意宽接:复核是标定的附加产物,失败不影响标定结果(计划明文)
+        typer.echo(f"  存疑帧复核未跑成(不影响标定结果本身):"
+                   f"{type(e).__name__}——{e}")
+
     typer.echo(f"  标定产物:{run_dir}")
     typer.echo(f"  对比摘要:{comparison_path}")
 

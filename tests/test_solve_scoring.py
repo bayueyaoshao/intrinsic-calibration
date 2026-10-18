@@ -14,12 +14,14 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from calib.io.config import BoardSpec
+from calib.io.config import BoardSpec, CalibrationConfig, load_calibration
 from calib.models import (
     _REGISTRY,
     BUILTIN_MODEL_IDS,
@@ -30,7 +32,7 @@ from calib.models import (
 from calib.models.base import CameraModel, transform_to_camera
 from calib.solve.baseline import build_object_points
 from calib.solve.observation import ObservationSet
-from calib.solve.scoring import score_views, solve_pose_only
+from calib.solve.scoring import review_suspects, score_views, solve_pose_only
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -247,12 +249,18 @@ def test_scoring_source_has_no_specific_models_or_projectpoints():
     source = (REPO_ROOT / "src/calib/solve/scoring.py").read_text(encoding="utf-8")
     assert "from calib.models.pinhole_brown" not in source
     assert "from calib.models.kb4" not in source
-    assert "from calib.models import" not in source
     assert "projectPoints" not in source, \
         "scoring.py 不得出现 projectPoints:投影只准经 model.project"
     assert "intrinsics_matrix" in source, \
         "solvePnP 的初值 K 必须经 model.intrinsics_matrix 组出"
     assert "CameraModel" in source
+    # 注册表白名单:from calib.models import 只准引 create_model(按短名
+    # 查表是注册机制本体,与矩阵编排层同权);具体模型的名字仍然禁止
+    for line in source.splitlines():
+        if line.startswith("from calib.models import"):
+            names = {n.strip() for n in line.split("import", 1)[1].split(",")}
+            assert names <= {"create_model"}, \
+                f"scoring.py 只准经注册表查模型(create_model),出现:{names}"
 
 
 # ---- 行为 4:毫秒级(65 视角合计 < 5 秒) ----
@@ -283,3 +291,197 @@ def test_65_views_pose_only_under_five_seconds():
     assert elapsed < 5.0, f"65 视角合计耗时 {elapsed:.2f} 秒,超 5 秒粗界"
     assert max(rms_list) < 0.5, \
         f"65 视角里最大回代 RMS {max(rms_list):.4f}px 超线 0.5px"
+
+
+# ---- Task 2:存疑帧复核编排(review_suspects)合成测试 ----
+
+def _write_result_json(combo_dir, model, params, train_ids, rms_map):
+    """写一份最小可用 result.json(收敛契约:复核只读 converged/params/
+    per_view_rms/lineage 这几样)。"""
+    combo_dir.mkdir(parents=True)
+    document = {
+        "lineage": {"round_id": "run_test",
+                    "config_sha256": {"board.yaml": "fake-board-hash",
+                                      "calibration.yaml": "fake-cfg-hash"}},
+        "model_id": model.model_id,
+        "solver": "scipy",
+        "params": {name: float(params[i])
+                   for i, name in enumerate(model.param_names)},
+        "image_ids": list(train_ids),
+        "image_size": [640, 480],
+        "n_views": len(train_ids),
+        "n_points_per_view": 88,
+        "converged": True,
+        "failure_note": None,
+        "rms_overall": float(np.mean(list(rms_map.values()))),
+        "per_view_rms": {k: float(v) for k, v in rms_map.items()},
+    }
+    with open(combo_dir / "result.json", "w", encoding="utf-8") as f:
+        json.dump(document, f, ensure_ascii=False)
+
+
+def _make_review_tree(tmp_path, model, params, with_scipy=True,
+                      with_opencv=False, seed=37):
+    """造复核编排的全套输入:1 轮 corners(test 角点)+ 1 轮标定产物
+    (train 逐帧 RMS)+ 数据清单(9 张,2 张存疑:train_0 与 test_0)。"""
+    rng = np.random.default_rng(seed)
+    corners_run = tmp_path / "corners" / "run_test"
+    corners_run.mkdir(parents=True)
+    calibration_run = tmp_path / "calibration" / "run_test"
+    calibration_run.mkdir(parents=True)
+
+    train_ids = [f"train_{k}" for k in range(6)]
+    test_ids = [f"test_{k}" for k in range(3)]
+
+    # test 角点:模型投影生成;test_0 是"存疑"帧,给大噪声(0.8px),
+    # 正常帧给小噪声(0.05px)——两组差距由此可控、结论方向确定
+    uv_rows = []
+    for k in range(len(test_ids)):
+        rvec_true, tvec_true = _truth_pose(rng)
+        uv_rows.append(_project_view(objp_grid, params, rvec_true, tvec_true,
+                                     model, noise_px=0.8 if k == 0 else 0.05,
+                                     rng=rng))
+    np.savez(corners_run / "corners_test_sb.npz",
+             image_ids=np.asarray(test_ids),
+             uv=np.asarray(uv_rows),
+             detected=np.ones(len(test_ids), dtype=bool),
+             source=np.asarray(["sb"] * len(test_ids)))
+
+    rms_map = {train_ids[0]: 1.0}
+    rms_map.update({tid: 0.1 for tid in train_ids[1:]})
+    if with_scipy:
+        _write_result_json(calibration_run / "m2__scipy", model, params,
+                           train_ids, rms_map)
+    if with_opencv:
+        _write_result_json(calibration_run / "m2__opencv", model, params,
+                           train_ids, rms_map)
+
+    images = []
+    for k, tid in enumerate(train_ids):
+        images.append({
+            "image_id": tid, "pose_id": f"pose_{k}", "split": "train",
+            "precheck": {"verdict": "suspect" if k == 0 else "ok",
+                         "suspect_sources": (["pose_relative:blur"] if k == 0
+                                             else [])},
+        })
+    for k, sid in enumerate(test_ids):
+        images.append({
+            "image_id": sid, "pose_id": f"independent_{k}", "split": "test",
+            "precheck": {"verdict": "suspect" if k == 0 else "ok",
+                         "suspect_sources": (["global:blur"] if k == 0 else [])},
+        })
+    manifest_path = tmp_path / "manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({"images": images, "summary": {"resolution": [640, 480]}},
+                  f, ensure_ascii=False)
+    return calibration_run, corners_run, manifest_path
+
+
+_board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+objp_grid = build_object_points(_board)
+
+
+def test_review_suspects_synthetic_end_to_end(tmp_path):
+    """合成 9 张(6 train + 3 test,2 存疑)走完整编排:逐帧表行数、
+    两组统计、结论走向、血缘与产物逐一核对。"""
+    model = create_model("m2")
+    params = _m2_truth_params()
+    calibration_run, corners_run, manifest_path = _make_review_tree(
+        tmp_path, model, params)
+
+    doc = review_suspects(calibration_run, corners_run, manifest_path,
+                          _board, CalibrationConfig())
+
+    rows = doc["frame_table"]
+    assert len(rows) == 9, f"逐帧表应覆盖全部 9 张,实际 {len(rows)} 行"
+    suspects = [r for r in rows if r["suspect"]]
+    assert len(suspects) == 2
+    assert {r["image_id"] for r in suspects} == {"train_0", "test_0"}
+    # 存疑来源记号原样保留(对账 manifest,T-02-06-01)
+    assert suspects[0]["suspect_sources"] in (["pose_relative:blur"],
+                                              ["global:blur"])
+
+    assert doc["result_used"] == "m2__scipy"
+    assert doc["fallback"] is None
+    # train 帧直接透传 result.json 的逐帧 RMS
+    t0 = next(r for r in rows if r["image_id"] == "train_0")
+    assert t0["per_view_rms"] == 1.0
+    # test 帧经只估位姿评分:正常帧应远低于 0.5px(0.05px 噪声)
+    s2 = next(r for r in rows if r["image_id"] == "test_1")
+    assert s2["per_view_rms"] is not None and np.isfinite(s2["per_view_rms"])
+    assert s2["per_view_rms"] < 0.5, \
+        f"正常 test 帧 RMS {s2['per_view_rms']:.3f}px 应远低于 0.5px"
+
+    # 两组统计:正常组中位数 = 0.1(train 注值),存疑组中位数 ≥ 0.8
+    stats = doc["group_stats"]
+    assert stats["suspect"]["n"] == 2 and stats["normal"]["n"] == 7
+    assert stats["normal"]["median"] == pytest.approx(0.1)
+    assert stats["suspect"]["median"] > stats["normal"]["median"] * 1.3
+
+    # 走向 A:判定、阈值、中文结论带数字
+    assert doc["verdict"] == "worse"
+    assert doc["threshold"]["relative_deviation"] == pytest.approx(0.30)
+    assert doc["conclusion"].strip() and "走向 A" in doc["conclusion"]
+    assert "30%" in doc["conclusion"] and "px" in doc["conclusion"]
+
+    # 血缘 upstream 恰两项(result.json + manifest.json),带 sha256;
+    # 配置指纹继承自所选结果
+    assert set(doc["lineage"]["upstream"]) == {"result.json", "manifest.json"}
+    assert all(v.get("sha256") for v in doc["lineage"]["upstream"].values())
+    assert doc["lineage"]["config_sha256"] == {
+        "board.yaml": "fake-board-hash", "calibration.yaml": "fake-cfg-hash"}
+
+    # 产物落盘:JSON + PNG 非空
+    out_dir = calibration_run / "suspect_review"
+    json_path = out_dir / "suspect_vs_normal.json"
+    png_path = out_dir / "suspect_vs_normal.png"
+    assert json_path.is_file() and png_path.is_file()
+    assert png_path.stat().st_size > 0, "对比图 PNG 不应为空文件"
+
+
+def test_review_suspects_falls_back_to_opencv_with_note(tmp_path):
+    """m2__scipy 缺失时回退 m2__opencv:fallback 中文记号非空,
+    result_used 指向 opencv,其余契约不变。"""
+    model = create_model("m2")
+    params = _m2_truth_params()
+    calibration_run, corners_run, manifest_path = _make_review_tree(
+        tmp_path, model, params, with_scipy=False, with_opencv=True)
+
+    doc = review_suspects(calibration_run, corners_run, manifest_path,
+                          _board, CalibrationConfig())
+
+    assert doc["result_used"] == "m2__opencv"
+    assert doc["fallback"] and "m2__scipy" in doc["fallback"]
+    assert doc["verdict"] == "worse"
+    assert len(doc["frame_table"]) == 9
+
+
+def test_review_suspects_empty_conclusion_without_results(tmp_path):
+    """两个组合都没有:返回中文空结论,不抛异常、不写盘。"""
+    model = create_model("m2")
+    params = _m2_truth_params()
+    calibration_run, corners_run, manifest_path = _make_review_tree(
+        tmp_path, model, params, with_scipy=False, with_opencv=False)
+
+    doc = review_suspects(calibration_run, corners_run, manifest_path,
+                          _board, CalibrationConfig())
+
+    assert doc["verdict"] == "not_generated"
+    assert doc["frame_table"] == []
+    assert doc["conclusion"].strip(), "空结论也要带中文说明"
+    assert not (calibration_run / "suspect_review").exists(), \
+        "没有可用结果时不该写产物目录"
+
+
+def test_suspect_review_model_config_default_and_whitelist(tmp_path):
+    """配置新键:缺省 = m2(固定一个模型对照,不逐模型重复);
+    白名单外(m9)给带字段名的中文报错。"""
+    cfg_path = tmp_path / "calibration.yaml"
+    cfg_path.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
+    cfg = load_calibration(cfg_path)
+    assert cfg.calibrate.suspect_review_model == "m2"
+
+    cfg_path.write_text("calibrate:\n  suspect_review_model: m9\n",
+                        encoding="utf-8")
+    with pytest.raises(ValueError, match="suspect_review_model"):
+        load_calibration(cfg_path)
