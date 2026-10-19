@@ -16,7 +16,6 @@ import pytest
 
 from calib.noise.immerkaer import immerkaer_sigma
 
-
 # ---- 行为 1:已知噪声回收(两式 × 三档,共 6 条断言,相对误差 < 5%)----
 
 @pytest.mark.parametrize("sigma_true", [2.0, 5.0, 12.0])
