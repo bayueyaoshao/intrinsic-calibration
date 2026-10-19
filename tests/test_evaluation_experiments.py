@@ -30,12 +30,11 @@ from calib.evaluation.experiments import (
     cv_pose_grouped,
     make_calibrate_fn,
 )
-from calib.evaluation.splitting import assign_cv_folds, unique_poses
+from calib.evaluation.splitting import assign_cv_folds, obs_rows, pose_row_mask, unique_poses
 from calib.io.config import BoardSpec, CalibrationConfig
 from calib.models import create_model
 from calib.solve.baseline import build_object_points
 from calib.solve.observation import ObservationSet
-from calib.evaluation.splitting import obs_rows, pose_row_mask
 
 
 def _assert_reports_equal(a, b, path="报告") -> None:
@@ -52,9 +51,14 @@ def _assert_reports_equal(a, b, path="报告") -> None:
         for i, (x, y) in enumerate(zip(a, b)):
             _assert_reports_equal(x, y, f"{path}[{i}]")
     elif isinstance(a, np.ndarray):
-        assert isinstance(b, np.ndarray) and a.shape == b.shape, \
+        assert isinstance(b, np.ndarray) and a.shape == b.shape, (
             f"{path}: 数组形状不一致 {a.shape} vs {getattr(b, 'shape', None)}"
-        assert np.array_equal(a, b, equal_nan=True), f"{path}: 数组数值不一致"
+        )
+        if a.dtype.kind == "f":
+            assert np.array_equal(a, b, equal_nan=True), f"{path}: 数组数值不一致"
+        else:
+            # 字符串/整数数组没有 NaN 可言,equal_nan 会直接报类型错
+            assert np.array_equal(a, b), f"{path}: 数组数值不一致"
     elif isinstance(a, float):
         if np.isnan(a):
             assert isinstance(b, float) and np.isnan(b), f"{path}: NaN 不对称"
@@ -82,26 +86,26 @@ def cv_setup(make_true_views):
         corner_source=("sb",) * 12,
     )
     base = CalibrationConfig()
-    cfg = replace(base, evaluate=replace(base.evaluate,
-                                         models=("m1", "m2"),
-                                         cv_n_folds=2,
-                                         cv_n_rounds=2,
-                                         evaluate_max_workers=1))
+    cfg = replace(
+        base,
+        evaluate=replace(
+            base.evaluate, models=("m1", "m2"), cv_n_folds=2, cv_n_rounds=2, evaluate_max_workers=1
+        ),
+    )
     optimizer_config = {"m1": {"loss": "linear"}, "m2": {"loss": "linear"}}
-    return {"obs": obs, "board": board, "cfg": cfg,
-            "optimizer_config": optimizer_config}
+    return {"obs": obs, "board": board, "cfg": cfg, "optimizer_config": optimizer_config}
 
 
 # ---------------------------------------------------------------------------
 # Task 1:cv_pose_grouped(行为 1–5)+ 求解胶水
 # ---------------------------------------------------------------------------
 
+
 def test_cv_fold_samples_and_zero_overlap(cv_setup):
     """行为 1:小样 2 轮 × 2 折 × 2 模型跑通;每模型折级样本数 = 轮 × 折 = 4;
     每折训练/验证姿态零交集且并集 = 全体(明细里的分配表逐折断言)。"""
     s = cv_setup
-    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"],
-                             s["optimizer_config"])
+    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
     assert report["schema"] == "cv-v1"
     assert set(report["models"]) == {"m1", "m2"}
 
@@ -112,29 +116,37 @@ def test_cv_fold_samples_and_zero_overlap(cv_setup):
     for k in range(n_folds_total):
         train = set(str(detail["assignment_train_poses"][k]).split(","))
         val = set(str(detail["assignment_val_poses"][k]).split(","))
-        assert not (train & val), \
-            f"第 {k} 折训练/验证姿态有交集:{sorted(train & val)}"
-        assert train | val == poses, \
+        assert not (train & val), f"第 {k} 折训练/验证姿态有交集:{sorted(train & val)}"
+        assert train | val == poses, (
             f"第 {k} 折两侧并集必须是全体姿态(缺:{sorted(poses - train - val)})"
+        )
 
     for m in ("m1", "m2"):
         summary = report["models"][m]
         assert len(summary["fold_heldout"]) == 4
         assert len(summary["fold_train"]) == 4
-        assert summary["n_failed_folds"] == 0, \
+        assert summary["n_failed_folds"] == 0, (
             f"{m} 在干净合成数据上不该有失败折:{summary['fold_rows']}"
-        assert all(v is not None and np.isfinite(v)
-                   for v in summary["fold_heldout"])
-        assert summary["mean_heldout_px"] == pytest.approx(
-            float(np.mean(summary["fold_heldout"])))
+        )
+        assert all(v is not None and np.isfinite(v) for v in summary["fold_heldout"])
+        assert summary["mean_heldout_px"] == pytest.approx(float(np.mean(summary["fold_heldout"])))
         assert summary["mean_train_px"] is not None
         assert summary["loss_used"] == "linear"
         # 折级行的键一个不少(消费面:04-03 判行表 + 04-05 落盘)
         for row in summary["fold_rows"]:
-            for key in ("round", "fold", "model_id", "train_rms_px",
-                        "heldout_px", "n_train_poses", "n_val_poses",
-                        "n_train_views", "n_val_views", "f_scale_actual",
-                        "failure_note"):
+            for key in (
+                "round",
+                "fold",
+                "model_id",
+                "train_rms_px",
+                "heldout_px",
+                "n_train_poses",
+                "n_val_poses",
+                "n_train_views",
+                "n_val_views",
+                "f_scale_actual",
+                "failure_note",
+            ):
                 assert key in row, f"折级行缺键:{key}"
 
 
@@ -146,28 +158,25 @@ def test_cv_pose_level_aggregation(cv_setup, monkeypatch):
     # 注册表:行 k(姿态 p = k//2,第 j = k%2 张)→ 受控 RMS = 1.0·p + 0.1·j
     registry = {}
     for k in range(12):
-        registry[s["obs"].image_points[k].tobytes()] = \
-            1.0 * (k // 2) + 0.1 * (k % 2)
+        registry[s["obs"].image_points[k].tobytes()] = 1.0 * (k // 2) + 0.1 * (k % 2)
 
     def fake_solve_pose_only(uv_view, object_points, params, model):
         return np.zeros(3), np.zeros(3), registry[uv_view.tobytes()]
 
-    monkeypatch.setattr(experiments_mod, "solve_pose_only",
-                        fake_solve_pose_only)
-    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"],
-                             s["optimizer_config"])
+    monkeypatch.setattr(experiments_mod, "solve_pose_only", fake_solve_pose_only)
+    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
 
     # 期望值从确定性分配表手算:姿态级 = 两张 RMS 的平均(相距 0.1,均值在正中)
     assignment = assign_cv_folds(unique_poses(s["obs"]), s["cfg"])
     pose_level = {f"pose_{p:02d}": 1.0 * p + 0.05 for p in range(6)}
     for m in ("m1", "m2"):
         for i, entry in enumerate(assignment):
-            expected = float(np.mean([pose_level[p]
-                                      for p in entry["val_poses"]]))
+            expected = float(np.mean([pose_level[p] for p in entry["val_poses"]]))
             got = report["models"][m]["fold_heldout"][i]
             assert got == pytest.approx(expected), (
                 f"{m} 折 {i}(验证姿态 {entry['val_poses']})的折级 held-out "
-                f"应为姿态级误差的均值 {expected},实际 {got}")
+                f"应为姿态级误差的均值 {expected},实际 {got}"
+            )
 
     # per_pose_rows:每个(模型, 折, 验证姿态)恰一行,数值 = 姿态两张的平均
     rows = report["per_pose_rows"]
@@ -196,33 +205,35 @@ def test_cv_validation_extrinsics_never_trained(cv_setup, monkeypatch):
     train_snapshots: list[tuple[tuple[str, ...], float | None]] = []
     real_solve = experiments_mod.solve_with_scipy
 
-    def spy_solve(obs, model, cfg, init=None, loss="linear",
-                  rms_linear_ref=None):
+    def spy_solve(obs, model, cfg, init=None, loss="linear", rms_linear_ref=None):
         train_snapshots.append((tuple(obs.pose_ids), rms_linear_ref))
-        return real_solve(obs, model, cfg, init=init, loss=loss,
-                          rms_linear_ref=rms_linear_ref)
+        return real_solve(obs, model, cfg, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
 
     monkeypatch.setattr(experiments_mod, "solve_with_scipy", spy_solve)
 
-    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"],
-                             s["optimizer_config"])
+    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
     assert report["schema"] == "cv-v1"
 
     assignment = assign_cv_folds(unique_poses(s["obs"]), s["cfg"])
     n_val_scores = sum(len(e["val_poses"]) for e in assignment) * 2
     assert len(pnp_calls) == 2 * n_val_scores, (
         f"只估位姿评分次数应恰为 模型 × 验证打分数 = {2 * n_val_scores},"
-        f"实际 {len(pnp_calls)}——训练侧绝不该走 solve_pose_only")
-    assert len(set(pnp_calls)) == len(pnp_calls), \
-        "同一张照片被重复打分,评分对账不上"
+        f"实际 {len(pnp_calls)}——训练侧绝不该走 solve_pose_only"
+    )
+    # 每张照片的评分次数 = 它进验证的次数(每姿态每轮进验证 1 次):
+    # 出现未知数组才说明训练侧混进了只估位姿评分
+    all_view_keys = {s["obs"].image_points[k].tobytes() for k in range(12)}
+    assert set(pnp_calls) == all_view_keys, (
+        "评分对象应恰为观测集全部照片(多了 = 训练侧混入,少了 = 漏评)"
+    )
 
     assert len(train_snapshots) == 2 * len(assignment)
     for train_poses, rms_ref in train_snapshots:
-        assert len(train_poses) == 6, \
+        assert len(train_poses) == 6, (
             f"训练观测集行数应是 训练姿态 3 × 2 张 = 6,实际 {len(train_poses)}"
+        )
         assert len(set(train_poses)) == 3, "训练观测集应恰含 3 个姿态"
-        assert rms_ref is not None, \
-            "折内精化必带 rms_linear_ref(Anti-Pattern 5:漏传让收敛判定失真)"
+        assert rms_ref is not None, "折内精化必带 rms_linear_ref(Anti-Pattern 5:漏传让收敛判定失真)"
 
 
 def test_cv_same_seed_reruns_bit_identical(cv_setup):
@@ -242,12 +253,10 @@ def test_cv_fold_failure_becomes_contract_not_crash(cv_setup, monkeypatch):
     def boom(obs, model, cfg, init=None, loss="linear", rms_linear_ref=None):
         if model.model_id == "m2":
             raise RuntimeError("人为注入的求解爆炸")
-        return real_solve(obs, model, cfg, init=init, loss=loss,
-                          rms_linear_ref=rms_linear_ref)
+        return real_solve(obs, model, cfg, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
 
     monkeypatch.setattr(experiments_mod, "solve_with_scipy", boom)
-    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"],
-                             s["optimizer_config"])
+    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
 
     m2 = report["models"]["m2"]
     assert m2["n_failed_folds"] == 4
@@ -263,8 +272,7 @@ def test_cv_fold_failure_becomes_contract_not_crash(cv_setup, monkeypatch):
     assert all(v is not None for v in m1["fold_heldout"])
 
 
-def test_make_calibrate_fn_cv_refine_carries_rms_linear_ref(cv_setup,
-                                                            monkeypatch):
+def test_make_calibrate_fn_cv_refine_carries_rms_linear_ref(cv_setup, monkeypatch):
     """求解胶水:make_calibrate_fn 先 OpenCV 初值再 scipy 精化,精化实参
     必带 rms_linear_ref = OpenCV 初值的回代 RMS;f_scale 只在显式给出时
     才覆盖配置(推荐配置带 f_scale_px 的情形,D-13)。"""
@@ -274,18 +282,15 @@ def test_make_calibrate_fn_cv_refine_carries_rms_linear_ref(cv_setup,
     real_scipy = experiments_mod.solve_with_scipy
     real_opencv = experiments_mod.solve_with_opencv
 
-    def spy_scipy(obs, model, cfg, init=None, loss="linear",
-                  rms_linear_ref=None):
+    def spy_scipy(obs, model, cfg, init=None, loss="linear", rms_linear_ref=None):
         captured["loss"] = loss
         captured["rms_linear_ref"] = rms_linear_ref
         captured["f_scale"] = cfg.f_scale
-        return real_scipy(obs, model, cfg, init=init, loss=loss,
-                          rms_linear_ref=rms_linear_ref)
+        return real_scipy(obs, model, cfg, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
 
     monkeypatch.setattr(experiments_mod, "solve_with_scipy", spy_scipy)
 
-    train_obs = obs_rows(s["obs"], pose_row_mask(
-        s["obs"], ["pose_00", "pose_01", "pose_02"]))
+    train_obs = obs_rows(s["obs"], pose_row_mask(s["obs"], ["pose_00", "pose_01", "pose_02"]))
     calibrate_fn = make_calibrate_fn(model, s["cfg"].calibrate.scipy, "linear")
     result = calibrate_fn(train_obs)
     assert result.converged, f"合成数据上应收敛:{result.failure_note}"
@@ -296,11 +301,11 @@ def test_make_calibrate_fn_cv_refine_carries_rms_linear_ref(cv_setup,
     assert captured["f_scale"] == "auto", "没显式给 f_scale 就该保持配置原值"
 
     captured.clear()
-    calibrate_fs = make_calibrate_fn(model, s["cfg"].calibrate.scipy,
-                                     "soft_l1", f_scale=2.5)
+    calibrate_fs = make_calibrate_fn(model, s["cfg"].calibrate.scipy, "soft_l1", f_scale=2.5)
     calibrate_fs(train_obs)
-    assert captured["f_scale"] == pytest.approx(2.5), \
+    assert captured["f_scale"] == pytest.approx(2.5), (
         "推荐配置显式给出 f_scale_px 时必须覆盖 auto 档"
+    )
 
 
 def test_px_dispersion_pixel_equivalence():
@@ -309,15 +314,16 @@ def test_px_dispersion_pixel_equivalence():
     像素说话,不用相对百分比(近零畸变参数的相对值无意义)。"""
     board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
     model = create_model("m1")
-    params_a = dict(zip(model.param_names,
-                        (800.0, 800.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0)))
+    params_a = dict(zip(model.param_names, (800.0, 800.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0)))
     params_b = dict(params_a, fx=801.0)
     objp = build_object_points(board)
-    disp = _px_dispersion([params_a, params_b], model, objp,
-                          np.zeros(3), np.array([0.0, 0.0, 800.0]))
-    x_norm = np.abs(objp[:, 0]) / 800.0   # 正对位姿:深度 800,归一化 = x/Z
+    disp = _px_dispersion(
+        [params_a, params_b], model, objp, np.zeros(3), np.array([0.0, 0.0, 800.0])
+    )
+    x_norm = np.abs(objp[:, 0]) / 800.0  # 正对位姿:深度 800,归一化 = x/Z
     assert disp == pytest.approx(float(x_norm.max()), abs=1e-9)
-    assert disp == pytest.approx(0.125, abs=1e-9)
+    # 网格从原点排开(build_object_points 不居中):最远角 x = 10 格 × 20mm
+    # = 200mm → 归一化 0.25,Δfx = 1 像素的最大位移 = 0.25 px(手算锁死)
+    assert disp == pytest.approx(0.25, abs=1e-9)
     # 单组参数无从谈"两两之间"的位移,返回 0 不崩
-    assert _px_dispersion([params_a], model, objp,
-                          np.zeros(3), np.array([0.0, 0.0, 800.0])) == 0.0
+    assert _px_dispersion([params_a], model, objp, np.zeros(3), np.array([0.0, 0.0, 800.0])) == 0.0
