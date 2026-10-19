@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from calib.evaluation.parallel import run_parallel
 from calib.io.config import load_board, load_calibration
 from calib.util.lineage import make_lineage, sha256_file
 
@@ -499,6 +500,166 @@ def test_fisher_bool_field_rejects_int(tmp_path):
     with pytest.raises(ValueError) as exc_info:
         load_calibration(p)
     assert "fisher.linearization_check" in str(exc_info.value)
+
+
+# ---- 第⑥步防作弊考试:evaluate 段进配置(25 键契约,D-12:参数只从 config 读)----
+
+def _write_evaluate(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "calibration.yaml"
+    p.write_text(f"evaluate:\n{text}", encoding="utf-8")
+    return p
+
+
+def test_evaluate_defaults_when_section_missing(tmp_path):
+    """evaluate 段整体缺省:25 个键全部走内置默认(契约一次定死)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
+    ev = load_calibration(p).evaluate
+    assert ev.models == ("m1", "m2", "m3", "m4")
+    assert ev.optimizer_losses == ("linear", "soft_l1", "huber", "cauchy")
+    assert ev.cv_n_folds == 5
+    assert ev.cv_n_rounds == 5
+    assert ev.bootstrap_n == 200
+    assert ev.slice_enabled is True
+    assert ev.lopo_enabled is True
+    assert ev.evaluate_max_workers == 8
+    assert ev.tie_band_px == pytest.approx(0.005)
+    assert ev.tie_band_rel == pytest.approx(0.02)
+    assert ev.bic_enabled is True
+    assert ev.bic_n_poses == 80
+    assert ev.mad_z_threshold == pytest.approx(3.5)
+    assert ev.crlb_alert_alpha_hard == pytest.approx(0.01)
+    assert ev.crlb_alert_alpha_soft == pytest.approx(0.05)
+    assert ev.gen_overfit_ratio_max == pytest.approx(1.5)
+    assert ev.stability_disp_px_max == pytest.approx(0.05)
+    assert ev.multistart_n == 10
+    assert ev.multistart_n_fisheye == 20
+    assert ev.multistart_intr_rel == pytest.approx(0.02)
+    assert ev.multistart_dist_rel == pytest.approx(0.10)
+    assert ev.multistart_rot_deg == pytest.approx(1.0)
+    assert ev.multistart_trans_rel == pytest.approx(0.02)
+    assert ev.multistart_rms_tol_px == pytest.approx(0.001)
+    assert ev.multistart_param_tol_px == pytest.approx(0.1)
+
+
+def test_evaluate_repo_yaml_values():
+    """真实 calibration.yaml 的 evaluate 段:逐键与内置默认一致(契约锚定)。"""
+    ev = load_calibration(REAL_CALIB).evaluate
+    assert ev.models == ("m1", "m2", "m3", "m4")
+    assert ev.optimizer_losses == ("linear", "soft_l1", "huber", "cauchy")
+    assert (ev.cv_n_folds, ev.cv_n_rounds, ev.bootstrap_n) == (5, 5, 200)
+    assert ev.slice_enabled is True and ev.lopo_enabled is True
+    assert ev.evaluate_max_workers == 8
+    assert ev.tie_band_px == pytest.approx(0.005)
+    assert ev.tie_band_rel == pytest.approx(0.02)
+    assert ev.bic_enabled is True and ev.bic_n_poses == 80
+    assert ev.mad_z_threshold == pytest.approx(3.5)
+    assert (ev.crlb_alert_alpha_hard, ev.crlb_alert_alpha_soft) == (0.01, 0.05)
+    assert ev.gen_overfit_ratio_max == pytest.approx(1.5)
+    assert ev.stability_disp_px_max == pytest.approx(0.05)
+    assert (ev.multistart_n, ev.multistart_n_fisheye) == (10, 20)
+    assert ev.multistart_intr_rel == pytest.approx(0.02)
+    assert ev.multistart_dist_rel == pytest.approx(0.10)
+    assert ev.multistart_rot_deg == pytest.approx(1.0)
+    assert ev.multistart_trans_rel == pytest.approx(0.02)
+    assert ev.multistart_rms_tol_px == pytest.approx(0.001)
+    assert ev.multistart_param_tol_px == pytest.approx(0.1)
+
+
+def test_evaluate_bad_model_name_chinese_error(tmp_path):
+    """models 混入 "m9":报错点名 evaluate.models 并给出可选清单。"""
+    p = _write_evaluate(tmp_path, "  models: [m1, m9]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "evaluate.models" in message
+    assert "m9" in message and "可选" in message
+
+
+def test_evaluate_bad_loss_name_chinese_error(tmp_path):
+    """optimizer_losses 混入 "l1":报错点名 evaluate.optimizer_losses 并列可选。"""
+    p = _write_evaluate(tmp_path, "  optimizer_losses: [linear, l1]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "evaluate.optimizer_losses" in message
+    assert "l1" in message and "可选" in message
+
+
+def test_evaluate_losses_missing_linear_rejected(tmp_path):
+    """optimizer_losses 缺 linear:没有归一参照,对比没有基准,配置层拦下。"""
+    p = _write_evaluate(tmp_path, "  optimizer_losses: [soft_l1, huber]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "evaluate.optimizer_losses" in message
+    assert "linear" in message
+
+
+def test_evaluate_cv_n_folds_one_rejected(tmp_path):
+    """cv_n_folds = 1:1 折留不出考题,报错点名 evaluate.cv_n_folds。"""
+    p = _write_evaluate(tmp_path, "  cv_n_folds: 1\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "evaluate.cv_n_folds" in message
+    assert "2" in message  # 消息里带合法下限
+
+
+def test_evaluate_workers_zero_rejected(tmp_path):
+    """evaluate_max_workers = 0:必须 >= 1,报错点名字段。"""
+    p = _write_evaluate(tmp_path, "  evaluate_max_workers: 0\n")
+    with pytest.raises(ValueError, match="evaluate\\.evaluate_max_workers"):
+        load_calibration(p)
+
+
+def test_evaluate_alpha_order_violation(tmp_path):
+    """硬告警显著性 >= 边缘提示:告警线失去分档意义,报错点名两个字段。"""
+    p = _write_evaluate(
+        tmp_path, "  crlb_alert_alpha_hard: 0.05\n  crlb_alert_alpha_soft: 0.01\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "crlb_alert_alpha_hard" in message and "crlb_alert_alpha_soft" in message
+
+
+def test_evaluate_bool_field_rejects_int(tmp_path):
+    """布尔键写 1/0(yaml 手写常见笔误):必须报错并点名字段。"""
+    p = _write_evaluate(tmp_path, "  slice_enabled: 1\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    assert "evaluate.slice_enabled" in str(exc_info.value)
+
+
+# ---- 任务级并行助手:串行回退与并行同序同结果 ----
+
+def _square_worker(task: tuple) -> int:
+    """测试用小 worker:返回 (x+1)^2,验证任务顺序与结果一一对应。"""
+    (x,) = task
+    return (x + 1) ** 2
+
+
+def test_run_parallel_serial_and_parallel_same_order_same_results():
+    """run_parallel 在 max_workers=1 与 2 下对纯函数 worker 产出同序同结果。"""
+    tasks = [(i,) for i in range(12)]
+    serial = list(run_parallel(tasks, _square_worker, 1))
+    parallel = list(run_parallel(tasks, _square_worker, 2))
+    assert serial == [(i + 1) ** 2 for i in range(12)]
+    assert parallel == serial
+
+
+def test_run_parallel_progress_counts_to_total():
+    """进度回调逐任务播报:done 从 1 数到 total;串行与并行播报节奏一致。"""
+    tasks = [(i,) for i in range(5)]
+    seen_serial: list[dict] = []
+    list(run_parallel(tasks, _square_worker, 1,
+                      progress=lambda d: seen_serial.append(d)))
+    seen_parallel: list[dict] = []
+    list(run_parallel(tasks, _square_worker, 2,
+                      progress=lambda d: seen_parallel.append(d)))
+    expected = [{"done": i, "total": 5} for i in range(1, 6)]
+    assert seen_serial == expected
+    assert seen_parallel == expected
 
 
 # ---- 血缘指纹(ITER-01 地基)----

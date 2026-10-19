@@ -46,6 +46,10 @@ _ALLOWED_IMMERKAER_VARIANTS = {"std", "robust"}
 _ALLOWED_TEMPORAL_POOLING = {"rms", "median"}
 # 噪声分析处理哪些数据划分:train 连拍 + test 独立照默认都算,逐张来源标注
 _ALLOWED_NOISE_SPLITS = {"train", "test"}
+# evaluate 段的鲁棒核白名单(阶段四优化器对比 D-14 的四核矩阵):
+# 比 calibrate.scipy 的名单多 cauchy(Cauchy 核,对离群残差压制更狠)——
+# 阶段四做全核对比,calibrate 段的主线配置不必跟进
+_ALLOWED_EVAL_LOSSES = {"linear", "soft_l1", "huber", "cauchy"}
 
 
 @dataclass(frozen=True)
@@ -267,6 +271,79 @@ class FisherConfig:
 
 
 @dataclass(frozen=True)
+class EvaluateConfig:
+    """第⑥步防作弊考试(交叉验证 / bootstrap / 重复张分组 / 留一姿态)的全部参数。
+
+    白话背景:这一步回答"这批参数换了没见过的照片还准不准"——把 80 个姿态
+    反复换着分组当"考题",每个相机模型都考一遍,再配合参数稳定性检查与
+    理论精度下界对照,挑出当前数据下最合适的模型。下面的字段控制考试怎么
+    出题(切分次数)、怎么判卷(判据阈值)、以及并行开多大。
+
+    契约承诺:本阶段(04)全部实验计划只读本配置,键集合一次定死,
+    后续计划不改不删——改契约必须回到本文件与 yaml evaluate 段同步改。
+    """
+
+    # 参选模型(D-11:四个全部参选,不因 Fisher 退化预警预否决——
+    # 过拟合会在交叉验证的考题上自己显形)
+    models: tuple[str, ...] = ("m1", "m2", "m3", "m4")
+    # 优化器对比的鲁棒核名单(D-14:4 核 × 4 模型全矩阵;
+    # linear 是主线,必须包含——它是"其他核有没有更好"的归一参照)
+    optimizer_losses: tuple[str, ...] = ("linear", "soft_l1", "huber", "cauchy")
+    # 交叉验证折数与重复轮数(D-01:5 折 × 5 轮,每姿态恰好 5 次进验证;
+    # 折数 ≥ 2 是交叉验证的最低要求,1 折等于不考)
+    cv_n_folds: int = 5
+    cv_n_rounds: int = 5
+    # bootstrap 重采样次数(D-04:按姿态有放回重采 200 次,4 模型共用同批)
+    bootstrap_n: int = 200
+    # 重复张分组实验开关(D-05:每姿态取第 i 张组成数据组,量纯噪声影响)
+    slice_enabled: bool = True
+    # 留一姿态实验开关(D-08:每次留 1 个姿态当考题,排查问题姿态)
+    lopo_enabled: bool = True
+    # 并行进程上限(实验按"一次完整求解"切任务;1 = 不开子进程,串行调试;
+    # 参照 injection_max_workers 体例,默认 8 给系统留核)
+    evaluate_max_workers: int = 8
+    # 统计平局的等价带(D-09):两模型同折配对误差差落入
+    # ±max(tie_band_px 像素, tie_band_rel × 较简模型均值)内判"统计平局",
+    # 平局取更简模型。像素绝对带 > 0;相对带在 0 到 1 之间
+    tie_band_px: float = 0.005
+    tie_band_rel: float = 0.02
+    # BIC 平局裁决器开关与有效姿态数(D-10:BIC = 惩罚参数数量的模型比较量,
+    # 只在统计平局时启用;n 锁有效姿态数 80,不给 640——640 会把复杂模型
+    # 的惩罚弱化约 8 倍,Phase 3 研究已锁死)
+    bic_enabled: bool = True
+    bic_n_poses: int = 80
+    # 问题姿态的离群判据(D-08):留一姿态误差的稳健 z 分数超过它判"问题姿态",
+    # 与入库体检的模糊度判据同源(3.5 ≈ 千分之二误报率的统计惯例)
+    mad_z_threshold: float = 3.5
+    # "实测好于理论下界"硬告警的两档显著性(D-06:实测不确定度低于 CRLB
+    # 下界在物理上不可能,说明对照口径错了)。hard 达到判 FAIL + 告警,
+    # soft 只提示边缘;两者都在 0 到 0.5 之间,且 hard < soft(告警线有序)
+    crlb_alert_alpha_hard: float = 0.01
+    crlb_alert_alpha_soft: float = 0.05
+    # 泛化判据的执行位:折级"验证误差 / 训练误差"比值上限——比值超它判
+    # 过拟合显形(训练好考题差)。宽松默认 1.5,判行表同时呈现绝对数值
+    gen_overfit_ratio_max: float = 1.5
+    # 稳定判据的执行位:参数扰动换算成典型视场投影位移的上限(像素当量)。
+    # 宽松默认待真实数据校准(04-RESEARCH Open Q1),合法范围 > 0
+    stability_disp_px_max: float = 0.05
+    # 多起点一致性检验次数(D-15:从 OpenCV 初值加扰动重复求解,验"解唯一";
+    # 鱼眼 m4 初值敏感,次数加倍)
+    multistart_n: int = 10
+    multistart_n_fisheye: int = 20
+    # 多起点扰动幅度表(04-RESEARCH Pattern 6:内参相对扰动 ±2%、
+    # 畸变相对 ±10%、旋转约 1°、平移相对 ±2%,全部 > 0)
+    multistart_intr_rel: float = 0.02
+    multistart_dist_rel: float = 0.10
+    multistart_rot_deg: float = 1.0
+    multistart_trans_rel: float = 0.02
+    # 多起点收敛判据的双容差:重投影 RMS 差 < 0.001 px 且内参位移当量
+    # < 0.1 px 才算"收敛到同一解"(双容差同时满足,单一容差容易被
+    # 参数漂移糊弄过去)
+    multistart_rms_tol_px: float = 0.001
+    multistart_param_tol_px: float = 0.1
+
+
+@dataclass(frozen=True)
 class MosaicConfig:
     """汇总拼图的布局参数(拼图只是索引,不是逐帧副本的替代)。"""
 
@@ -297,6 +374,7 @@ class CalibrationConfig:
     calibrate: CalibrateConfig = field(default_factory=CalibrateConfig)
     noise: NoiseConfig = field(default_factory=NoiseConfig)
     fisher: FisherConfig = field(default_factory=FisherConfig)
+    evaluate: EvaluateConfig = field(default_factory=EvaluateConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
 
 
@@ -709,6 +787,155 @@ def _parse_fisher(raw: dict) -> FisherConfig:
                         crosscheck_enabled=crosscheck)
 
 
+def _parse_evaluate(raw: dict) -> EvaluateConfig:
+    """解析 evaluate 段:参选名单、考试规模、判据阈值、多起点与并行上限。
+
+    校验要点(防手写配置放大成资源浪费或错误实验):
+    - 模型短名与核名走白名单;核名单必须含 linear(linear 是"其他核有没有
+      更好"的归一参照,缺了它对比就没有基准);
+    - 计数键 ≥ 1、折数 ≥ 2(1 折等于不考)、并行进程 ≥ 1;
+    - 两个告警显著性都在 0 到 0.5 之间且 hard < soft(告警线必须有序);
+    - 等价带像素值 > 0、相对带在 0 到 1 之间、全部幅度/容差 > 0;
+    - 布尔键先判 isinstance bool 再拒其余(整数 1/0 是 yaml 手写最常见笔误)。
+    """
+    cfg = EvaluateConfig()
+    section = _check_is_dict(raw.get("evaluate", {}), "evaluate")
+
+    models = section.get("models", cfg.models)
+    if (not isinstance(models, (list, tuple)) or not models
+            or not all(isinstance(x, str) for x in models)):
+        _fail("evaluate.models", models, "必须是非空的模型短名名单(如 [m1, m2, m3, m4])")
+    bad_models = [x for x in models if x not in _ALLOWED_MODEL_IDS]
+    if bad_models:
+        _fail("evaluate.models", bad_models,
+              f"含有不认识的模型短名;可选:{sorted(_ALLOWED_MODEL_IDS)}")
+
+    losses = section.get("optimizer_losses", cfg.optimizer_losses)
+    if (not isinstance(losses, (list, tuple)) or not losses
+            or not all(isinstance(x, str) for x in losses)):
+        _fail("evaluate.optimizer_losses", losses,
+              "必须是非空的鲁棒核名单(如 [linear, soft_l1, huber, cauchy])")
+    bad_losses = [x for x in losses if x not in _ALLOWED_EVAL_LOSSES]
+    if bad_losses:
+        _fail("evaluate.optimizer_losses", bad_losses,
+              f"含有不认识的鲁棒核;可选:{sorted(_ALLOWED_EVAL_LOSSES)}")
+    if "linear" not in losses:
+        _fail("evaluate.optimizer_losses", losses,
+              f"必须包含 linear(它是其他核的归一参照);当前名单:{list(losses)}")
+
+    # 计数键:全部 >= 1;折数另要求 >= 2(1 折没有"留出的考题"可言)
+    counts = (("cv_n_rounds", cfg.cv_n_rounds), ("bootstrap_n", cfg.bootstrap_n),
+              ("bic_n_poses", cfg.bic_n_poses), ("multistart_n", cfg.multistart_n),
+              ("multistart_n_fisheye", cfg.multistart_n_fisheye))
+    for name, default in counts:
+        value = section.get(name, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            _fail(f"evaluate.{name}", value, "必须是 >= 1 的整数(次数/数量配置)")
+    cv_n_folds = section.get("cv_n_folds", cfg.cv_n_folds)
+    if not isinstance(cv_n_folds, int) or isinstance(cv_n_folds, bool) or cv_n_folds < 2:
+        _fail("evaluate.cv_n_folds", cv_n_folds,
+              "必须是 >= 2 的整数(1 折留不出考题,交叉验证至少两折)")
+
+    workers = section.get("evaluate_max_workers", cfg.evaluate_max_workers)
+    if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
+        _fail("evaluate.evaluate_max_workers", workers,
+              "必须是 >= 1 的整数(1 = 不开子进程串行调试;并行交给 joblib 调度,"
+              "不必卡着本机核数写)")
+
+    # 等价带(D-09):像素绝对带 > 0;相对带在 0 到 1 之间
+    tie_px = section.get("tie_band_px", cfg.tie_band_px)
+    if not isinstance(tie_px, int | float) or isinstance(tie_px, bool) or tie_px <= 0:
+        _fail("evaluate.tie_band_px", tie_px,
+              "必须是 > 0 的数(统计平局的等价带,像素)")
+    tie_rel = section.get("tie_band_rel", cfg.tie_band_rel)
+    if (not isinstance(tie_rel, int | float) or isinstance(tie_rel, bool)
+            or not 0 < tie_rel < 1):
+        _fail("evaluate.tie_band_rel", tie_rel,
+              "必须是 0 到 1 之间的小数(等价带的相对半宽,如 0.02 = 较简模型均值的 2%)")
+
+    # 离群判据与告警显著性:阈值 > 0;两个显著性在 (0, 0.5) 且 hard < soft
+    mad_z = section.get("mad_z_threshold", cfg.mad_z_threshold)
+    if not isinstance(mad_z, int | float) or isinstance(mad_z, bool) or mad_z <= 0:
+        _fail("evaluate.mad_z_threshold", mad_z,
+              "必须是 > 0 的数(留一姿态误差的稳健 z 分数报警线)")
+    alpha_hard = section.get("crlb_alert_alpha_hard", cfg.crlb_alert_alpha_hard)
+    alpha_soft = section.get("crlb_alert_alpha_soft", cfg.crlb_alert_alpha_soft)
+    for name, value in (("crlb_alert_alpha_hard", alpha_hard),
+                        ("crlb_alert_alpha_soft", alpha_soft)):
+        if (not isinstance(value, int | float) or isinstance(value, bool)
+                or not 0 < value < 0.5):
+            _fail(f"evaluate.{name}", value,
+                  "必须是 0 到 0.5 之间的小数(显著性水平,越小告警越严)")
+    if alpha_hard >= alpha_soft:
+        _fail("evaluate.crlb_alert_alpha_hard", (alpha_hard, alpha_soft),
+              f"硬告警显著性必须小于边缘提示显著性(crlb_alert_alpha_soft = "
+              f"{alpha_soft!r}),否则告警线失去分档意义")
+
+    # 判据执行位:过拟合比值上限 > 1(等于 1 意味着验证误差必须不高于训练误差,
+    # 噪声下不可能);稳定位移上限 > 0
+    ratio_max = section.get("gen_overfit_ratio_max", cfg.gen_overfit_ratio_max)
+    if not isinstance(ratio_max, int | float) or isinstance(ratio_max, bool) or ratio_max <= 1:
+        _fail("evaluate.gen_overfit_ratio_max", ratio_max,
+              "必须是 > 1 的数(折级验证/训练误差比上限;噪声的存在让恰好 1 不可能,"
+              "过拟合显形要留出噪声余量)")
+    disp_max = section.get("stability_disp_px_max", cfg.stability_disp_px_max)
+    if not isinstance(disp_max, int | float) or isinstance(disp_max, bool) or disp_max <= 0:
+        _fail("evaluate.stability_disp_px_max", disp_max,
+              "必须是 > 0 的数(参数扰动的投影位移上限,像素当量)")
+
+    # 多起点扰动幅度与双容差:全部 > 0
+    amps = (("multistart_intr_rel", cfg.multistart_intr_rel),
+            ("multistart_dist_rel", cfg.multistart_dist_rel),
+            ("multistart_rot_deg", cfg.multistart_rot_deg),
+            ("multistart_trans_rel", cfg.multistart_trans_rel),
+            ("multistart_rms_tol_px", cfg.multistart_rms_tol_px),
+            ("multistart_param_tol_px", cfg.multistart_param_tol_px))
+    for name, default in amps:
+        value = section.get(name, default)
+        if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0:
+            _fail(f"evaluate.{name}", value,
+                  "必须是 > 0 的数(多起点扰动幅度/收敛容差,幅度为零等于不扰动)")
+
+    # 三个布尔键:先判 bool 再拒其余(整数 1/0 是 yaml 手写时最常见的笔误)
+    bools = (("slice_enabled", cfg.slice_enabled, "是否做重复张分组实验"),
+             ("lopo_enabled", cfg.lopo_enabled, "是否做留一姿态实验"),
+             ("bic_enabled", cfg.bic_enabled, "统计平局时是否用 BIC 裁决"))
+    for name, default, purpose in bools:
+        value = section.get(name, default)
+        if not isinstance(value, bool):
+            _fail(f"evaluate.{name}", value, f"必须是 true 或 false({purpose})")
+
+    return EvaluateConfig(
+        models=tuple(models),
+        optimizer_losses=tuple(losses),
+        cv_n_folds=cv_n_folds,
+        cv_n_rounds=section.get("cv_n_rounds", cfg.cv_n_rounds),
+        bootstrap_n=section.get("bootstrap_n", cfg.bootstrap_n),
+        slice_enabled=section.get("slice_enabled", cfg.slice_enabled),
+        lopo_enabled=section.get("lopo_enabled", cfg.lopo_enabled),
+        evaluate_max_workers=workers,
+        tie_band_px=float(tie_px),
+        tie_band_rel=float(tie_rel),
+        bic_enabled=section.get("bic_enabled", cfg.bic_enabled),
+        bic_n_poses=section.get("bic_n_poses", cfg.bic_n_poses),
+        mad_z_threshold=float(mad_z),
+        crlb_alert_alpha_hard=float(alpha_hard),
+        crlb_alert_alpha_soft=float(alpha_soft),
+        gen_overfit_ratio_max=float(ratio_max),
+        stability_disp_px_max=float(disp_max),
+        multistart_n=section.get("multistart_n", cfg.multistart_n),
+        multistart_n_fisheye=section.get("multistart_n_fisheye", cfg.multistart_n_fisheye),
+        multistart_intr_rel=float(section.get("multistart_intr_rel", cfg.multistart_intr_rel)),
+        multistart_dist_rel=float(section.get("multistart_dist_rel", cfg.multistart_dist_rel)),
+        multistart_rot_deg=float(section.get("multistart_rot_deg", cfg.multistart_rot_deg)),
+        multistart_trans_rel=float(section.get("multistart_trans_rel", cfg.multistart_trans_rel)),
+        multistart_rms_tol_px=float(section.get("multistart_rms_tol_px",
+                                                cfg.multistart_rms_tol_px)),
+        multistart_param_tol_px=float(section.get("multistart_param_tol_px",
+                                                  cfg.multistart_param_tol_px)),
+    )
+
+
 def _parse_visualization(raw: dict) -> VisualizationConfig:
     section = _check_is_dict(raw.get("visualization", {}), "visualization")
     quality = section.get("jpeg_quality", VisualizationConfig.jpeg_quality)
@@ -781,5 +1008,6 @@ def load_calibration(path: Path | str) -> CalibrationConfig:
         calibrate=_parse_calibrate(top.get("calibrate", {})),
         noise=_parse_noise(top),
         fisher=_parse_fisher(top),
+        evaluate=_parse_evaluate(top),
         visualization=_parse_visualization(top),
     )
