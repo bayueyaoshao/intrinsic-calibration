@@ -1549,8 +1549,8 @@ def evaluate() -> None:
             typer.echo(f"    {m} 多起点一致性:{blk['n_converged']}/{blk['n_starts']}"
                        f" 收敛,判定 {blk['verdict']}")
     if selection and selection.get("verdicts"):
-        typer.echo(f"  判行表(三判据:泛化 = 考题误差没因训练起飞 / 稳定 = 换姿态"
-                   f"重标参数挪动小 / 逼近 CRLB = 实测不高于理论下界):")
+        typer.echo("  判行表(三判据:泛化 = 考题误差没因训练起飞 / 稳定 = 换姿态"
+                   "重标参数挪动小 / 逼近 CRLB = 实测不高于理论下界):")
         typer.echo(f"    {'模型':<6}{'held-out(px)':<14}{'训练(px)':<12}"
                    f"{'过拟合比':<10}{'位移当量(px)':<14}{'BIC':<14}{'判定':<6}")
         for row in selection["verdicts"]:
