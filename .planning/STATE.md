@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-18T07:38:24.167Z"
+last_updated: "2026-10-19T03:24:30.120Z"
 progress:
   total_phases: 6
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 17
-  completed_plans: 11
-  percent: 33
+  completed_plans: 17
+  percent: 50
 ---
 
 # STATE: intrinsic-calibration
@@ -22,13 +22,14 @@ progress:
 
 ## Current Position
 
-Phase: 03 (fisher-crlb) — EXECUTING
-Plan: 1 of 6
+Phase: 03 (fisher-crlb) — PLANS COMPLETE,AWAITING VERIFICATION
 
 - **Phase:** 3
-- **Plan:** Not started
-- **Status:** Executing Phase 03
-- **Progress:** `[█░░░░░░░░░] 1/6 phases`
+- **Plan:** 6 of 6(全部完成,含人工核查检查点通过)
+- **Status:** Phase 03 执行完毕,待 code review / 回归门 / verify 后关相
+- **Progress:** [█████-----] 50%(3/6 相)
+- **备注:** 检查点发现并修复条件数单位伪影(0a9b247),修正后谱产物
+  output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
 
 ## Performance Metrics
 
