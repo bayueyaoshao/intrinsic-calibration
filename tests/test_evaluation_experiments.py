@@ -20,15 +20,19 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.sparse import csr_matrix
 
 from calib.evaluation import experiments as experiments_mod
 from calib.evaluation.experiments import (
     _px_dispersion,
     cv_pose_grouped,
+    lopo,
     make_calibrate_fn,
+    slices_by_index,
 )
 from calib.evaluation.splitting import assign_cv_folds, obs_rows, pose_row_mask, unique_poses
 from calib.io.config import BoardSpec, CalibrationConfig
@@ -327,3 +331,179 @@ def test_px_dispersion_pixel_equivalence():
     assert disp == pytest.approx(0.25, abs=1e-9)
     # 单组参数无从谈"两两之间"的位移,返回 0 不崩
     assert _px_dispersion([params_a], model, objp, np.zeros(3), np.array([0.0, 0.0, 800.0])) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Task 2:lopo(行为 1–2)+ slices_by_index(行为 3–5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def slice_setup(make_true_views):
+    """重复张分组地基:3 姿态 × 2 张(组数 = 最少重复张数 = 2)+ 时域 σ。"""
+    views, _k = make_true_views(n_views=6)
+    board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+    obs = ObservationSet(
+        image_ids=tuple(f"img_{k:02d}" for k in range(6)),
+        pose_ids=tuple(f"pose_{k // 2:02d}" for k in range(6)),
+        object_points=build_object_points(board),
+        image_points=np.asarray(views, dtype=np.float64),
+        image_size=(640, 480),
+        corner_source=("sb",) * 6,
+    )
+    base = CalibrationConfig()
+    cfg = replace(base, evaluate=replace(base.evaluate, models=("m1",), evaluate_max_workers=1))
+    return {"obs": obs, "board": board, "cfg": cfg,
+            "noise_report": {"sigma_temporal_corner": 0.30}}
+
+
+def test_lopo_covers_all_poses_and_deterministic(cv_setup):
+    """行为 1:6 姿态 × 2 模型小样 → 求解 12 次;逐姿态误差表覆盖全部姿态、
+    稳健 z 全表齐全;同种子重跑逐位一致(确定性红线)。"""
+    s = cv_setup
+    r1 = lopo(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
+    assert r1["schema"] == "lopo-v1"
+    poses = set(unique_poses(s["obs"]))
+    for m in ("m1", "m2"):
+        summary = r1["models"][m]
+        assert set(summary["per_pose"]) == poses, "逐姿态误差表必须覆盖全部姿态"
+        assert summary["n_failed_poses"] == 0
+        assert len(summary["rows"]) == 6
+        for row in summary["rows"]:
+            for key in ("model_id", "val_pose", "heldout_px", "train_rms_px", "failure_note"):
+                assert key in row, f"留一姿态行缺键:{key}"
+        valid = [v for v in summary["per_pose"].values() if v is not None]
+        assert summary["mean_lopo_px"] == pytest.approx(float(np.mean(valid)))
+        assert set(summary["mad_z"]) == poses, "稳健 z 应给全表(点名交给阈值)"
+        assert all(np.isfinite(z) for z in summary["mad_z"].values())
+        assert summary["loss_used"] == "linear"
+    assert r1["meta"]["n_solves"] == 12
+
+    r2 = lopo(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
+    _assert_reports_equal(r1, r2)
+
+
+def test_lopo_outlier_pose_flagged(make_true_views):
+    """行为 2:把 pose_02 的两张角点整体平移 5 像素(人为离群姿态)→
+    mad_outlier_poses 点名恰为该姿态(阈值 3.5,z 全表里它最大)。"""
+    views, _k = make_true_views(n_views=12)
+    pts = np.asarray(views, dtype=np.float64).copy()
+    pts[4:6, :, 0] += 5.0  # 行 4、5 = pose_02 的两张
+    board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+    obs = ObservationSet(
+        image_ids=tuple(f"img_{k:02d}" for k in range(12)),
+        pose_ids=tuple(f"pose_{k // 2:02d}" for k in range(12)),
+        object_points=build_object_points(board),
+        image_points=pts,
+        image_size=(640, 480),
+        corner_source=("sb",) * 12,
+    )
+    base = CalibrationConfig()
+    cfg = replace(base, evaluate=replace(base.evaluate, models=("m1",), evaluate_max_workers=1))
+    report = lopo(obs, board, cfg, {"m1": {"loss": "linear"}})
+    summary = report["models"]["m1"]
+    assert [o["pose_id"] for o in summary["outlier_poses"]] == ["pose_02"], (
+        f"离群点名应为 pose_02,实际 {summary['outlier_poses']}")
+    z = summary["mad_z"]
+    assert z["pose_02"] > 3.5
+    assert z["pose_02"] == max(z.values())
+
+
+def test_lopo_disabled_raises_chinese(cv_setup):
+    """开关检查:evaluate.lopo_enabled 为 false 时中文报错拒绝跑
+    (04-01 决策:开关由实验层检查,配置驱动的实验边界)。"""
+    s = cv_setup
+    cfg = replace(s["cfg"], evaluate=replace(s["cfg"].evaluate, lopo_enabled=False))
+    with pytest.raises(ValueError, match="lopo_enabled"):
+        lopo(s["obs"], s["board"], cfg, s["optimizer_config"])
+
+
+def test_slices_group_count_and_params(slice_setup):
+    """行为 3:3 姿态 × 2 张 → 组数 = 2;每组每姿态恰 1 张(n_poses = 3);
+    每组独立完整标定产出参数向量;同种子重跑逐位一致(分组无随机性,
+    求解确定性由线程锁保证)。"""
+    s = slice_setup
+    r1 = slices_by_index(
+        s["obs"], s["board"], s["cfg"], {"m1": {"loss": "linear"}}, s["noise_report"]
+    )
+    assert r1["schema"] == "slices-v1"
+    m = r1["models"]["m1"]
+    assert m["n_failed_groups"] == 0
+    assert m["n_groups"] == 2
+    assert len(m["group_params"]) == 2, "组数必须 = 最少重复张数"
+    for rec in m["group_records"]:
+        assert rec["converged"], f"干净合成数据上每组应收敛:{rec}"
+        assert rec["n_poses"] == 3, "每组每姿态恰 1 张"
+        assert set(rec["params"]) == set(create_model("m1").param_names)
+    detail = r1["_slice_detail"]["m1"]
+    assert detail["group_params"].shape == (2, 8)
+    assert detail["group_se"].shape == (2, 8)
+
+    r2 = slices_by_index(
+        s["obs"], s["board"], s["cfg"], {"m1": {"loss": "linear"}}, s["noise_report"]
+    )
+    _assert_reports_equal(r1, r2)
+
+
+def test_slices_same_caliber_crlb_metadata(slice_setup):
+    """行为 4:每组记录带口径标识 observation_set(小样按组内姿态数如实记,
+    语义 = 每姿态单张)+ sigma_source="temporal";经验 std(组间逐参数
+    ddof=1)与各组 SE 均值都与明细数组对账。"""
+    s = slice_setup
+    report = slices_by_index(
+        s["obs"], s["board"], s["cfg"], {"m1": {"loss": "linear"}}, s["noise_report"]
+    )
+    m = report["models"]["m1"]
+    for rec in m["group_records"]:
+        assert rec["observation_set"] == "views3_single_frame"
+        assert rec["sigma_source"] == "temporal"
+    assert m["sigma_used"] == pytest.approx(0.30)
+
+    detail = report["_slice_detail"]["m1"]
+    names = [str(x) for x in detail["param_names"]]
+    emp = {
+        name: float(np.std(detail["group_params"][:, i], ddof=1))
+        for i, name in enumerate(names)
+    }
+    for name, v in m["empirical_std"].items():
+        assert v == pytest.approx(emp[name], rel=1e-12)
+    se_mean = {
+        name: float(np.mean(detail["group_se"][:, i]))
+        for i, name in enumerate(names)
+    }
+    for name, v in m["crlb_se_mean"].items():
+        assert v == pytest.approx(se_mean[name], rel=1e-12)
+
+
+def test_slices_forbid_poses80_aggregated_reference():
+    """行为 4(对照口径禁令):分组对照必须每组新算同口径 CRLB,绝不读取
+    poses80 聚合记录——连拍均值口径的 σ/√8 折减冒充单张口径会造成假告警
+    或漏告警(Pitfall 2,T-04-04-01)。源码级扫描锁死。"""
+    source = Path(experiments_mod.__file__).read_text(encoding="utf-8")
+    assert "poses80" not in source, (
+        "experiments.py 里出现了 poses80 聚合口径的引用:分组实验的 CRLB "
+        "对照必须每组新算(marginalized_fisher + crlb_se),不许读聚合记录"
+    )
+
+
+def test_slices_hard_alert_fires_through_wiring(slice_setup, monkeypatch):
+    """行为 5(D-06 不静默):经验 std 显著低于同口径 CRLB 的合成场景
+    (Fisher 信息调到极小 → σ_CRLB 巨大)→ crlb_alert 判 fail、告警说明
+    带参数名;组数与双档 alpha 从配置正确传入(df = 组数 − 1)。"""
+    s = slice_setup
+
+    def tiny_fisher(model, obs, params, rvecs, tvecs):
+        f = np.eye(len(model.param_names)) * 1e-8  # 信息量极小 → 下界极高
+        return f, csr_matrix(f), {"n_views": len(obs.image_ids)}
+
+    monkeypatch.setattr(experiments_mod, "marginalized_fisher", tiny_fisher)
+    report = slices_by_index(
+        s["obs"], s["board"], s["cfg"], {"m1": {"loss": "linear"}}, s["noise_report"]
+    )
+    alert = report["models"]["m1"]["crlb_alert"]
+    assert alert is not None, "经验 std 远低于理论下界的场景必须触发对照检查"
+    assert alert["verdict"] == "fail"
+    assert alert["df"] == 1, "自由度 = 组数 − 1(2 组 → df=1)"
+    assert alert["verdict_note"], "告警说明必须非空(D-06 硬告警不静默)"
+    assert "fx" in alert["verdict_note"], f"告警说明要带参数名:{alert['verdict_note']}"
+    assert alert["lines"]["hard"] > 0 and alert["lines"]["soft"] > alert["lines"]["hard"]
