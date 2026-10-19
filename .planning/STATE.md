@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-19T07:21:17.122Z"
+last_updated: "2026-10-19T07:49:08.425Z"
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 23
-  completed_plans: 17
+  completed_plans: 18
   percent: 50
 ---
 
@@ -17,17 +17,18 @@ progress:
 ## Project Reference
 
 - **Core Value:** 对给定的一批标定图像,产出可论证为当前数据下最优的内参(held-out 泛化误差最小 + 参数稳定 + 误差逼近 CRLB),并量化"距离数据极限还有多远"
-- **Current Focus:** Phase 04 — 评估实验 + 模型选型 + 优化器对比
+- **Current Focus:** Phase 04 — evaluation-model-selection
 - **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md
 
 ## Current Position
 
-Phase: 03 (fisher-crlb) — COMPLETE(2026-10-19,验证 passed 5/5)
+Phase: 04 (evaluation-model-selection) — EXECUTING
+Plan: 2 of 6
 
 - **Phase:** 4
-- **Plan:** Not started
-- **Status:** Ready to execute
-- **Progress:** [█████-----] 50%(3/6 相)
+- **Plan:** 2 of 6
+- **Status:** Executing Phase 04
+- **Progress:** [████████░░] 78%
 - **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
   产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
 
@@ -36,9 +37,10 @@ Phase: 03 (fisher-crlb) — COMPLETE(2026-10-19,验证 passed 5/5)
 | Metric | Value |
 |--------|-------|
 | Phases complete | 1/6 |
-| Requirements shipped | 4/32 |
+| Requirements shipped | 5/32 |
 | Plans this phase | 6(planned) |
 | Blocked items | 0 |
+| Phase 04 P01 | 12min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -75,13 +77,19 @@ Phase: 03 (fisher-crlb) — COMPLETE(2026-10-19,验证 passed 5/5)
 
 ## Session Continuity
 
-- **Last action:** 阶段四规划完成(2026-10-19)— 研究(04-RESEARCH.md,留白
-  全裁定:三分支平局/BIC n=80/f_scale auto/扰动幅度表/0.42×σ_CRLB 告警线,
-  实测发现 m1__scipy_softl1 未过收敛需 16 组合新血缘重跑)+ 模式映射
-  (04-PATTERNS.md,13/13)+ 6 计划(04-01~04-06,5 波)+ 校验两轮通过
-  (第 1 轮 5 警告已修订 ce8a36b,第 2 轮 PASSED)
-- **Next action:** `/gsd-execute-phase 4`(Wave 1:04-01 切分地基;Wave 2:
-  04-02 优化器 ∥ 04-03 选型统计)
+- **Last action:** 04-01 执行完成(2026-10-19,12min,9531d43/2c5ade7/9f70707)
+  — EvaluateConfig 25 键契约 + evaluate yaml 段 + splitting 四种切分纯函数
+  (零重叠硬门禁双保险)+ parallel.py joblib 助手;377 测试绿;EVA-01 标记完成
+
+- **Next action:** 继续阶段四执行(Wave 2:04-02 优化器对比 ∥ 04-03 选型
+  统计,两者只依赖 04-01 已就绪)
+
 - **Notes for next session:** 决策在 04-CONTEXT.md(D-01~D-16);训练/交付
   一律全 640 视图(聚合策略裁决定案);上游取数 = sb 角点 npz + noise.json
-  双口径 + m{X}__scipy linear 收敛解 + crlb.json;joblib 随 04-01 引入
+  双口径 + m{X}__scipy linear 收敛解 + crlb.json;04-01 已交付 EvaluateConfig
+  25 键 / splitting 分配表 / run_parallel(消费面见 04-01-SUMMARY.md)
+
+## Decisions
+
+- [Phase 04]: 阶段四切分函数取整个 CalibrationConfig(读 cfg.seed + cfg.evaluate.*),照 run_injection_experiment 体例;evaluate 核名白名单独立建表(含 cauchy,D-14)
+- [Phase 04]: 零重叠硬门禁双保险:split_by_pose_ids 函数体断言 + 16 例测试对 80 姿态×25 折显式断言姿态级与行级零交集(成功标准 1 执行位);切分分配表纯 str/int 可 json 落盘复查

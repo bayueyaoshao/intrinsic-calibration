@@ -141,11 +141,11 @@ Plans:
   4. bootstrap 与重复张分组实验对照,可分离"纯噪声"与"位姿抽样"两种不确定度来源;留一姿态表能点名问题姿态
   5. 优化器/鲁棒核/初始化策略对比表落盘,含收敛状态与多起点一致性检验(鱼眼模型初值不当时求解会卡在坏解上,须验证没有这种情况);选定模型用全量 train 重训,并在 test/65 张独立照片上评分一次
 
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — 考试地基:joblib 依赖 + EvaluateConfig 全量契约 + evaluate 配置段 + 姿态切分纯函数库(零泄漏断言硬门禁)+ 并行助手(EVA-01,D-01/02/03)
+- [x] 04-01-PLAN.md — 考试地基:joblib 依赖 + EvaluateConfig 全量契约 + evaluate 配置段 + 姿态切分纯函数库(零泄漏断言硬门禁)+ 并行助手(EVA-01,D-01/02/03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -203,7 +203,7 @@ Plans:
 | 1. 数据基座 + 最小完整标定流程 | 5/5 | Complete   | 2026-10-16 |
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete    | 2026-10-18 |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 6/6 | Complete    | 2026-10-19 |
-| 4. 评估实验 + 模型选型 + 优化器对比 | 0/TBD | Not started | - |
+| 4. 评估实验 + 模型选型 + 优化器对比 | 1/6 | In Progress|  |
 | 5. 误差预算 + 诊断 + 角点提取寻优 | 0/TBD | Not started | - |
 | 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/TBD | Not started | - |
 
