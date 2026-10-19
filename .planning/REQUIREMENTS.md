@@ -38,10 +38,10 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 评估 (EVAL)
 
 - [x] **EVA-01**: 按姿态切分训练/验证(同一姿态的所有照片只进同一边,结构性防数据泄漏)+ K 折交叉验证
-- [ ] **EVA-02**: 模型选择只看 held-out 泛化误差(辅以 BIC、参数可辨识性);选定后全量数据重训出最终内参
+- [x] **EVA-02**: 模型选择只看 held-out 泛化误差(辅以 BIC、参数可辨识性);选定后全量数据重训出最终内参
 - [ ] **EVA-03**: 重复张分组实验——每姿态各取第 i 张连拍组成一组(组数取全体姿态的最少重复张数),各组独立完整标定后对比内参差异,得到纯噪声传播的经验参数不确定度,并用于 CRLB 理论预测的实证校验
 - [ ] **EVA-04**: bootstrap ×N 参数稳定性(与重复张分组实验对比,分离"噪声"与"位姿抽样"两种因素)
-- [ ] **EVA-05**: 留一姿态 ×N——问题姿态定位与解的脆弱性检查
+- [x] **EVA-05**: 留一姿态 ×N——问题姿态定位与解的脆弱性检查
 
 ### 分析 (ANA)
 
@@ -119,10 +119,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | NOI-02 | Phase 3 | Shipped (Phase 3)(03-01 受控注入实验 + 经验传递曲线;03-03 calib noise 命令闭环与真实数据首轮落盘) |
 | NOI-03 | Phase 3 | Shipped (Phase 3)(03-02 FIM/Schur/CRLB 数学核心;03-04 stdDev 交叉验证协议;03-05 16 份 CRLB 编排与 calib fisher 闭环;03-06 全链冒烟 + 人工核查收口) |
 | EVA-01 | Phase 4 | Complete |
-| EVA-02 | Phase 4 | Pending |
+| EVA-02 | Phase 4 | Complete |
 | EVA-03 | Phase 4 | Pending |
 | EVA-04 | Phase 4 | Pending |
-| EVA-05 | Phase 4 | Pending |
+| EVA-05 | Phase 4 | Complete |
 | SOL-02 | Phase 4 | Complete |
 | ANA-01 | Phase 5 | Pending |
 | ANA-02 | Phase 5 | Pending |

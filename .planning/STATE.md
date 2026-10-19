@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-19T11:36:26.708Z"
+last_updated: "2026-10-19T12:02:48.307Z"
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 23
-  completed_plans: 19
+  completed_plans: 20
   percent: 50
 ---
 
@@ -23,12 +23,12 @@ progress:
 ## Current Position
 
 Phase: 04 (evaluation-model-selection) — EXECUTING
-Plan: 3 of 6
+Plan: 4 of 6
 
 - **Phase:** 4
-- **Plan:** 3 of 6
+- **Plan:** 4 of 6
 - **Status:** Ready to execute
-- **Progress:** [████████░░] 83%
+- **Progress:** [█████████░] 87%
 - **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
   产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
 
@@ -42,6 +42,7 @@ Plan: 3 of 6
 | Blocked items | 0 |
 | Phase 04 P01 | 12min | 2 tasks | 9 files |
 | Phase 4 P02 | 3h43min | 4 tasks | 4 files |
+| Phase 4 P03 | 18min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -78,20 +79,24 @@ Plan: 3 of 6
 
 ## Session Continuity
 
-- **Last action:** 04-02 执行完成(2026-10-19,3h43min,ef0ad06/078abb5/5f0962e/858de5a)
-  — optimizer.json 8 键契约 + 16 组合网格(共同 OpenCV 初值)+ 推荐配置
-  + 多起点双容差检验;真实数据轮 output/evaluate/run_20261019_112926
-  (四模型推荐均 linear;m1 多起点 inconsistent);SOL-02 标记完成
+- **Last action:** 04-03 执行完成(2026-10-19,18min,5014919/fb7261a/c5a24c3/f47a6ac)
+  — 选型统计纯函数库 selection.py:paired_comparison 三分支(置信区间对
+  等价带,不看 p 值)+ bic_full_fit(n=80 口径)+ crlb_alert_check(卡方
+  双线 df 自适应,硬告警不静默)+ build_verdict_table(evaluate-verdict-v1)
+  + select_model(全 PASS 才当选/等价取简/平局 BIC 裁决)+ mad_outlier_poses;
+  32 例测试全绿,全套 428 passed;EVA-02/EVA-05 标记完成
 
-- **Next action:** 继续阶段四执行(Plan 3:04-03 选型统计;Wave 2 的
-  另一条 04-02 已完成,04-03 可直接消费 optimizer.json)
+- **Next action:** 继续阶段四执行(Plan 4:04-04 实验编排,消费 04-01
+  切分/并行 + 04-02 推荐配置 + 04-03 判行表输入形状;Wave 3)
 
 - **Notes for next session:** 决策在 04-CONTEXT.md(D-01~D-16);训练/交付
   一律全 640 视图(聚合策略裁决定案);上游取数 = sb 角点 npz + noise.json
-  双口径 + m{X}__scipy linear 收敛解 + crlb.json + optimizer.json(04-02 起,
-  推荐配置从 recommended_solver 读);真实数据单次 scipy 求解 8 并行实测
-  1.5-3 分钟,大网格工时按此估;04-01 已交付 EvaluateConfig 25 键 /
-  splitting 分配表 / run_parallel(消费面见 04-01-SUMMARY.md)
+  双口径 + m{X}__scipy linear 收敛解 + crlb.json + optimizer.json(推荐配置
+  从 recommended_solver 读,四模型均 linear);判行表输入形状在 04-03
+  build_verdict_table 定死(cv/stability/crlb/fisher_warnings 四本字典),
+  BIC 数值由 04-06 全量重训后写进行内 bic 键;真实数据单次 scipy 求解
+  8 并行实测 1.5-3 分钟,大网格工时按此估;04-01 已交付 EvaluateConfig
+  25 键 / splitting 分配表 / run_parallel(消费面见 04-01-SUMMARY.md)
 
 ## Decisions
 
@@ -99,3 +104,4 @@ Plan: 3 of 6
 - [Phase 04]: 零重叠硬门禁双保险:split_by_pose_ids 函数体断言 + 16 例测试对 80 姿态×25 折显式断言姿态级与行级零交集(成功标准 1 执行位);切分分配表纯 str/int 可 json 落盘复查
 - [Phase 04]: 优化器对比真实数据定案——四模型推荐均 linear 核(千分之一并列线内无鲁棒核优势);m1 的 soft_l1/cauchy status=0 未过实用收敛,与历史轮 run_20261018_163713 对账一致,写进 SOL-02 结论材料
 - [Phase 04]: 多起点一致性实测——m1 判 inconsistent(RMS 极差 2.8e-07 px 而参数位移 0.205 px 超容差,可辨识性发现),m2/m3/m4 consistent;run_multistart 取 CalibrationConfig(要 cfg.seed),worker 层异常兜底转 make_failure 防生成器断流
+- [Phase 4]: 选型统计判定核心落地——paired_comparison 三分支(置信区间对等价带,不看 p 值)/bic_full_fit(n=80 锁姿态口径)/crlb_alert_check(卡方双线 df 自适应,硬告警不静默)/build_verdict_table(schema evaluate-verdict-v1 接口先行)/select_model(全 PASS 才当选、等价取简、平局 BIC 裁决、无 BIC 退回取简不静默) — D-09/D-10/D-11/D-12 + EVA-02/EVA-05 判定核心闭环;04-04~04-06 按判行表输入形状供给数据
