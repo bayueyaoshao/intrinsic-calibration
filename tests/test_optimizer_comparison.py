@@ -374,3 +374,232 @@ def test_recommend_skips_unconverged_and_handles_all_failed():
     assert rec2["m2"]["loss"] is None
     assert rec2["m2"]["note"].strip(), "全败模型的推荐占位必须带中文说明"
 
+
+# ---------------------------------------------------------------------------
+# Task 3:多起点扰动一致性(D-15;小样 N=3,串行执行保证注入可控)
+# ---------------------------------------------------------------------------
+
+from dataclasses import replace as dc_replace
+
+from calib.evaluation.optimizer import (
+    _multistart_n_for,
+    _perturbed_init,
+    run_multistart,
+)
+from calib.evaluation.splitting import _seed_for
+from calib.io.config import CalibrationConfig
+from calib.solve.result import CalibrationResult
+
+
+def _multistart_cfg(models=("m1",), n=3) -> CalibrationConfig:
+    """小样多起点配置:1 个模型 × N 起点、串行(注入按调用序可控)。"""
+    base = CalibrationConfig()
+    return dc_replace(
+        base,
+        evaluate=dc_replace(base.evaluate, models=tuple(models),
+                            multistart_n=n, multistart_n_fisheye=n,
+                            evaluate_max_workers=1),
+    )
+
+
+@pytest.fixture
+def small_multistart_setup(make_true_views):
+    """小样多起点地基:6 姿态 × 2 张合成观测集(与网格夹具同款拼装)。"""
+    views, _k = make_true_views(n_views=12)
+    board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+    obs = ObservationSet(
+        image_ids=tuple(f"img_{k:02d}" for k in range(12)),
+        pose_ids=tuple(f"pose_{k // 2:02d}" for k in range(12)),
+        object_points=build_object_points(board),
+        image_points=np.asarray(views, dtype=np.float64),
+        image_size=(640, 480),
+        corner_source=("sb",) * 12,
+    )
+    return obs, board
+
+
+def _fake_converged(obs: ObservationSet, model_id: str, params: dict,
+                    rms: float) -> CalibrationResult:
+    """构造一份收敛的假结果(判定单测用;位姿给个深度 800 的合规摆位,
+    让投影位移当量的计算有正常分母)。"""
+    n = len(obs.image_ids)
+    return CalibrationResult(
+        converged=True, failure_note=None, model_id=model_id, solver="scipy",
+        solver_meta={"status": 1, "loss": "linear", "f_scale": 1.0},
+        params=dict(params), rvecs=np.zeros((n, 3)),
+        tvecs=np.tile(np.array([0.0, 0.0, 800.0]), (n, 1)),
+        rms_overall=rms, per_view_rms=None,
+        image_ids=obs.image_ids, image_size=obs.image_size,
+        n_views=n, n_points_per_view=int(obs.object_points.shape[0]),
+        init_from=None, lineage={})
+
+
+def test_multistart_seed_determinism(small_multistart_setup):
+    """扰动种子确定性:同配置两次 run_multistart(同种子派生)逐位一致——
+    每起点种子 = _seed_for(f"mstart|{模型}|{i}", cfg.seed),重跑不掷新骰子。"""
+    obs, board = small_multistart_setup
+    cfg = _multistart_cfg(models=("m1",), n=3)
+    first = run_multistart(obs, board, cfg)
+    second = run_multistart(obs, board, cfg)
+    assert first["models"]["m1"]["n_starts"] == 3
+    assert first["models"]["m1"] == second["models"]["m1"], \
+        "同种子重跑必须逐位一致(随机性只从 cfg.seed 派生)"
+    # 种子派生公式与计划文本一致(逐起点可复算)
+    for row in first["models"]["m1"]["starts"]:
+        assert row["seed"] == _seed_for(f"mstart|m1|{row['start']}", cfg.seed)
+    # 每起点的扰动起点彼此不同(扰动真生效了,不是 N 份同一初值)
+    model = create_model("m1")
+    baseline = solve_with_opencv(obs, model)
+    for row in first["models"]["m1"]["starts"]:
+        assert row["converged"], f"干净合成数据上起点应收敛:{row['failure_note']}"
+        assert row["params"]["fx"] != baseline.params["fx"], \
+            "扰动后的起点参数应偏离基线,原样解等于没扰动"
+
+
+def test_multistart_rms_deviation_verdict_inconsistent(small_multistart_setup,
+                                                       monkeypatch):
+    """注入一个 RMS 明显偏离的起点:RMS 极差超容差 → inconsistent(双容差
+    判定的第一支)。"""
+    obs, board = small_multistart_setup
+    cfg = _multistart_cfg(models=("m1",), n=3)
+    real_solve = optimizer_mod.solve_with_scipy
+    calls = {"n": 0}
+
+    def fake_solve(obs_, model, scipy_cfg, init=None, loss="linear",
+                   rms_linear_ref=None):
+        result = real_solve(obs_, model, scipy_cfg, init=init, loss=loss,
+                            rms_linear_ref=rms_linear_ref)
+        calls["n"] += 1
+        if calls["n"] == 2:   # 第 2 个起点人为抬 0.1 px(容差 0.001 的百倍)
+            return dc_replace(result, rms_overall=result.rms_overall + 0.1)
+        return result
+
+    monkeypatch.setattr(optimizer_mod, "solve_with_scipy", fake_solve)
+    out = run_multistart(obs, board, cfg)["models"]["m1"]
+    assert out["n_starts"] == 3 and out["n_converged"] == 3
+    assert out["verdict"] == "inconsistent"
+    assert out["rms_spread_px"] >= cfg.evaluate.multistart_rms_tol_px
+    assert "RMS 极差" in out["note"]
+    assert out["bad_solutions"] == []   # 都收敛了:坏解名单应为空
+
+
+def test_multistart_param_drift_verdict_inconsistent(small_multistart_setup,
+                                                     monkeypatch):
+    """RMS 一致但参数位移超限也判 inconsistent(双容差缺一不可:
+    参数不同 RMS 相同 = 可辨识性问题本身,Anti-Patterns 第 6 条)。"""
+    obs, board = small_multistart_setup
+    cfg = _multistart_cfg(models=("m1",), n=3)
+    baseline = solve_with_opencv(obs, create_model("m1"))
+    calls = {"n": 0}
+
+    def fake_solve(obs_, model, scipy_cfg, init=None, loss="linear",
+                   rms_linear_ref=None):
+        calls["n"] += 1
+        params = dict(baseline.params)
+        if calls["n"] == 2:   # 第 2 个起点 fx 偏 1%(画面边缘位移远超 0.1 px)
+            params["fx"] = params["fx"] * 1.01
+        return _fake_converged(obs_, model.model_id, params, rms=0.05)
+
+    monkeypatch.setattr(optimizer_mod, "solve_with_scipy", fake_solve)
+    out = run_multistart(obs, board, cfg)["models"]["m1"]
+    assert out["n_converged"] == 3
+    assert out["rms_spread_px"] == 0.0, "三个起点的 RMS 被构造成全等"
+    assert out["param_disp_px"] >= cfg.evaluate.multistart_param_tol_px
+    assert out["verdict"] == "inconsistent"
+    assert "参数位移当量" in out["note"]
+
+
+def test_multistart_start_failure_recorded_not_fatal(small_multistart_setup,
+                                                     monkeypatch):
+    """单起点求解失败转契约记录:坏解进 bad_solutions 点名,其余起点照常
+    判定(卡坏解是观察对象不是事故,D-15)。"""
+    obs, board = small_multistart_setup
+    cfg = _multistart_cfg(models=("m1",), n=3)
+    real_solve = optimizer_mod.solve_with_scipy
+    calls = {"n": 0}
+
+    def fake_solve(obs_, model, scipy_cfg, init=None, loss="linear",
+                   rms_linear_ref=None):
+        calls["n"] += 1
+        if calls["n"] == 1:   # 第 1 个起点注入爆炸
+            raise RuntimeError("人为注入的起点爆炸")
+        return real_solve(obs_, model, scipy_cfg, init=init, loss=loss,
+                          rms_linear_ref=rms_linear_ref)
+
+    monkeypatch.setattr(optimizer_mod, "solve_with_scipy", fake_solve)
+    out = run_multistart(obs, board, cfg)["models"]["m1"]
+    assert out["n_starts"] == 3 and out["n_converged"] == 2
+    assert len(out["bad_solutions"]) == 1
+    assert out["bad_solutions"][0]["start"] == 0
+    assert "RuntimeError" in out["bad_solutions"][0]["failure_note"]
+    assert out["verdict"] in ("consistent", "inconsistent")  # 剩余 2 起点照常判定
+
+
+def test_fisheye_model_gets_doubled_start_count(small_multistart_setup,
+                                                monkeypatch):
+    """m4(鱼眼)起点数取 multistart_n_fisheye(D-15 重点观察对象);
+    基线与精化都打假,只数起点数与契约形状。"""
+    obs, board = small_multistart_setup
+    cfg = _multistart_cfg(models=("m4",), n=3)
+    assert cfg.evaluate.multistart_n_fisheye == 3
+    assert _multistart_n_for(create_model("m4"), cfg.evaluate) == 3
+    assert _multistart_n_for(create_model("m1"), cfg.evaluate) == 3
+    # 正式配置下:普通模型 10 次、鱼眼 20 次
+    full_ev = CalibrationConfig().evaluate
+    assert _multistart_n_for(create_model("m1"), full_ev) == full_ev.multistart_n
+    assert _multistart_n_for(create_model("m4"), full_ev) == full_ev.multistart_n_fisheye
+
+    m4_model = create_model("m4")
+    m4_params = dict.fromkeys(m4_model.param_names, 0.01)
+    m4_params.update(fx=800.0, fy=800.0, cx=320.0, cy=240.0)
+    fake_baseline = _fake_converged(obs, "m4", m4_params, rms=0.1)
+
+    monkeypatch.setattr(
+        optimizer_mod, "solve_with_opencv",
+        lambda obs_, model: fake_baseline)
+    monkeypatch.setattr(
+        optimizer_mod, "solve_with_scipy",
+        lambda obs_, model, scipy_cfg, init=None, loss="linear",
+        rms_linear_ref=None: _fake_converged(obs_, "m4", dict(init.params),
+                                             rms=0.05))
+    out = run_multistart(obs, board, cfg)["models"]["m4"]
+    assert out["n_starts"] == 3
+    assert len(out["starts"]) == 3
+    # 扰动按 m4 的参数名单分组执行(k 族是畸变组),不许有参数被静默跳过
+    for row in out["starts"]:
+        assert set(row["params"]) == set(m4_model.param_names)
+
+
+def test_perturbation_respects_amplitude_config():
+    """扰动幅度按配置生效:同种子下 fx 只在 ±intr_rel 内偏离;未知参数名
+    当场中文报错(不静默跳过)。"""
+    base = CalibrationConfig()
+    ev = dc_replace(base.evaluate, multistart_intr_rel=0.02,
+                    multistart_dist_rel=0.10)
+    init = _fake_converged(
+        ObservationSet(
+            image_ids=("a",), pose_ids=("p",),
+            object_points=np.zeros((88, 3)), image_points=np.zeros((1, 88, 2)),
+            image_size=(640, 480), corner_source=("sb",)),
+        "m1", {"fx": 1000.0, "fy": 1000.0, "cx": 320.0, "cy": 240.0,
+               "k1": 0.1, "k2": 0.0, "p1": 0.0, "p2": 0.0},
+        rms=0.1)
+    init = dc_replace(init, rvecs=np.zeros((1, 3)), tvecs=np.ones((1, 3)))
+    for trial in range(20):
+        rng = np.random.default_rng(trial)
+        out = _perturbed_init(init, ev, rng)
+        assert abs(out.params["fx"] - 1000.0) <= 1000.0 * ev.multistart_intr_rel
+        assert abs(out.params["k1"] - 0.1) <= 0.1 * ev.multistart_dist_rel
+        assert out.params["k2"] == 0.0   # 乘性扰动:0 还是 0(不发明偏移)
+        assert out.params["fx"] != init.params["fx"] or \
+            out.params["fy"] != init.params["fy"] or \
+            out.params["cx"] != init.params["cx"]
+        # 旋转:旋转向量加了 ±rot_deg 内的扰动,范数不为零
+        assert np.linalg.norm(out.rvecs[0]) > 0
+        # 平移:范数在 ±trans_rel 内
+        assert abs(np.linalg.norm(out.tvecs[0]) - 3**0.5) <= 3**0.5 * ev.multistart_trans_rel + 1e-12
+
+    bad = dc_replace(init, params={"u1": 1.0, "fx": 800.0})
+    with pytest.raises(AssertionError, match="不认识参数名"):
+        _perturbed_init(bad, ev, np.random.default_rng(0))
+
