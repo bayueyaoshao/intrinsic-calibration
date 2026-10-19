@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.stats import (
+    chi2,
     median_abs_deviation,
     norm,
     shapiro,
@@ -274,14 +275,390 @@ def mad_outlier_poses(values: dict[str, float], threshold: float) -> list[tuple[
     return out
 
 
-def select_model(verdicts: list[dict], cv_summary: dict, cfg: CalibrationConfig) -> dict:
-    """选型规则:三判据全 PASS 才当选;held-out 最小者胜;平局取简、仍平按 BIC。
+def crlb_alert_check(
+    empirical_std: dict[str, float],
+    crlb_se_mean: dict[str, float],
+    n_groups: int,
+    alpha_hard: float,
+    alpha_soft: float,
+) -> dict:
+    """「实测好于理论下界」的两档告警检查(D-05/D-06)。
 
-    占位防误用:本函数在任务 2(卡方告警线 + 三判据判行表 + 选型规则)
-    实现;先立签名把接口定死,调用方(04-04 之后的编排层)不会误以为
-    它已经能判。
+    白话:重复张分组实验给出每个参数的经验标准差(同样的 80 个姿态分
+    成 n_groups 组各标一遍,看参数抖多厉害);CRLB(克拉美-罗下界)是
+    "这批数据在理论上能把参数定到多准"的下界。实测抖动若显著低于理论
+    下界,物理上不可能——多半是对照口径错了(比如拿被 σ/√8 折减过的
+    聚合记录来比),必须硬告警不静默通过(ROADMAP 成功标准 3)。
+
+    数学:每组 n_groups 份参数,经验标准差 s 满足 (n−1)·s²/σ² 服从卡方
+    (自由度 = n−1)分布(样本方差的波动规律);因此
+    s < sqrt(chi2.ppf(alpha, df) / df) × σ_CRLB 即"以显著性 alpha 显著
+    低于下界"。alpha=0.01 硬告警(df=7 时线约 0.42,判 FAIL + D-06 告警),
+    alpha=0.05 边缘提示(线约 0.56,只记录不拦);df = 组数 − 1,随数据
+    自适应。σ_CRLB 为 inf 的参数(数据里没有信息定住它的方向)跳过检查、
+    计入 n_no_bound——既不进 FAIL 也不进 PASS 的分母;实测值非有限的参数
+    同样跳过(测不出来 ≠ 好于下界)。
+
+    返回体例照 noise/fisher.py 的 verdict/verdict_note:判定式与阈值随
+    结论落盘,不凭空下结论。
     """
-    raise NotImplementedError(
-        "select_model 尚未实现(任务 2 交付):三判据判行表组装与选型规则还在路上,"
-        "请不要在生产路径调用。"
+    if int(n_groups) < 2:
+        raise ValueError(
+            f"分组实验组数 n_groups = {n_groups} 不合法:至少要 2 组才谈得上"
+            f"经验标准差(自由度 = 组数 − 1,组数 1 时自由度为 0)。"
+        )
+    df = int(n_groups) - 1
+    s_hard = float(np.sqrt(chi2.ppf(float(alpha_hard), df) / df))
+    s_soft = float(np.sqrt(chi2.ppf(float(alpha_soft), df) / df))
+
+    per_param: dict[str, dict] = {}
+    n_below_hard = 0
+    n_below_soft = 0
+    n_no_bound = 0
+    hard_hits: list[str] = []
+    soft_only_hits: list[str] = []
+    n_checked = 0
+    for name, s_emp in empirical_std.items():
+        name = str(name)
+        sigma = crlb_se_mean.get(name)
+        s_emp = float(s_emp)
+        if sigma is None or not np.isfinite(s_emp) or not np.isfinite(float(sigma)):
+            n_no_bound += 1
+            per_param[name] = {
+                "ratio": None,
+                "below_hard": False,
+                "below_soft": False,
+                "skipped": (
+                    "理论下界缺失或为 inf(数据定不住的方向),或实测值非有限"
+                    "——跳过检查,计入 n_no_bound"
+                ),
+            }
+            continue
+        n_checked += 1
+        ratio = s_emp / float(sigma)
+        below_hard = bool(ratio < s_hard)
+        below_soft = bool(ratio < s_soft)
+        n_below_hard += int(below_hard)
+        n_below_soft += int(below_soft)
+        per_param[name] = {
+            "ratio": float(ratio),
+            "below_hard": below_hard,
+            "below_soft": below_soft,
+            "skipped": None,
+        }
+        if below_hard:
+            hard_hits.append(f"{name}(实测/理论 = {ratio:.3f},硬告警线 {s_hard:.2f})")
+        elif below_soft:
+            soft_only_hits.append(f"{name}(实测/理论 = {ratio:.3f},软提示线 {s_soft:.2f})")
+
+    lines_txt = (
+        f"告警线:s < sqrt(chi2.ppf(alpha, df)/df) × σ_CRLB,df = {df}"
+        f"(= 组数 {n_groups} − 1),硬线 {s_hard:.4f}(alpha={alpha_hard}),"
+        f"软线 {s_soft:.4f}(alpha={alpha_soft})。"
     )
+    if hard_hits:
+        verdict = "fail"
+        verdict_note = (
+            f"硬告警(D-06):{n_below_hard} 个参数实测显著低于同口径 CRLB 下界,"
+            f"好于理论极限物理上不可能,判 fail 不静默——"
+            + ";".join(hard_hits)
+            + "。最可疑的原因是对照口径不一致(禁止拿 poses80 聚合 CRLB 对照"
+            f"单张口径,见 D-05);另有 {n_no_bound} 个参数无理论下界跳过检查。" + lines_txt
+        )
+    else:
+        verdict = "pass"
+        verdict_note = (
+            f"全部 {n_checked} 个可查参数的实测/理论比值都不低于硬告警线"
+            f" {s_hard:.2f},判 pass"
+            + (
+                f";{n_below_soft} 个参数触发软提示线(边缘,只记录不拦):" + ";".join(soft_only_hits)
+                if soft_only_hits
+                else ""
+            )
+            + f";另有 {n_no_bound} 个参数无理论下界跳过检查。"
+            + lines_txt
+        )
+    return {
+        "per_param": per_param,
+        "n_below_hard": n_below_hard,
+        "n_below_soft": n_below_soft,
+        "n_no_bound": n_no_bound,
+        "n_checked": n_checked,
+        "df": df,
+        "lines": {"hard": s_hard, "soft": s_soft},
+        "verdict": verdict,
+        "verdict_note": verdict_note,
+    }
+
+
+def build_verdict_table(
+    cv_summary: dict,
+    stability_summary: dict,
+    crlb_summary: dict,
+    fisher_warnings: dict,
+    thresholds: dict,
+) -> dict:
+    """三判据判行表:每个候选模型一行,三判据各记数值 + PASS/FAIL + 判定式(D-12)。
+
+    输入全是 {model_id: {...}} 纯字典(接口先行,形状在此定死,
+    04-04/04-05/04-06 照此供给):
+      * cv_summary[mX] = {"mean_heldout_px", "mean_train_px",
+                          "fold_heldout"(折级 held-out 列表), "n_failed_folds"}
+      * stability_summary[mX] = {"max_disp_px", "slice_max_disp_px"}
+        (bootstrap 与分组离散的像素位移当量)
+      * crlb_summary[mX] = crlb_alert_check 的返回值
+      * fisher_warnings[mX] = str(crlb.json 谱退化结论,可缺;原样进 notes,D-11)
+      * thresholds = {"gen_overfit_ratio_max", "stability_disp_px_max"}
+        (从 EvaluateConfig 取)
+    判据(不搞加权打分,D-12):
+      泛化 PASS = mean_heldout / mean_train < gen_overfit_ratio_max
+      (过拟合比:考题分数相对练习分数的倍数,超线即过拟合显形,D-11 机制)
+      稳定 PASS = max(bootstrap, 分组) 像素位移当量 < stability_disp_px_max
+      逼近 CRLB PASS = n_below_hard == 0(实测好于理论下界即 FAIL + 硬告警)
+    泛化行记录失败折数(n_failed_folds)——失败率进判行表备注(D-11)。
+    返回 {"schema": "evaluate-verdict-v1", "verdicts": [...], "thresholds":
+    实际用值}(T-04-03-02:阈值越界会扭曲判定,把实际用值随表落盘可复核)。
+    """
+    for key in ("gen_overfit_ratio_max", "stability_disp_px_max"):
+        if key not in thresholds:
+            raise ValueError(
+                f"判行表阈值缺键:{key}(应有 gen_overfit_ratio_max 与 "
+                f"stability_disp_px_max 两键,从 cfg.evaluate 取)。"
+            )
+    gen_max = float(thresholds["gen_overfit_ratio_max"])
+    stab_max = float(thresholds["stability_disp_px_max"])
+
+    verdicts: list[dict] = []
+    for model_id, cv in cv_summary.items():
+        model_id = str(model_id)
+        if model_id not in stability_summary:
+            raise ValueError(
+                f"模型 {model_id} 缺稳定性摘要(stability_summary):判行表三判据"
+                f"缺一不可,请检查 04-04/04-05 的实验汇总是否齐全。"
+            )
+        if model_id not in crlb_summary:
+            raise ValueError(
+                f"模型 {model_id} 缺 CRLB 对照摘要(crlb_summary):判行表三判据"
+                f"缺一不可,请检查重复张分组实验与同口径 CRLB 是否已算。"
+            )
+        held = float(cv["mean_heldout_px"])
+        train = float(cv["mean_train_px"])
+        if not (np.isfinite(held) and np.isfinite(train)):
+            raise ValueError(
+                f"模型 {model_id} 的 CV 误差含非有限值(heldout={held}, "
+                f"train={train}):统计判定拒绝带病输入,请先在上游剔除失败记录。"
+            )
+        if train <= 0.0:
+            raise ValueError(
+                f"模型 {model_id} 的训练侧平均误差 = {train}:必须是正数,"
+                f"过拟合比(held-out/训练)才算得出来。"
+            )
+        ratio = held / train
+        n_failed = int(cv.get("n_failed_folds", 0))
+        gen_pass = bool(ratio < gen_max)
+        gen_note = (
+            f"泛化判据:mean_heldout/mean_train = {held:.4f}/{train:.4f} = "
+            f"{ratio:.3f},须 < {gen_max}(过拟合比执行位),判 "
+            f"{'PASS' if gen_pass else 'FAIL'}。"
+        )
+
+        d_boot = float(stability_summary[model_id]["max_disp_px"])
+        d_slice = float(stability_summary[model_id]["slice_max_disp_px"])
+        if not (np.isfinite(d_boot) and np.isfinite(d_slice)):
+            raise ValueError(
+                f"模型 {model_id} 的参数位移当量含非有限值(boot={d_boot}, "
+                f"slice={d_slice}):统计判定拒绝带病输入。"
+            )
+        d_overall = max(d_boot, d_slice)
+        stab_pass = bool(d_overall < stab_max)
+        stab_note = (
+            f"稳定判据:max(bootstrap {d_boot:.4f}, 分组 {d_slice:.4f}) = "
+            f"{d_overall:.4f} px,须 < {stab_max} px(位移当量执行位),判 "
+            f"{'PASS' if stab_pass else 'FAIL'}。"
+        )
+
+        crlb_block = crlb_summary[model_id]
+        crlb_pass = bool(crlb_block.get("n_below_hard", 0) == 0)
+        crlb_note = str(crlb_block.get("verdict_note", ""))
+
+        notes: list[str] = []
+        warning = fisher_warnings.get(model_id)
+        if warning:
+            notes.append(str(warning))  # Fisher 预警原样进 notes(D-11)
+        if n_failed:
+            notes.append(
+                f"折失败率:{n_failed}/{len(cv.get('fold_heldout', []))} 折求解失败"
+                f"(失败解未计入 held-out 均值;复杂模型小训练集不收敛是数据不是事故,"
+                f"详见逐折明细)。"
+            )
+        overall = "PASS" if (gen_pass and stab_pass and crlb_pass) else "FAIL"
+        verdicts.append(
+            {
+                "model_id": model_id,
+                "generalization": {
+                    "mean_heldout_px": held,
+                    "mean_train_px": train,
+                    "overfit_ratio": float(ratio),
+                    "n_failed_folds": n_failed,
+                    "pass": gen_pass,
+                    "note": gen_note,
+                },
+                "stability": {
+                    "max_disp_px": d_boot,
+                    "slice_max_disp_px": d_slice,
+                    "max_disp_px_overall": float(d_overall),
+                    "pass": stab_pass,
+                    "note": stab_note,
+                },
+                "crlb": {
+                    "n_below_hard": crlb_block.get("n_below_hard"),
+                    "n_below_soft": crlb_block.get("n_below_soft"),
+                    "n_no_bound": crlb_block.get("n_no_bound"),
+                    "lines": crlb_block.get("lines"),
+                    "pass": crlb_pass,
+                    "note": crlb_note,
+                },
+                "overall": overall,
+                "notes": notes,
+            }
+        )
+    return {
+        "schema": "evaluate-verdict-v1",
+        "verdicts": verdicts,
+        "thresholds": {"gen_overfit_ratio_max": gen_max, "stability_disp_px_max": stab_max},
+    }
+
+
+def select_model(verdicts: list[dict], cv_summary: dict, cfg: CalibrationConfig) -> dict:
+    """选型规则:三判据全 PASS 才当选;held-out 最小者胜;平局取简、仍平按 BIC(D-09/D-10/D-12)。
+
+    verdicts:build_verdict_table 返回的 "verdicts" 行列表;行内可带 "bic" 键
+    (调用方在全量重训解上用 bic_full_fit 算好写入——BIC 只在统计平局时
+    真正出场当裁决器,D-10,不做硬门槛)。cv_summary 同判行表输入(要用
+    fold_heldout 与 mean_heldout_px)。cfg:CalibrationConfig(读
+    evaluate.tie_band_px / tie_band_rel,照切分函数"取全量配置"的既定体例)。
+
+    判定顺序:三判据全 PASS 者才进候选(D-12,不搞加权打分);候选里
+    held-out 均值最小者排第一;第一名与第二名做配对检验——
+      * 实际等价 → 取参数更简者(D-09,_MODEL_PARAM_COUNTS);
+      * 统计平局 → BIC 更小者裁决(D-10);行内没有可用 BIC 时退回取简,
+        并在理由里说明 BIC 缺席(不静默冒充);
+      * 真实差异 → held-out 最小者胜。
+    无全 PASS 候选 → selected 为 None,reasons 逐模型记录未当选原因。
+
+    返回 {"selected", "reason", "reasons", "selection_rule", "comparison"}
+    (selection_rule 为中文规则说明,选型结论可考,T-04-03-03;comparison
+    是 paired_comparison 的完整 meta,等价带值/区间/所用方法全在)。
+    """
+    rule = (
+        "三判据(泛化 / 稳定 / 逼近 CRLB)全 PASS 才能当选,不搞加权打分(D-12);"
+        "多个全 PASS 时 held-out 最小者胜;第一名与第二名的差距落进等价带判实际等价,"
+        "取参数更简者(D-09);统计平局(置信区间含 0 但超出等价带)按 BIC 更小者裁决"
+        "(D-10)。"
+    )
+    passing = [v for v in verdicts if v.get("overall") == "PASS"]
+    if not passing:
+        reasons: dict[str, str] = {}
+        for v in verdicts:
+            mid = str(v.get("model_id"))
+            failed = [
+                cname
+                for key, cname in (
+                    ("generalization", "泛化"),
+                    ("stability", "稳定"),
+                    ("crlb", "逼近 CRLB"),
+                )
+                if not (v.get(key) or {}).get("pass")
+            ]
+            reasons[mid] = (
+                f"未当选:三判据未全过({'、'.join(failed) if failed else '无判定'})"
+                f"——各项数值与判定式见判行表该行。"
+            )
+        return {
+            "selected": None,
+            "reason": (
+                "没有任何候选模型三判据全 PASS——当前数据条件下选不出可辩护的模型,"
+                "未当选原因逐模型记录在 reasons(不硬选,等数据条件改善或模型调整)。"
+            ),
+            "reasons": reasons,
+            "selection_rule": rule,
+            "comparison": None,
+        }
+
+    ranked = sorted(passing, key=lambda v: float(cv_summary[v["model_id"]]["mean_heldout_px"]))
+    best = ranked[0]
+    best_cv = cv_summary[best["model_id"]]
+    if len(ranked) == 1:
+        mid = best["model_id"]
+        return {
+            "selected": mid,
+            "reason": (
+                f"{mid} 是唯一三判据全 PASS 的候选,直接当选(held-out 均值 "
+                f"{float(best_cv['mean_heldout_px']):.4f} px)。"
+            ),
+            "reasons": {},
+            "selection_rule": rule,
+            "comparison": None,
+        }
+
+    second = ranked[1]
+    second_cv = cv_summary[second["model_id"]]
+    # 前两名配对比较:同折相减消折间波动;等价带用两者中较简模型的均值当相对档
+    simpler_of_two = (
+        best["model_id"]
+        if _MODEL_PARAM_COUNTS[best["model_id"]] <= _MODEL_PARAM_COUNTS[second["model_id"]]
+        else second["model_id"]
+    )
+    cmp_res = paired_comparison(
+        np.asarray(best_cv["fold_heldout"], dtype=np.float64)
+        - np.asarray(second_cv["fold_heldout"], dtype=np.float64),
+        tie_band_px=cfg.evaluate.tie_band_px,
+        tie_band_rel=cfg.evaluate.tie_band_rel,
+        simpler_mean=float(cv_summary[simpler_of_two]["mean_heldout_px"]),
+    )
+    if cmp_res["verdict"] == "equivalent":
+        selected = simpler_of_two
+        other = second["model_id"] if selected == best["model_id"] else best["model_id"]
+        reason = (
+            f"实际等价取简({cmp_res['note']})——按 D-09 取参数更简的 {selected}"
+            f"({_MODEL_PARAM_COUNTS[selected]} 参,{other} 为 "
+            f"{_MODEL_PARAM_COUNTS[other]} 参)。"
+        )
+    elif cmp_res["verdict"] == "tie":
+        bic_best = best.get("bic")
+        bic_second = second.get("bic")
+        if (
+            bic_best is not None
+            and bic_second is not None
+            and np.isfinite(float(bic_best))
+            and np.isfinite(float(bic_second))
+        ):
+            selected = (
+                best["model_id"] if float(bic_best) <= float(bic_second) else second["model_id"]
+            )
+            winner_bic = min(float(bic_best), float(bic_second))
+            reason = (
+                f"统计平局({cmp_res['note']})——按 D-10 由 BIC 裁决:{selected} 的 "
+                f"BIC {winner_bic:.2f} 更小,当选(BIC 只作裁决器,不做硬门槛)。"
+            )
+        else:
+            selected = simpler_of_two
+            reason = (
+                f"统计平局({cmp_res['note']})——判行表行内没有可用的 BIC 数值,"
+                f"退回 D-09 取参数更简的 {selected}。若需 BIC 裁决,请检查全量重训解"
+                f"是否已用 bic_full_fit 算好并写进行内 bic 键。"
+            )
+    else:
+        selected = best["model_id"]
+        reason = (
+            f"真实差异({cmp_res['note']})——held-out 最小的 {selected} 当选"
+            f"(均值 {float(best_cv['mean_heldout_px']):.4f} px vs "
+            f"{float(second_cv['mean_heldout_px']):.4f} px)。"
+        )
+    return {
+        "selected": selected,
+        "reason": reason,
+        "reasons": {},
+        "selection_rule": rule,
+        "comparison": cmp_res,
+    }

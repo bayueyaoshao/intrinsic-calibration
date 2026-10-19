@@ -243,8 +243,7 @@ class TestCrlbAlertCheck:
     def test_all_above_lines_pass(self):
         # 8 个经验标准差全部 0.9 × σ_CRLB(高于软线 0.56)→ 零告警,判 pass
         emp = {nm: 0.009 for nm in _sigma_named()}
-        out = crlb_alert_check(emp, _sigma_named(), n_groups=8,
-                               alpha_hard=0.01, alpha_soft=0.05)
+        out = crlb_alert_check(emp, _sigma_named(), n_groups=8, alpha_hard=0.01, alpha_soft=0.05)
         assert out["verdict"] == "pass"
         assert out["n_below_hard"] == 0
         assert out["n_below_soft"] == 0
@@ -306,7 +305,7 @@ class TestBuildVerdictTable:
 
     def test_row_structure_and_overall(self):
         cv = {
-            "m1": _cv_entry(0.10, 0.12),   # 比值 0.833 < 1.5 → 泛化 PASS
+            "m1": _cv_entry(0.10, 0.12),  # 比值 0.833 < 1.5 → 泛化 PASS
             "m2": _cv_entry(0.10, 0.12),
         }
         stab = {"m1": _stab_entry(0.01, 0.02), "m2": _stab_entry(0.09, 0.02)}
@@ -347,8 +346,9 @@ class TestBuildVerdictTable:
     def test_nonfinite_cv_numbers_rejected(self):
         cv = {"m1": _cv_entry(float("nan"), 0.12)}
         with pytest.raises(ValueError, match="非有限"):
-            build_verdict_table(cv, {"m1": _stab_entry(0.01, 0.02)},
-                                {"m1": _passing_crlb()}, {}, TH)
+            build_verdict_table(
+                cv, {"m1": _stab_entry(0.01, 0.02)}, {"m1": _passing_crlb()}, {}, TH
+            )
 
 
 class TestSelectModel:
@@ -369,10 +369,13 @@ class TestSelectModel:
         n2 = rng.normal(0.0, 1e-4, 25)
         folds_m1 = (0.1000 + n1).tolist()
         folds_m2 = (0.10001 + n2).tolist()
-        cv = {"m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
-              "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2)}
-        out = select_model([_row("m1", True, True, True), _row("m2", True, True, True)],
-                           cv, CalibrationConfig())
+        cv = {
+            "m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
+            "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2),
+        }
+        out = select_model(
+            [_row("m1", True, True, True), _row("m2", True, True, True)], cv, CalibrationConfig()
+        )
         assert out["comparison"]["verdict"] == "equivalent"
         assert out["selected"] == "m1"  # m1 = 8 参,m2 = 9 参(D-09 取简)
         assert "m1" in out["reason"] and "等价" in out["reason"]
@@ -385,10 +388,14 @@ class TestSelectModel:
         d = rng.normal(0.0, 1.0, 25)
         folds_m1 = (0.100 - d / 2.0).tolist()  # 均值小 → held-out 第一名
         folds_m2 = (0.100 + d / 2.0).tolist()
-        cv = {"m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
-              "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2)}
-        verdicts = [_row("m1", True, True, True, bic=1010.0),
-                    _row("m2", True, True, True, bic=1000.0)]
+        cv = {
+            "m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
+            "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2),
+        }
+        verdicts = [
+            _row("m1", True, True, True, bic=1010.0),
+            _row("m2", True, True, True, bic=1000.0),
+        ]
         out = select_model(verdicts, cv, CalibrationConfig())
         assert out["comparison"]["verdict"] == "tie"
         assert out["selected"] == "m2"
@@ -400,10 +407,13 @@ class TestSelectModel:
         d = rng.normal(0.0, 1.0, 25)
         folds_m1 = (0.100 - d / 2.0).tolist()
         folds_m2 = (0.100 + d / 2.0).tolist()
-        cv = {"m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
-              "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2)}
-        out = select_model([_row("m1", True, True, True), _row("m2", True, True, True)],
-                           cv, CalibrationConfig())
+        cv = {
+            "m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
+            "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2),
+        }
+        out = select_model(
+            [_row("m1", True, True, True), _row("m2", True, True, True)], cv, CalibrationConfig()
+        )
         assert out["comparison"]["verdict"] == "tie"
         assert out["selected"] == "m1"
         assert "BIC" in out["reason"]
