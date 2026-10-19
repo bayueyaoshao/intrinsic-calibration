@@ -22,7 +22,11 @@ worker 层 try/except 兜底 + 消费循环宽接双保险(串行回退时 worke
 
 并行与任务打包(Pitfall 7):任务元组只带姿态集合等小对象;整份观测集
 随任务传递,由并行框架对 numpy 大数组自动内存映射共享,不逐任务复制。
-正式口径先跑 CV(100 次)校准耗时,再放 bootstrap 的大批量(800 次)。
+线程锁(OpenCV 线程数)在入口和每个 worker 里各上一次:并行子进程是
+全新进程,父进程的设置传不过去,子进程多线程归约顺序不定会末位漂移,
+"同种子重跑逐位一致 / 并行与串行同结果"就守不住(04-02 教训的进程级
+补全)。正式口径先跑 CV(100 次)校准耗时,再放 bootstrap 的大批量
+(800 次)。
 
 落盘边界:本模块只算不写。返回值里私有 _detail 键(明细数组)交
 04-05 的产物层转 npz 旁车,json/下游只消费汇总键(产物保真:逐姿态、
@@ -41,6 +45,7 @@ from calib.evaluation.selection import crlb_alert_check, mad_outlier_poses
 from calib.evaluation.splitting import (
     _pose_groups,
     assign_cv_folds,
+    bootstrap_resample,
     leave_one_pose_out,
     obs_rows,
     pose_row_mask,
@@ -252,7 +257,22 @@ def _cv_fold_worker(task: tuple) -> dict:
     (串行回退时 worker 异常发生在 run_parallel 生成器体内会杀死整个
     任务流、后续折被静默吞掉——异常必须到不了生成器)。
     """
-    (model_id, round_idx, fold_idx, train_poses, val_poses, obs, scipy_cfg, loss, f_scale) = task
+    (
+        model_id,
+        round_idx,
+        fold_idx,
+        train_poses,
+        val_poses,
+        obs,
+        scipy_cfg,
+        loss,
+        f_scale,
+        cv2_threads,
+    ) = task
+    # 线程锁必须在 worker 里再上一次:并行子进程是全新进程,入口处
+    # (父进程)的 setNumThreads 管不到它们——子进程多线程归约顺序不定
+    # 会末位漂移,"并行与串行同结果"守不住(04-02 教训的进程级补全)
+    cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
         train_obs = obs_rows(obs, pose_row_mask(obs, train_poses))
@@ -386,6 +406,7 @@ def cv_pose_grouped(
             scipy_cfg,
             kernels[m][0],
             kernels[m][1],
+            cfg.cv2_threads,
         )
         for m in models
         for e in assignment
@@ -513,7 +534,9 @@ def _lopo_worker(task: tuple) -> dict:
     唯一考题姿态只估位姿评分(外参不训练)。异常兜底与 CV 折 worker 同体例:
     失败转契约占行,异常到不了生成器。
     """
-    (model_id, val_pose, train_poses, obs, scipy_cfg, loss, f_scale) = task
+    (model_id, val_pose, train_poses, obs, scipy_cfg, loss, f_scale, cv2_threads) = task
+    # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
+    cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
         train_obs, val_obs = split_by_pose_ids(obs, train_poses)
@@ -594,7 +617,16 @@ def lopo(
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
 
     tasks = [
-        (m, e["val_pose"], tuple(e["train_poses"]), obs, scipy_cfg, kernels[m][0], kernels[m][1])
+        (
+            m,
+            e["val_pose"],
+            tuple(e["train_poses"]),
+            obs,
+            scipy_cfg,
+            kernels[m][0],
+            kernels[m][1],
+            cfg.cv2_threads,
+        )
         for m in models
         for e in assignment
     ]
@@ -752,7 +784,9 @@ def _slice_group_worker(task: tuple) -> dict:
     数学源约束)。Fisher 算不成不拖垮参数记录(参数照常留账,对照记
     crlb_note 缺席说明)。
     """
-    (model_id, group_idx, row_indices, obs, scipy_cfg, loss, f_scale, sigma) = task
+    (model_id, group_idx, row_indices, obs, scipy_cfg, loss, f_scale, sigma, cv2_threads) = task
+    # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
+    cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
         mask = np.zeros(len(obs.image_ids), dtype=bool)
@@ -842,6 +876,7 @@ def slices_by_index(
             kernels[m][0],
             kernels[m][1],
             sigma,
+            cfg.cv2_threads,
         )
         for m in models
         for g in groups
@@ -963,3 +998,277 @@ def slices_by_index(
         },
         "_slice_detail": detail,
     }
+
+
+# ---------------------------------------------------------------------------
+# bootstrap 重采样(bootstrap_pose,D-04/D-07,EVA-04 实验侧)
+# ---------------------------------------------------------------------------
+
+
+def _bootstrap_record(
+    model_id: str,
+    rep: int,
+    params: dict | None = None,
+    rms_overall: float | None = None,
+    ref_rvec=None,
+    ref_tvec=None,
+    failure_note: str | None = None,
+) -> dict:
+    """一次重采样的记录(键一个不少):整条参数向量 + 回代 RMS + 参考位姿。
+
+    参考位姿取该次解自己的第 0 个视图——像素位移当量(max_disp_px)的
+    投影基准;失败转契约占行(params 空、说明带异常类型)。
+    """
+    return {
+        "model_id": model_id,
+        "rep": int(rep),
+        "converged": params is not None,
+        "params": params if params is not None else {},
+        "rms_overall": rms_overall,
+        "ref_rvec": (None if ref_rvec is None else [float(v) for v in ref_rvec]),
+        "ref_tvec": (None if ref_tvec is None else [float(v) for v in ref_tvec]),
+        "failure_note": failure_note,
+    }
+
+
+def _bootstrap_worker(task: tuple) -> dict:
+    """单次重采样单模型求解(worker,顶层函数才能被序列化传给并行子进程)。
+
+    训练观测集 = 抽中姿态**去重**后带全部连拍:同一姿态抽中 3 次只算一份
+    ——bootstrap 考的是"换一批姿态",不是"某个姿态多考几遍",重复计权
+    会人为放大被偏爱姿态的话语权。求解与 CV / 分组同一条路径(OpenCV
+    初始化 → scipy 精化)。异常兜底同体例:失败转契约占行,异常到不了
+    生成器(串行回退不死任务流,体例照 optimizer.py 的既定教训)。
+    """
+    (model_id, rep, picked_poses, obs, scipy_cfg, loss, f_scale, cv2_threads) = task
+    # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
+    cv2.setNumThreads(cv2_threads)
+    try:
+        model = create_model(model_id)
+        train_obs = obs_rows(obs, pose_row_mask(obs, set(picked_poses)))
+        result = make_calibrate_fn(model, scipy_cfg, loss, f_scale)(train_obs)
+        if not result.converged or result.rms_overall is None:
+            return _bootstrap_record(model_id, rep, failure_note=result.failure_note)
+        params = {name: float(result.params[name]) for name in model.param_names}
+        return _bootstrap_record(
+            model_id,
+            rep,
+            params=params,
+            rms_overall=float(result.rms_overall),
+            ref_rvec=result.rvecs[0],
+            ref_tvec=result.tvecs[0],
+        )
+    except (ValueError, ArithmeticError, RuntimeError) as exc:
+        return _bootstrap_record(
+            model_id,
+            rep,
+            failure_note=f"{model_id} 重采样 {rep} 未跑成:{type(exc).__name__}——{exc}",
+        )
+
+
+def bootstrap_pose(
+    obs: ObservationSet,
+    board: BoardSpec,
+    cfg: CalibrationConfig,
+    optimizer_config: dict,
+    progress=None,
+) -> dict:
+    """bootstrap 重采样实验(D-04,EVA-04 实验侧):按姿态有放回重抽一批
+    姿态重新标定,重复 cfg.evaluate.bootstrap_n 次。
+
+    白话:把全体姿态当纸条放进箱子,抽 n 次(抽了再放回,同一姿态可能被
+    抽中多次),用抽中的这一批重新标一遍内参;重复很多次,看参数每次挪多
+    少——量的是"换一批姿态,内参会跟着动多少"。
+
+    4 个模型**共用同一批分配表**(先产分配再派任务):bootstrap 的用途是
+    跨模型配对比较方差,各模型面对同一组考题,差值才是"模型之间的差"而
+    不是"考题难度的差"(D-04)。分配表纯 str/int,可落盘复查。
+
+    抽中姿态带其全部连拍(切分只操作姿态 ID 的铁律消费位);去重语义在
+    _bootstrap_worker。
+
+    签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped——要
+    cfg.evaluate 的重采样次数/模型/并行上限与 cfg.calibrate.scipy、cfg.seed)。
+
+    返回 {"schema": "bootstrap-v1", "models": {mX: {"param_std", "param_ci",
+    "var_bootstrap", "var_slice", "pose_sampling_var", "var_slice_note",
+    "max_disp_px", "n_failed", "loss_used"}}, "meta", "_bootstrap_detail"}。
+    var_slice / pose_sampling_var 是占位键:本任务只产出 bootstrap 侧方差,
+    分组侧方差由 04-05/04-06 组装侧填入后经 pose_sampling_variance 相减
+    (接口在此定死,D-07)。max_disp_px 用像素位移当量(键名对齐判行表
+    stability_summary);明细数组(逐次参数向量)挂 _bootstrap_detail 交
+    04-05 转旁车文件(产物保真:逐次全存,不只留汇总)。
+    """
+    eval_cfg = cfg.evaluate
+    scipy_cfg = cfg.calibrate.scipy
+    cv2.setNumThreads(cfg.cv2_threads)  # 线程锁 = 求解逐位确定(04-02 教训)
+    _check_obs_board(obs, board)
+
+    poses = unique_poses(obs)
+    assignment = bootstrap_resample(poses, cfg)  # 一批分配,全部模型共用(D-04)
+    models = tuple(eval_cfg.models)
+    kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
+
+    tasks = [
+        (
+            m,
+            e["rep"],
+            tuple(e["pose_ids"]),
+            obs,
+            scipy_cfg,
+            kernels[m][0],
+            kernels[m][1],
+            cfg.cv2_threads,
+        )
+        for e in assignment
+        for m in models
+    ]
+    results: dict[tuple[str, int], dict] = {}
+    iterator = run_parallel(tasks, _bootstrap_worker, eval_cfg.evaluate_max_workers)
+    for done, task in enumerate(tasks, start=1):
+        model_id, rep = task[0], task[1]
+        try:
+            record = next(iterator)
+        except StopIteration:  # pragma: no cover - 任务数与产出数恒相等
+            raise AssertionError(
+                f"并行产出数与任务数对不上(bootstrap 任务 {len(tasks)} 个),"
+                f"编排层代码契约被破坏,请检查 bootstrap_pose。"
+            )
+        except Exception as e:  # noqa: BLE001  双保险:worker 漏网异常转失败契约
+            record = _bootstrap_record(
+                model_id,
+                rep,
+                failure_note=f"{model_id} 重采样 {rep} 未跑成:{type(e).__name__}——{e}",
+            )
+        results[(model_id, rep)] = record
+        if progress:
+            progress({"done": done, "total": len(tasks)})
+
+    models_out: dict[str, dict] = {}
+    detail: dict[str, dict] = {}
+    for m in models:
+        loss, _f_scale = kernels[m]
+        model_obj = create_model(m)
+        names = model_obj.param_names
+        records = [results[(m, e["rep"])] for e in assignment]
+        # 明细矩阵:失败重采样记 NaN 行(产物保真:逐次全存)
+        matrix = np.array(
+            [[np.nan if not r["converged"] else r["params"][n] for n in names] for r in records],
+            dtype=np.float64,
+        )
+        ok = ~np.isnan(matrix).any(axis=1)
+        if int(ok.sum()) >= 2:
+            param_std = {n: float(np.std(matrix[ok, i], ddof=1)) for i, n in enumerate(names)}
+            param_ci = {
+                n: [
+                    float(np.percentile(matrix[ok, i], 2.5)),
+                    float(np.percentile(matrix[ok, i], 97.5)),
+                ]
+                for i, n in enumerate(names)
+            }
+            var_bootstrap = {n: float(np.var(matrix[ok, i], ddof=1)) for i, n in enumerate(names)}
+            ref0 = next(r for r in records if r["converged"])
+            max_disp_px = _px_dispersion(
+                [r["params"] for r in records if r["converged"]],
+                model_obj,
+                obs.object_points,
+                np.asarray(ref0["ref_rvec"], dtype=np.float64),
+                np.asarray(ref0["ref_tvec"], dtype=np.float64),
+            )
+        else:
+            # 有效样本不足 2 个,方差/分位数无从谈起:记 None 不冒充数值
+            param_std = {n: None for n in names}
+            param_ci = {n: None for n in names}
+            var_bootstrap = {n: None for n in names}
+            max_disp_px = None
+        models_out[m] = {
+            "param_std": param_std,
+            "param_ci": param_ci,
+            "var_bootstrap": var_bootstrap,
+            "var_slice": None,
+            "pose_sampling_var": None,
+            "var_slice_note": (
+                "分组侧方差由 04-05/04-06 组装时填入;两侧就位后经"
+                " pose_sampling_variance 相减得位姿抽样方差(D-07,接口在此定死)"
+            ),
+            "max_disp_px": max_disp_px,
+            "n_failed": int(len(records) - int(ok.sum())),
+            "loss_used": loss,
+        }
+        detail[m] = {
+            "rep": np.array([r["rep"] for r in records], dtype=np.int64),
+            "params": matrix,
+            "rms": np.array(
+                [np.nan if r["rms_overall"] is None else r["rms_overall"] for r in records],
+                dtype=np.float64,
+            ),
+            "param_names": np.array(names),
+        }
+
+    return {
+        "schema": "bootstrap-v1",
+        "models": models_out,
+        "meta": {
+            "n_models": len(models),
+            "n_resamples": len(assignment),
+            "n_solves": len(tasks),
+            "n_failed_total": int(sum(m["n_failed"] for m in models_out.values())),
+            "bootstrap_n": int(eval_cfg.bootstrap_n),
+            "seed": int(cfg.seed),
+            "max_workers": int(eval_cfg.evaluate_max_workers),
+        },
+        "_bootstrap_detail": detail,
+    }
+
+
+def pose_sampling_variance(var_bootstrap: dict, var_slice: dict) -> dict:
+    """来源分离(D-07):逐参数"总方差 − 纯噪声方差 = 位姿抽样方差"。
+
+    白话:重复张分组实验把同一批姿态固定住、只换噪声,量出来的是"纯噪声
+    能晃动参数多少"(var_noise);bootstrap 连姿态都在换(换一批姿态重新
+    标定),量出来的是"噪声 + 换姿态"合计的晃动(var_total)。两者之差
+    就是"换姿态本身"带来的不确定度——即"这批姿态抽得偏不偏"的贡献。
+    注意相减的是**方差**(标准差的平方),不是标准差:独立来源的方差才
+    可加,标准差不能直接相减。
+
+    负值处置:分组侧方差理论上不应超过 bootstrap 侧(前者只是后者的噪声
+    分量),但小样本估计有抖动,真出现了就把位姿抽样方差钳 0,并在该参数
+    的 note 里说明(不静默)。参数集合不一致或非有限值当场中文报错。
+
+    返回 {参数: {"var_total", "var_noise", "var_pose_sampling", "pose_share",
+    "note"}};pose_share = 位姿抽样方差占总方差的比例(总方差为 0 时记 0)。
+    """
+    if set(var_bootstrap) != set(var_slice):
+        only_boot = sorted(set(var_bootstrap) - set(var_slice))
+        only_slice = sorted(set(var_slice) - set(var_bootstrap))
+        raise ValueError(
+            f"两份方差的参数集合对不上(bootstrap 独有:{only_boot},"
+            f"分组独有:{only_slice})。来源分离必须逐参数同集合相减,"
+            f"请检查两侧是否来自同一套参数布局。"
+        )
+    out: dict[str, dict] = {}
+    for name, total_raw in var_bootstrap.items():
+        total = float(total_raw)
+        noise = float(var_slice[name])
+        if not np.isfinite(total) or not np.isfinite(noise):
+            raise ValueError(
+                f"参数 {name} 的方差不是有限数(bootstrap={total!r},分组={noise!r}),"
+                f"无法做来源分离;请先检查上游实验是否全部收敛。"
+            )
+        pose_var = total - noise
+        note = None
+        if pose_var < 0.0:
+            pose_var = 0.0
+            note = (
+                f"参数 {name} 的分组方差大于 bootstrap 方差,位姿抽样方差按 0 计:"
+                "理论上分组(只换噪声)是 bootstrap(换噪声 + 换姿态)的一部分,"
+                "倒挂多半是小样本估计的抖动,钳 0 保守处理,不静默。"
+            )
+        out[name] = {
+            "var_total": total,
+            "var_noise": noise,
+            "var_pose_sampling": pose_var,
+            "pose_share": (pose_var / total if total > 0.0 else 0.0),
+            "note": note,
+        }
+    return out

@@ -569,8 +569,8 @@ def test_bootstrap_records_every_rep_and_picks_all_burst_views(cv_setup, monkeyp
             "训练观测集必须去重带全连拍(抽中 3 次的姿态只算一份,2 张全带)"
         )
 
-    names = create_model("m1").param_names
     for m in ("m1", "m2"):
+        names = create_model(m).param_names  # 参数名按模型取(m2 比 m1 多 1 参)
         summary = report["models"][m]
         assert summary["n_failed"] == 0
         assert set(summary["param_std"]) == set(names)
@@ -622,6 +622,9 @@ def test_bootstrap_parallel_matches_serial(cv_setup):
         _boot_cfg(s["cfg"], n_reps=2, models=("m1",), max_workers=2),
         {"m1": {"loss": "linear"}},
     )
+    # 运行方式本身是元数据不是数值结果:各自记对后抹平再比全量
+    assert serial["meta"]["max_workers"] == 1 and par["meta"]["max_workers"] == 2
+    par["meta"]["max_workers"] = 1
     _assert_reports_equal(serial, par)
 
 
