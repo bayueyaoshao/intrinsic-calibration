@@ -22,8 +22,8 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 噪声与可达精度 (NOI)
 
 - [x] **NOI-01**: 时域噪声底(同姿态连拍相减)+ Immerkaer 单帧退化路径,来源标注;重复数 <2 的姿态自动退化为单帧估计(03-03;真实数据 80 姿态全来源标注,test 65 张独立照全走折算)
-- [ ] **NOI-02**: 像素噪声→角点定位误差映射(受控注入实验,建立经验传递曲线)
-- [ ] **NOI-03**: Fisher 信息/CRLB——每个内参方差理论下界 + 位姿分布退化检测;外参经 Schur 消元边际化;实测误差低于 CRLB 判定为系统偏差信号
+- [x] **NOI-02**: 像素噪声→角点定位误差映射(受控注入实验,建立经验传递曲线)(03-01 注入实验 + 经验传递曲线;03-03 `calib noise` 命令闭环与真实数据首轮落盘,σ=0 校准档位移恰为零)
+- [x] **NOI-03**: Fisher 信息/CRLB——每个内参方差理论下界 + 位姿分布退化检测;外参经 Schur 消元边际化;实测误差低于 CRLB 判定为系统偏差信号(03-02 σ=1 基准数学核心;03-04 OpenCV stdDev 交叉验证协议;03-05 16 份 CRLB 矩阵编排与 `calib fisher` 闭环;03-06 五步接力冒烟 + 人工核查收口)
 
 ### 模型 (MOD)
 
@@ -116,8 +116,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SOL-01 | Phase 2 | Shipped (Phase 2)(02-03/02-04 求解器统一接口 + OpenCV 初始化 → scipy least_squares 精化双后端,CalibrationResult 同构落盘) |
 | ITER-01 | Phase 2 | Shipped (Phase 2)(02-05 全矩阵编排:run 目录内 result.json/comparison.json 全带血缘(配置指纹+上游哈希+时间戳);02-06 存疑复核表延续同一契约) |
 | NOI-01 | Phase 3 | Shipped (Phase 3)(03-03 temporal_noise 时域实测 + 单帧退化 + 抖动分离;真实数据 80/80 姿态来源标注,noise.json + 全保真明细落盘) |
-| NOI-02 | Phase 3 | Pending |
-| NOI-03 | Phase 3 | Pending |
+| NOI-02 | Phase 3 | Shipped (Phase 3)(03-01 受控注入实验 + 经验传递曲线;03-03 calib noise 命令闭环与真实数据首轮落盘) |
+| NOI-03 | Phase 3 | Shipped (Phase 3)(03-02 FIM/Schur/CRLB 数学核心;03-04 stdDev 交叉验证协议;03-05 16 份 CRLB 编排与 calib fisher 闭环;03-06 全链冒烟 + 人工核查收口) |
 | EVA-01 | Phase 4 | Pending |
 | EVA-02 | Phase 4 | Pending |
 | EVA-03 | Phase 4 | Pending |
@@ -148,4 +148,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-16*
-*Last updated: 2026-10-18 after Phase 2 execution complete (MOD-01~02 / SOL-01 / ITER-01 shipped,累计 8/32)*
+*Last updated: 2026-10-18 after Phase 3 execution complete (NOI-01~03 shipped,累计 11/32)*

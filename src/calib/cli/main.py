@@ -1181,7 +1181,11 @@ def report() -> None:
 
 @app.command(help="run-all:一条命令按流水线顺序跑完已实现的全流程(未实现的阶段会说明)")
 def run_all() -> None:
-    """按顺序执行已实现的阶段;未实现的阶段打印占位说明,不中断。"""
+    """按顺序执行已实现的阶段;未实现的阶段打印占位说明,不中断。
+
+    接力顺序 = 流水线顺序(ingest → corners → calibrate → noise → fisher),
+    每步只靠落盘产物传递状态;哪一步断了命令就在哪一步停下并报退出码 1。
+    """
     typer.echo("run-all:按流水线顺序执行已实现的阶段……")
     typer.echo("")
     ingest()
@@ -1190,8 +1194,12 @@ def run_all() -> None:
     typer.echo("")
     calibrate()
     typer.echo("")
-    typer.echo("后续阶段(噪声/理论极限/考试/归因/报告)由后续版本实现,"
-               "run-all 到此为止。")
+    noise()
+    typer.echo("")
+    fisher()
+    typer.echo("")
+    typer.echo("后续阶段(防作弊考试/误差归因/汇总报告)由后续版本实现,"
+               "run-all 到第⑤步 crlb.json 为止。")
 
 
 def main() -> None:

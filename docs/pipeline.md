@@ -36,6 +36,7 @@ flowchart TD
     ANA -. "某几张照片拖后腿 → 剔除后重新标定" .-> CAL
     ANA -. "角点横向/纵向偏差异常 → 换角点方法重提" .-> COR
     ANA -. "实测好于理论极限(不可能) → 噪声或角点有系统偏差,回头查" .-> NOI
+    FSH -. "条件数达退化线(摆位定不住某些参数组合) → 建议改善摆拍旋转多样性后补拍(人工决定)" .-> DATA
     EVA -. "模型死记硬背(过拟合) → 换更简单的模型" .-> CAL
     ANA -. "摆拍位置覆盖不足 → 建议补拍(人工决定)" .-> DATA
 
@@ -52,9 +53,9 @@ flowchart TD
 |---|---|---|---|---|---|---|
 | ① | 照片入库体检 | `calib ingest` | input_data/, config/ | manifest.json(每张带全部体检数字与判定来源), suspect_originals/(存疑原图副本), suspect_diff_vs_*.txt(跨轮存疑对比表) | io/ | IO-01~03 |
 | ② | 找棋盘角点 | `calib corners` | manifest, 图像, 检测配置 | corners_train/test_×classic/sb.npz(4 份角点;sb 路线含 classic 兜底帧并逐帧记 source 来源), detection_summary.json(检测质量摘要,sb 三口径:纯 SB/兜底/合计), marked_copies/(全部照片的角点标记副本,classic/sb 两套), mosaic/(总览拼图 + 存疑拼图 + 逐格索引), review_sb_failed/(SB 未检出帧:原图+兜底标记+诊断记录), review_suspects/(存疑帧:原图+双检测器标记+中文原因汇总), review_burst_flagged/(连拍点名帧:原图+双检测器标记+波动数值与容差结论)——三个 review 文件夹各为一个文件夹看全的人工复核包,清单为空不生成 | corners/ | COR-01~03 |
-| ③ | 测噪声底 | `calib noise` | corners.npz, 图像 | noise.json | noise/ | NOI-01~02 |
+| ③ | 测噪声底 | `calib noise` | corners_train_sb.npz / corners_test_sb.npz(血缘回溯同轮 manifest)、manifest.json、input_data 图像 | run_<时间戳>/{noise.json(双口径 σ:检测器口径 + 时域口径,逐姿态来源标注 temporal/immerkaer_transfer,失败轮数值为 null 且写中文原因), injection_displacements.npz(逐张逐档逐重复的角点位移), injection_per_image.json(逐张注入明细), transfer_curve.json(像素噪声→角点误差传递曲线,含 σ=0 校准档), temporal_sigma_per_corner.npz / immerkaer_per_image.npz(逐姿态/逐张明细,各带血缘旁车 meta.json), transfer_curve.png(曲线图)} | noise/ | NOI-01~02 |
 | ④ | 求解相机内参 | `calib calibrate` | corners_train/test_*.npz(某检测器口径的角点), manifest.json, 模型/求解器配置矩阵 | run_<时间戳>/ 下每组合一个子目录(目录名 <模型>__<求解器>,如 m2__scipy、m2__scipy_softl1;内含 result.json + extrinsics.npz + residuals.npz 逐帧残差), comparison.json(全矩阵对比摘要), suspect_review/(存疑帧 vs 正常帧逐帧复核:JSON 结论表 + PNG 对比图,复核失败不影响标定结果) | models/, solve/, visualization/ | MOD-01~02, SOL-01, ITER-01 |
-| ⑤ | 算理论精度极限 | `calib fisher` | corners.npz, noise.json, 标定结果 | crlb.json | noise/ | NOI-03 |
+| ⑤ | 算理论精度极限 | `calib fisher` | corners_train_sb.npz + manifest.json、noise.json(双口径 σ)、各模型 m{X}__scipy/result.json + extrinsics.npz(线性化点:算误差界时用的那组解) | run_<时间戳>/{crlb.json(16 份 CRLB 记录:4 模型 × 2 观测集 640全帧/80姿态 × 2 σ 口径,逐内参标准差下界 + Σ 敏感性带 + 特征谱/条件数分档 + 软方向 + OpenCV stdDev 交叉验证结论;失败轮数值为 null 且写中文原因), fisher_m{X}.npz(逐模型 Fisher 矩阵明细,各带血缘旁车 meta.json), figures/(逐份记录的特征谱图)} | noise/ | NOI-03 |
 | ⑥ | 防作弊考试 | `calib evaluate` | corners.npz, 实验配置 | experiments/*.json, 汇总表 | evaluation/ | EVA-01~05 |
 | ⑦ | 误差归因 | `calib analyze` | 任意上游产物 | analysis/*.json | analysis/ | ANA-01~04 |
 | ⑧ | 汇总证据出报告 | `calib report` / `calib run-all` | 全部产物 | report.html/md, figures/ | visualization/, report/ | REP-01~03, ITER-01~04 |
