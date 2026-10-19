@@ -1,10 +1,15 @@
-"""四类防作弊实验的编排:交叉验证 / 留一姿态 / 重复张分组 / bootstrap 重采样。
+"""四类防作弊实验的编排:交叉验证 / 留一姿态 / 重复张分组 / bootstrap 重采样,
+外加选型交付(run_delivery:全量重训 + test 独立照片逐张并排评分,D-16)。
 
 白话:阶段四的模型选型要给每个候选模型发一张"防作弊成绩单"——换一批
 没见过的姿态还准不准(交叉验证、留一姿态)、参数稳不稳(重复张分组、
 bootstrap 重采样)。四类实验全部走同一条求解路径:OpenCV 初始化 →
 scipy 精化(优化器配置用 04-02 优化器对比选出的推荐配置,D-13),全部
 随机性只从全局种子按标签确定性派生——同种子重跑逐位一致,结论可复查。
+选型定案后,run_delivery 用全量数据给每个候选模型重训一遍最终内参
+(CV 只用于选型,交付一律全量重训——既定算法惯例),再让全部候选模型
+在 test 独立照片上逐张打分并排(D-16:评分只是投影计算几乎不费时,
+真实泛化差距一目了然)。
 
 铁律(04-01 切分层已内置,这里负责消费):
 - 一切切分只操作姿态 ID,同一姿态的全部连拍同进同出(零重叠断言在
@@ -41,7 +46,7 @@ import cv2
 import numpy as np
 
 from calib.evaluation.parallel import run_parallel
-from calib.evaluation.selection import crlb_alert_check, mad_outlier_poses
+from calib.evaluation.selection import bic_full_fit, crlb_alert_check, mad_outlier_poses
 from calib.evaluation.splitting import (
     _pose_groups,
     assign_cv_folds,
@@ -64,7 +69,7 @@ from calib.models.base import CameraModel, transform_to_camera
 from calib.noise.fisher import crlb_se, marginalized_fisher
 from calib.solve.observation import ObservationSet
 from calib.solve.opencv import solve_with_opencv
-from calib.solve.result import CalibrationResult
+from calib.solve.result import CalibrationResult, compute_result_metrics
 from calib.solve.scipy_solver import solve_with_scipy
 from calib.solve.scoring import score_views, solve_pose_only
 
@@ -1272,3 +1277,182 @@ def pose_sampling_variance(var_bootstrap: dict, var_slice: dict) -> dict:
             "note": note,
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# 选型交付(run_delivery,D-16/EVA-02 收口):全量重训 + test 逐张并排评分
+# ---------------------------------------------------------------------------
+
+
+def _delivery_model_entry(
+    model_id: str,
+    n_intrinsic_params: int,
+    n_views: int,
+    final_params: dict | None = None,
+    rms_px: float | None = None,
+    rss: float | None = None,
+    bic: float | None = None,
+    loss_used: str | None = None,
+    failure_note: str | None = None,
+) -> dict:
+    """一个模型的交付记录(键一个不少;失败时数值字段 None、中文说明非空)。
+
+    final_params = 全量重训的最终内参(交付物);rss = 全部重投影残差平方和
+    (BIC 的输入,D-10——RSS 取自全量解,这正是"先重训、后选型"的顺序
+    理由);bic 在编排内用 bic_full_fit 算好,04-03 的 select_model 只消费
+    现成值,不写第二份 BIC 数学。
+    """
+    return {
+        "model_id": model_id,
+        "converged": final_params is not None,
+        "final_params": final_params if final_params is not None else {},
+        "rms_px": rms_px,
+        "rss": rss,
+        "n_intrinsic_params": int(n_intrinsic_params),
+        "n_views": int(n_views),
+        "bic": bic,
+        "loss_used": loss_used,
+        "failure_note": failure_note,
+    }
+
+
+def run_delivery(
+    obs_train: ObservationSet,
+    obs_test: ObservationSet,
+    board: BoardSpec,
+    cfg: CalibrationConfig,
+    optimizer_config: dict,
+    progress=None,
+) -> dict:
+    """选型交付(D-16,EVA-02/SOL-02 收口):全量重训 + test 逐张并排评分。
+
+    白话:交叉验证只用来"选模型",真正交付的内参要用**全部**训练照片
+    重新训一遍(全量 640 视图口径,与选型口径一致,D-03 裁决);重训完
+    不急着下结论——四个候选模型的最终内参都在 test 独立照片上逐张打分
+    并排(评分 = 内参当尺子、只挪棋盘位姿的投影计算,几乎不费时),
+    "选定模型 vs 其他模型"的真实泛化差距一目了然,顺带交叉验证选型结论。
+
+    签名说明:取整个 CalibrationConfig(要 cfg.evaluate 的模型名单与
+    bic_n_poses、cfg.calibrate.scipy 读精化参数、cfg.cv2_threads 锁线程)
+    ——照 04-01/04-02/04-04 既定体例(实验函数取全量配置),计划文本的
+    (models, scipy_cfg, eval_cfg) 散传由此收拢。obs_test 由调用方经
+    load_observation_set(split="test") 装载传入(行序契约入口内置断言,
+    T-04-05-01);评分行带 image_id 可逐行对账。
+
+    返回 {"schema": "delivery-v1", "models": {mX: 交付记录}, "test_rows":
+    [...], "meta", "_delivery_detail"}——models 每项含 final_params / rms_px /
+    rss / n_intrinsic_params / n_views / bic(BIC 在此算好:rss 取自全量解
+    的全部重投影残差平方和,k = 内参数 + 6 × 视图数,n = cfg.evaluate.
+    bic_n_poses,04-03 select_model 只消费现成值,D-10);test_rows 每行
+    {"model_id", "image_id", "rms_px", "failure_note"},逐张逐模型全存
+    (产物保真,D-16)。单模型重训失败转失败契约占行,不中断其余模型,
+    其 test 评分行记 rms_px=None + 中文说明。
+    """
+    eval_cfg = cfg.evaluate
+    scipy_cfg = cfg.calibrate.scipy
+    cv2.setNumThreads(cfg.cv2_threads)  # 线程锁 = 求解逐位确定(04-02 教训)
+    _check_obs_board(obs_train, board)
+    _check_obs_board(obs_test, board)
+
+    models = tuple(eval_cfg.models)
+    n_views = len(obs_train.image_ids)
+    # 推荐配置在循环外先核一遍:条目缺失/核越界当场报错(不静默回退,D-13),
+    # 不让错误拖到半个模型重训完才炸
+    kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
+
+    models_out: dict[str, dict] = {}
+    test_rows: list[dict] = []
+    detail_model: list[str] = []
+    detail_image: list[str] = []
+    detail_rms: list[float] = []
+
+    for done, model_id in enumerate(models, start=1):
+        loss, f_scale = kernels[model_id]
+        model = create_model(model_id)
+        names = tuple(model.param_names)
+        try:
+            # 与 04-02 网格同一接口的两步求解:OpenCV 初值 → scipy 精化
+            result = make_calibrate_fn(model, scipy_cfg, loss, f_scale)(obs_train)
+            if not result.converged or result.rms_overall is None:
+                raise RuntimeError(result.failure_note or "全量重训未收敛(无失败说明)")
+            params_vec = np.array(
+                [result.params[name] for name in names], dtype=np.float64
+            )
+            _rms_chk, _per_view, residuals = compute_result_metrics(
+                obs_train, params_vec, result.rvecs, result.tvecs, model
+            )
+            rss = float(np.sum(residuals * residuals))
+            k = len(names) + 6 * n_views  # BIC 的 k = 全部被估参数(内参 + 6×视图外参)
+            bic = float(bic_full_fit(rss, k, int(eval_cfg.bic_n_poses)))
+            entry = _delivery_model_entry(
+                model_id,
+                n_intrinsic_params=len(names),
+                n_views=n_views,
+                final_params={name: float(result.params[name]) for name in names},
+                rms_px=float(result.rms_overall),
+                rss=rss,
+                bic=bic,
+                loss_used=loss,
+            )
+            failure_note = None
+        except (ValueError, ArithmeticError, RuntimeError) as exc:
+            entry = _delivery_model_entry(
+                model_id,
+                n_intrinsic_params=len(names),
+                n_views=n_views,
+                loss_used=loss,
+                failure_note=(
+                    f"{model_id} 全量重训未跑成:{type(exc).__name__}——{exc}"
+                ),
+            )
+            failure_note = entry["failure_note"]
+        models_out[model_id] = entry
+
+        # test 逐张评分(D-16 产物保真:逐张逐模型全存,失败记占行)
+        for i, image_id in enumerate(obs_test.image_ids):
+            if not entry["converged"]:
+                row_rms: float | None = None
+                row_note = f"模型重训失败,无内参可评分:{failure_note}"
+            else:
+                try:
+                    _rvec, _tvec, rms = solve_pose_only(
+                        obs_test.image_points[i], obs_test.object_points, params_vec, model
+                    )
+                    row_rms = float(rms)
+                    row_note = None
+                except (ValueError, AssertionError) as e:
+                    row_rms = None
+                    row_note = f"只估位姿评分失败:{e}"
+            test_rows.append(
+                {
+                    "model_id": model_id,
+                    "image_id": image_id,
+                    "rms_px": row_rms,
+                    "failure_note": row_note,
+                }
+            )
+            detail_model.append(model_id)
+            detail_image.append(image_id)
+            detail_rms.append(np.nan if row_rms is None else row_rms)
+        if progress:
+            progress({"done": done, "total": len(models)})
+
+    return {
+        "schema": "delivery-v1",
+        "models": models_out,
+        "test_rows": test_rows,
+        "meta": {
+            "n_models": len(models),
+            "n_views": n_views,
+            "n_test_images": len(obs_test.image_ids),
+            "n_test_rows": len(test_rows),
+            "bic_n_poses": int(eval_cfg.bic_n_poses),
+            "optimizer_source": "optimizer.json recommended_solver(D-13 统一配置)",
+            "seed": int(cfg.seed),
+        },
+        "_delivery_detail": {
+            "test_model": np.array(detail_model),
+            "test_image": np.array(detail_image),
+            "test_rms": np.array(detail_rms, dtype=np.float64),
+        },
+    }
