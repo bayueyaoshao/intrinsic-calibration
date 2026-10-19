@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-last_updated: "2026-10-19T04:18:02.783Z"
+status: executing
+last_updated: "2026-10-19T07:21:17.122Z"
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 17
+  total_plans: 23
   completed_plans: 17
   percent: 50
 ---
@@ -26,7 +26,7 @@ Phase: 03 (fisher-crlb) — COMPLETE(2026-10-19,验证 passed 5/5)
 
 - **Phase:** 4
 - **Plan:** Not started
-- **Status:** Ready to plan
+- **Status:** Ready to execute
 - **Progress:** [█████-----] 50%(3/6 相)
 - **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
   产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
@@ -75,14 +75,13 @@ Phase: 03 (fisher-crlb) — COMPLETE(2026-10-19,验证 passed 5/5)
 
 ## Session Continuity
 
-- **Last action:** 阶段四讨论完成(2026-10-19,62f502f)— 16 条决策定案写入
-  04-CONTEXT.md + 04-DISCUSSION-LOG.md:CV 5 折×5 轮(训 640 全视图/验按姿态
-  聚合/随机固定种子)、分组实验新算同口径 CRLB(80 视图单张 temporal σ)、
-  bootstrap 200×4 全模型、LOPO 预测误差型×4、统计平局取简 + BIC 裁决 +
-  三判据全 PASS 才当选(m3/m4 不预否决)、优化器 4 核×4 模型先行、多起点
-  扰动×10、test 65 张全模型并排评分
-- **Next action:** `/gsd-plan-phase 4`(研究要点:配对检验方法/BIC 自由度/
-  f_scale/扰动幅度留白待研究;joblib 需新增依赖)
-- **Notes for next session:** 附带裁决——训练/交付一律全 640 视图,poses80
-  聚合只用于噪声与 Fisher(Phase 3"聚合策略正式裁决"就此定案);上游取数 =
-  sb 角点 npz + noise.json 双口径 + m{X}__scipy linear 收敛解 + crlb.json
+- **Last action:** 阶段四规划完成(2026-10-19)— 研究(04-RESEARCH.md,留白
+  全裁定:三分支平局/BIC n=80/f_scale auto/扰动幅度表/0.42×σ_CRLB 告警线,
+  实测发现 m1__scipy_softl1 未过收敛需 16 组合新血缘重跑)+ 模式映射
+  (04-PATTERNS.md,13/13)+ 6 计划(04-01~04-06,5 波)+ 校验两轮通过
+  (第 1 轮 5 警告已修订 ce8a36b,第 2 轮 PASSED)
+- **Next action:** `/gsd-execute-phase 4`(Wave 1:04-01 切分地基;Wave 2:
+  04-02 优化器 ∥ 04-03 选型统计)
+- **Notes for next session:** 决策在 04-CONTEXT.md(D-01~D-16);训练/交付
+  一律全 640 视图(聚合策略裁决定案);上游取数 = sb 角点 npz + noise.json
+  双口径 + m{X}__scipy linear 收敛解 + crlb.json;joblib 随 04-01 引入
