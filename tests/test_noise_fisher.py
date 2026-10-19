@@ -314,7 +314,7 @@ def test_spectrum_report_matches_hand_calculated_2x2():
     最大协方差特征向量 ∝ (1, −(3+√13)/2),|载荷| 最大的参数是第 2 个。
     """
     F2 = np.array([[4.0, 1.0], [1.0, 1.0]])
-    rep = spectrum_report(F2, ("a", "b"))
+    rep = spectrum_report(F2, ("a", "b"), focal_px=100.0)
 
     lam_max = (5.0 + np.sqrt(13.0)) / 2.0
     lam_min = (5.0 - np.sqrt(13.0)) / 2.0
@@ -333,10 +333,95 @@ def test_spectrum_report_matches_hand_calculated_2x2():
 
 def test_spectrum_flag_thresholds_warning_and_degenerate():
     """旗标按条件数分档:≥1e4 记 warning,≥1e6 记 degenerate(默认阈值)。"""
-    rep_warn = spectrum_report(np.diag([1.0e5, 1.0]), ("a", "b"))
+    rep_warn = spectrum_report(np.diag([1.0e5, 1.0]), ("a", "b"), focal_px=100.0)
     assert rep_warn["flag"] == "warning"
-    rep_deg = spectrum_report(np.array([[1.0, 1.0], [1.0, 1.0 + 1e-10]]), ("a", "b"))
+    rep_deg = spectrum_report(np.array([[1.0, 1.0], [1.0, 1.0 + 1e-10]]),
+                              ("a", "b"), focal_px=100.0)
     assert rep_deg["flag"] == "degenerate"
+
+
+# ---- 无量纲化(条件数的单位伪影,2026-10 真实数据上发现的修复) ----
+
+def test_spectrum_normalizes_units_before_condition_number():
+    """手算对表:像素参数与无量纲参数混单位时,原始单位条件数被单位差
+    灌水,无量纲条件数才是真退化判据。
+
+    构造:("fx","k1") 的 σ=1 精度界分别为 0.9 px 与 5e-4(无量纲),
+    F = diag(1/0.9², 1/(5e-4)²)。
+    - 原始单位条件数 = (0.9/5e-4)² = 3.24e6 → 按默认阈值会被判 degenerate;
+    - 无量纲化(focal=900)后 se 变为 0.001 与 5e-4,条件数 = (0.001/5e-4)²
+      = 4.0 → 正常范围。flag 必须看无量纲值。
+    """
+    F = np.diag([1.0 / 0.9 ** 2, 1.0 / (5.0e-4) ** 2])
+    rep = spectrum_report(F, ("fx", "k1"), focal_px=900.0)
+
+    np.testing.assert_allclose(rep["condition_number"], 4.0, rtol=1e-12,
+                               err_msg="无量纲条件数应为 (0.001/5e-4)² = 4")
+    np.testing.assert_allclose(rep["condition_number_raw_units"], 3.24e6,
+                               rtol=1e-9,
+                               err_msg="原始单位条件数应保留 (0.9/5e-4)² 作对照")
+    np.testing.assert_allclose(rep["eigvals"],
+                               [(5.0e-4) ** 2, (0.9 / 900.0) ** 2],
+                               rtol=1e-12,
+                               err_msg="无量纲特征值升序应为 se² 与 (se/焦距)²")
+    assert rep["flag"] == "", \
+        "无量纲条件数 4.0 不应触发退化旗标(原始单位的 3.24e6 只是单位伪影)"
+    assert rep["condition_number_raw_units"] > 1e6
+    assert "无量纲" in rep["normalization"], \
+        "无量纲化约定说明必须随记录落盘(防口头失传)"
+
+
+def test_spectrum_scale_invariance_under_unit_rescaling():
+    """单位换算不变性:把 fx 的计量单位从像素换成"百像素"(F 按 100² 缩放、
+    焦距按 1/100 换算),无量纲谱(条件数/特征值/软方向载荷)必须逐位不变。
+
+    这是无量纲化的性质锁:谱只依赖"以焦距为单位的相对精度",不依赖
+    参数用多大单位计量——否则条件数又会随单位漂移,退化判档失去意义。
+    """
+    rng = np.random.default_rng(7)
+    names = ("fx", "fy", "cx", "cy", "k1", "p2")
+    focal = 1855.298
+    # 造一个良态的 6×6 无量纲协方差(几何块与畸变块各自良态、块间独立——
+    # 谱跨 1e13 量级时逐位不变性会被双精度舍入淹没,块状构造让每个特征值
+    # 都在自己块内干净算出),再映射回像素单位坐标系
+    a = rng.normal(size=(4, 4))
+    b = rng.normal(size=(2, 2))
+    cov_dimless = np.block([
+        [a @ a.T / 6.0 + np.eye(4), np.zeros((4, 2))],
+        [np.zeros((2, 4)), b @ b.T / 6.0 + np.eye(2)],
+    ])
+    scale = np.array([focal] * 4 + [1.0, 1.0])
+    F_px = np.linalg.inv(cov_dimless) * np.outer(scale, scale)  # 无量纲 → 像素单位
+
+    rep_px = spectrum_report(F_px, names, focal_px=focal)
+    # 整批长度单位换算:四个像素内参一起换成"百像素"计量(相当于图像
+    # 坐标系换单位),数值缩小 100 倍 → F 的对应块放大 100²,焦距同换算
+    d = np.array([100.0] * 4 + [1.0] * 2)
+    F_hundred = F_px * np.outer(d, d)
+    rep_hundred = spectrum_report(F_hundred, names, focal_px=focal / 100.0)
+
+    assert rep_hundred["condition_number"] == pytest.approx(
+        rep_px["condition_number"], rel=1e-9), \
+        "单位换算后无量纲条件数必须不变"
+    np.testing.assert_allclose(rep_hundred["eigvals"], rep_px["eigvals"],
+                               rtol=1e-9, err_msg="单位换算后特征值必须不变")
+    load_px = np.asarray(rep_px["top_directions"][0]["loadings"])
+    load_hundred = np.asarray(rep_hundred["top_directions"][0]["loadings"])
+    np.testing.assert_allclose(np.abs(load_hundred), np.abs(load_px),
+                               rtol=1e-6,
+                               err_msg="软方向载荷(按 |值| 比)不随单位漂移")
+    assert rep_hundred["flag"] == rep_px["flag"], "分档必须单位无关"
+    # 原始单位条件数只作对照位:换单位后它理应跟着变(这正是它不能判档的原因)
+    assert rep_hundred["condition_number_raw_units"] != pytest.approx(
+        rep_px["condition_number_raw_units"], rel=1e-6)
+
+
+def test_spectrum_focal_px_validation():
+    """focal_px 必须是正的有限值:0、负数、NaN、inf 一律中文报错。"""
+    F = np.eye(2)
+    for bad in (0.0, -800.0, float("nan"), float("inf")):
+        with pytest.raises(AssertionError, match="focal_px"):
+            spectrum_report(F, ("fx", "k1"), focal_px=bad)
 
 
 # ---- 蒙特卡洛实证(合成数据上的数学单测) ----
