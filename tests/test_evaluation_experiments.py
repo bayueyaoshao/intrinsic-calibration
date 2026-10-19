@@ -353,8 +353,7 @@ def slice_setup(make_true_views):
     )
     base = CalibrationConfig()
     cfg = replace(base, evaluate=replace(base.evaluate, models=("m1",), evaluate_max_workers=1))
-    return {"obs": obs, "board": board, "cfg": cfg,
-            "noise_report": {"sigma_temporal_corner": 0.30}}
+    return {"obs": obs, "board": board, "cfg": cfg, "noise_report": {"sigma_temporal_corner": 0.30}}
 
 
 def test_lopo_covers_all_poses_and_deterministic(cv_setup):
@@ -403,7 +402,8 @@ def test_lopo_outlier_pose_flagged(make_true_views):
     report = lopo(obs, board, cfg, {"m1": {"loss": "linear"}})
     summary = report["models"]["m1"]
     assert [o["pose_id"] for o in summary["outlier_poses"]] == ["pose_02"], (
-        f"离群点名应为 pose_02,实际 {summary['outlier_poses']}")
+        f"离群点名应为 pose_02,实际 {summary['outlier_poses']}"
+    )
     z = summary["mad_z"]
     assert z["pose_02"] > 3.5
     assert z["pose_02"] == max(z.values())
@@ -462,15 +462,11 @@ def test_slices_same_caliber_crlb_metadata(slice_setup):
     detail = report["_slice_detail"]["m1"]
     names = [str(x) for x in detail["param_names"]]
     emp = {
-        name: float(np.std(detail["group_params"][:, i], ddof=1))
-        for i, name in enumerate(names)
+        name: float(np.std(detail["group_params"][:, i], ddof=1)) for i, name in enumerate(names)
     }
     for name, v in m["empirical_std"].items():
         assert v == pytest.approx(emp[name], rel=1e-12)
-    se_mean = {
-        name: float(np.mean(detail["group_se"][:, i]))
-        for i, name in enumerate(names)
-    }
+    se_mean = {name: float(np.mean(detail["group_se"][:, i])) for i, name in enumerate(names)}
     for name, v in m["crlb_se_mean"].items():
         assert v == pytest.approx(se_mean[name], rel=1e-12)
 

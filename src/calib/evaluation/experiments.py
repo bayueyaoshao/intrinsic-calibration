@@ -37,11 +37,15 @@ import cv2
 import numpy as np
 
 from calib.evaluation.parallel import run_parallel
+from calib.evaluation.selection import crlb_alert_check, mad_outlier_poses
 from calib.evaluation.splitting import (
     _pose_groups,
     assign_cv_folds,
+    leave_one_pose_out,
     obs_rows,
     pose_row_mask,
+    slice_groups_by_index,
+    split_by_pose_ids,
     unique_poses,
 )
 from calib.io.config import (
@@ -52,6 +56,7 @@ from calib.io.config import (
 )
 from calib.models import create_model
 from calib.models.base import CameraModel, transform_to_camera
+from calib.noise.fisher import crlb_se, marginalized_fisher
 from calib.solve.observation import ObservationSet
 from calib.solve.opencv import solve_with_opencv
 from calib.solve.result import CalibrationResult
@@ -470,4 +475,491 @@ def cv_pose_grouped(
             "max_workers": int(eval_cfg.evaluate_max_workers),
         },
         "_cv_detail": detail,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 留一姿态(lopo,D-08,EVA-05 实验侧)
+# ---------------------------------------------------------------------------
+
+
+def _lopo_row(
+    model_id: str,
+    val_pose: str,
+    n_train_poses: int,
+    n_train_views: int | None = None,
+    train_rms_px: float | None = None,
+    heldout_px: float | None = None,
+    f_scale_actual: float | None = None,
+    failure_note: str | None = None,
+) -> dict:
+    """一行留一姿态汇总(键一个不少;失败时数值字段 None、中文说明非空)。"""
+    return {
+        "model_id": model_id,
+        "val_pose": val_pose,
+        "heldout_px": heldout_px,
+        "train_rms_px": train_rms_px,
+        "n_train_poses": int(n_train_poses),
+        "n_train_views": (None if n_train_views is None else int(n_train_views)),
+        "f_scale_actual": f_scale_actual,
+        "failure_note": failure_note,
+    }
+
+
+def _lopo_worker(task: tuple) -> dict:
+    """单姿态求解与评分(worker,顶层函数才能被序列化传给并行子进程)。
+
+    训练侧 = 其余全部姿态(split_by_pose_ids 内置零重叠硬门禁),验证侧 =
+    唯一考题姿态只估位姿评分(外参不训练)。异常兜底与 CV 折 worker 同体例:
+    失败转契约占行,异常到不了生成器。
+    """
+    (model_id, val_pose, train_poses, obs, scipy_cfg, loss, f_scale) = task
+    try:
+        model = create_model(model_id)
+        train_obs, val_obs = split_by_pose_ids(obs, train_poses)
+        calibrate_fn = make_calibrate_fn(model, scipy_cfg, loss, f_scale)
+        result = calibrate_fn(train_obs)
+        n_train_views = len(train_obs.image_ids)
+        if not result.converged or result.rms_overall is None:
+            return _lopo_row(
+                model_id,
+                val_pose,
+                n_train_poses=len(train_poses),
+                n_train_views=n_train_views,
+                failure_note=result.failure_note,
+            )
+        params_vec = np.array([result.params[name] for name in model.param_names], dtype=np.float64)
+        train_rms = float(
+            np.mean(score_views(train_obs, params_vec, result.rvecs, result.tvecs, model))
+        )
+        pose_rows = _holdout_pose_errors(val_obs, params_vec, model)
+        # 验证侧恰 1 个姿态:取它那行的姿态级误差与备注
+        heldout = pose_rows[0]["rms_px"]
+        return _lopo_row(
+            model_id,
+            val_pose,
+            n_train_poses=len(train_poses),
+            n_train_views=n_train_views,
+            train_rms_px=train_rms,
+            heldout_px=heldout,
+            f_scale_actual=result.solver_meta.get("f_scale"),
+            failure_note=pose_rows[0]["failure_note"],
+        )
+    except (ValueError, ArithmeticError, RuntimeError) as exc:
+        return _lopo_row(
+            model_id,
+            val_pose,
+            n_train_poses=len(train_poses),
+            n_train_views=int(pose_row_mask(obs, train_poses).sum()),
+            failure_note=(f"{model_id} 留一姿态 {val_pose} 未跑成:{type(exc).__name__}——{exc}"),
+        )
+
+
+def lopo(
+    obs: ObservationSet,
+    board: BoardSpec,
+    cfg: CalibrationConfig,
+    optimizer_config: dict,
+    progress=None,
+) -> dict:
+    """留一姿态实验(D-08,EVA-05 实验侧):每次留 1 个姿态当考题。
+
+    白话:正式口径 80 个姿态出 80 道题 × 每模型——每次拿 79 个姿态训练、
+    留 1 个姿态只估位姿打分。逐姿态误差表回答"是不是某几张照片拖累了
+    整体":稳健 z 分数(中位数绝对偏差法,离群点自己撑大标准差躲不过
+    点名)超过阈值的姿态被点名"问题姿态",供人工复核与选型参考。
+
+    签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped——要
+    cfg.evaluate 的开关/阈值/模型/并行上限与 cfg.calibrate.scipy)。
+
+    返回 {"schema": "lopo-v1", "models": {mX: {"per_pose", "mean_lopo_px",
+    "mad_z", "outlier_poses", "n_failed_poses", "loss_used", "rows"}},
+    "meta", "_lopo_detail"}。mad_z 是全体有效姿态的 z 全表(点名用配置
+    阈值另过一遍);求解失败的姿态记 None 不参与点名(m3/m4 小训练集
+    不收敛是预期内现象,失败率进 n_failed_poses 不静默)。
+    """
+    eval_cfg = cfg.evaluate
+    scipy_cfg = cfg.calibrate.scipy
+    if not eval_cfg.lopo_enabled:
+        raise ValueError(
+            "evaluate.lopo_enabled 为 false,留一姿态实验已被配置关闭;"
+            "请不要调用 lopo,或把开关改回 true。"
+        )
+    cv2.setNumThreads(cfg.cv2_threads)  # 线程锁 = 求解逐位确定(04-02 教训)
+    _check_obs_board(obs, board)
+
+    poses = unique_poses(obs)
+    assignment = leave_one_pose_out(poses)
+    models = tuple(eval_cfg.models)
+    kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
+
+    tasks = [
+        (m, e["val_pose"], tuple(e["train_poses"]), obs, scipy_cfg, kernels[m][0], kernels[m][1])
+        for m in models
+        for e in assignment
+    ]
+    results: dict[tuple[str, str], dict] = {}
+    iterator = run_parallel(tasks, _lopo_worker, eval_cfg.evaluate_max_workers)
+    for done, task in enumerate(tasks, start=1):
+        model_id, val_pose = task[0], task[1]
+        try:
+            row = next(iterator)
+        except StopIteration:  # pragma: no cover - 任务数与产出数恒相等
+            raise AssertionError(
+                f"并行产出数与任务数对不上(留一姿态任务 {len(tasks)} 个),"
+                f"编排层代码契约被破坏,请检查 lopo。"
+            )
+        except Exception as e:  # noqa: BLE001  双保险:worker 漏网异常转失败契约
+            row = _lopo_row(
+                model_id,
+                val_pose,
+                n_train_poses=len(task[2]),
+                n_train_views=int(pose_row_mask(obs, task[2]).sum()),
+                failure_note=(f"{model_id} 留一姿态 {val_pose} 未跑成:{type(e).__name__}——{e}"),
+            )
+        results[(model_id, val_pose)] = row
+        if progress:
+            progress({"done": done, "total": len(tasks)})
+
+    models_out: dict[str, dict] = {}
+    all_rows: list[dict] = []
+    for m in models:
+        loss, _f_scale = kernels[m]
+        rows = [results[(m, e["val_pose"])] for e in assignment]
+        all_rows.extend(rows)
+        per_pose = {row["val_pose"]: row["heldout_px"] for row in rows}
+        valid = {p: v for p, v in per_pose.items() if v is not None}
+        if valid:
+            # 阈值给 -1 取 z 全表(z 恒非负):复用 selection 的同一套 MAD
+            # 数学,不写第二份实现;真正的点名按配置阈值再过一遍
+            full_z = mad_outlier_poses(valid, threshold=-1.0)
+            outliers = mad_outlier_poses(valid, threshold=eval_cfg.mad_z_threshold)
+        else:
+            full_z, outliers = [], []
+        models_out[m] = {
+            "per_pose": per_pose,
+            "mean_lopo_px": (float(np.mean(list(valid.values()))) if valid else None),
+            "mad_z": {p: z for p, z in full_z},
+            "outlier_poses": [{"pose_id": p, "mad_z": z} for p, z in outliers],
+            "n_failed_poses": int(len(per_pose) - len(valid)),
+            "loss_used": loss,
+            "rows": rows,
+        }
+
+    detail = {
+        "detail_model": np.array([r["model_id"] for r in all_rows]),
+        "detail_val_pose": np.array([r["val_pose"] for r in all_rows]),
+        "detail_rms": np.array(
+            [np.nan if r["heldout_px"] is None else r["heldout_px"] for r in all_rows],
+            dtype=np.float64,
+        ),
+    }
+    return {
+        "schema": "lopo-v1",
+        "models": models_out,
+        "meta": {
+            "n_models": len(models),
+            "n_poses": len(poses),
+            "n_solves": len(tasks),
+            "n_failed_total": int(sum(m["n_failed_poses"] for m in models_out.values())),
+            "mad_z_threshold": float(eval_cfg.mad_z_threshold),
+            "seed": int(cfg.seed),
+            "max_workers": int(eval_cfg.evaluate_max_workers),
+        },
+        "_lopo_detail": detail,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 重复张分组(slices_by_index,D-05/D-06,EVA-03 实验侧)
+# ---------------------------------------------------------------------------
+
+
+def _sigma_temporal_from_noise(noise_report: dict) -> float:
+    """从 noise.json 报告读时域口径 σ(白话:同一姿态的连拍互相之间量出来
+    的噪声水平,分组实验的对照基准用它)。
+
+    只认时域口径一个键——分组实验每组是"每姿态单张",对照的 σ 必须是
+    同口径的单张噪声;拿错口径(比如检测器口径,或连拍取均值后按
+    根号张数折减过的聚合口径)会让对照失真,造成假告警或漏告警
+    (T-04-04-01,Pitfall 2 的执行位)。缺键/失败轮/非正有限值当场中文
+    报错(读取体例照 noise/fisher.py 的 _sigma_scalars_from_noise)。
+    """
+    if noise_report.get("failure_note"):
+        raise AssertionError(
+            f"上游 noise.json 是失败轮(failure_note 非空:"
+            f"{noise_report['failure_note']}),没有可用的 σ。请先重跑 calib noise。"
+        )
+    if "sigma_temporal_corner" not in noise_report:
+        raise AssertionError(
+            "上游 noise.json 缺键 sigma_temporal_corner(时域口径 σ 的契约键)。"
+            "分组实验的 CRLB 对照必须用同口径的单张噪声,缺键多半是 noise.json"
+            "与当前代码版本不是同一套契约,请重跑 calib noise 后再跑分组实验。"
+        )
+    value = noise_report["sigma_temporal_corner"]
+    if value is None or not np.isfinite(float(value)) or float(value) <= 0:
+        raise AssertionError(
+            f"上游 noise.json 的 sigma_temporal_corner(时域口径 σ)不是正的"
+            f"有限数:{value!r}。σ 是 CRLB 对照的乘数,坏值会污染全部组的结果,"
+            f"请重跑 calib noise。"
+        )
+    return float(value)
+
+
+def _slice_group_record(
+    model_id: str,
+    group_idx: int,
+    n_poses: int,
+    params: dict | None = None,
+    rms_overall: float | None = None,
+    se: dict | None = None,
+    ref_rvec=None,
+    ref_tvec=None,
+    failure_note: str | None = None,
+    crlb_note: str | None = None,
+) -> dict:
+    """一组的记录(键一个不少):参数向量 + 同口径 CRLB 对照 + 口径标识。
+
+    observation_set 标识语义 = "每姿态单张"(小样按组内实际姿态数如实
+    记,正式口径 80 个姿态时即为 views80_single_frame);sigma_source
+    锁死 "temporal"——口径标识随记录落盘,下游不可能拿错口径对账
+    (T-04-04-01)。
+    """
+    return {
+        "model_id": model_id,
+        "group": int(group_idx),
+        "n_poses": int(n_poses),
+        "observation_set": f"views{int(n_poses)}_single_frame",
+        "sigma_source": "temporal",
+        "converged": params is not None,
+        "params": params if params is not None else {},
+        "rms_overall": rms_overall,
+        "se": se,
+        "ref_rvec": (None if ref_rvec is None else [float(v) for v in ref_rvec]),
+        "ref_tvec": (None if ref_tvec is None else [float(v) for v in ref_tvec]),
+        "failure_note": failure_note,
+        "crlb_note": crlb_note,
+    }
+
+
+def _slice_group_worker(task: tuple) -> dict:
+    """单组单模型求解 + 组内同口径 CRLB(worker,顶层函数可序列化)。
+
+    每组独立完整标定(与 CV 同一条求解路径);CRLB 对照**每组新算**:
+    线性化点 = 该组该模型自己的收敛解(白话:算理论下界时,把"当前
+    解附近误差怎么变"展开的基准点就用这次解本身),σ = noise.json 的
+    时域口径,Fisher 数学原样复用 marginalized_fisher / crlb_se(唯一
+    数学源约束)。Fisher 算不成不拖垮参数记录(参数照常留账,对照记
+    crlb_note 缺席说明)。
+    """
+    (model_id, group_idx, row_indices, obs, scipy_cfg, loss, f_scale, sigma) = task
+    try:
+        model = create_model(model_id)
+        mask = np.zeros(len(obs.image_ids), dtype=bool)
+        mask[list(row_indices)] = True
+        group_obs = obs_rows(obs, mask)
+        result = make_calibrate_fn(model, scipy_cfg, loss, f_scale)(group_obs)
+        if not result.converged or result.rms_overall is None:
+            return _slice_group_record(
+                model_id,
+                group_idx,
+                n_poses=len(row_indices),
+                failure_note=result.failure_note,
+            )
+        params_vec = np.array([result.params[name] for name in model.param_names], dtype=np.float64)
+        record = _slice_group_record(
+            model_id,
+            group_idx,
+            n_poses=len(row_indices),
+            params=dict(result.params),
+            rms_overall=float(result.rms_overall),
+            ref_rvec=result.rvecs[0],
+            ref_tvec=result.tvecs[0],
+        )
+        try:
+            f_marg, _f_full, _diag = marginalized_fisher(
+                model, group_obs, params_vec, result.rvecs, result.tvecs
+            )
+            se = crlb_se(f_marg, sigma)
+            record["se"] = {name: float(v) for name, v in zip(model.param_names, se)}
+        except (ValueError, ArithmeticError, RuntimeError) as exc:
+            record["crlb_note"] = f"第 {group_idx} 组的 CRLB 对照未算成:{type(exc).__name__}——{exc}"
+        return record
+    except (ValueError, ArithmeticError, RuntimeError) as exc:
+        return _slice_group_record(
+            model_id,
+            group_idx,
+            n_poses=len(row_indices),
+            failure_note=(f"{model_id} 第 {group_idx} 组未跑成:{type(exc).__name__}——{exc}"),
+        )
+
+
+def slices_by_index(
+    obs: ObservationSet,
+    board: BoardSpec,
+    cfg: CalibrationConfig,
+    optimizer_config: dict,
+    noise_report: dict,
+    progress=None,
+) -> dict:
+    """重复张分组实验(D-05/D-06,EVA-03 实验侧):每组每姿态取第 i 张。
+
+    白话:同一姿态拍了多张连拍——第 1 组全取"每姿态的第 1 张"、第 2 组
+    全取"第 2 张"……每组独立完整标定一遍。组与组之间姿态集合一样、
+    只有噪声不同,所以组间参数的抖动就是"纯噪声"对参数的影响;每组再
+    新算一份同口径 CRLB(克拉美-罗下界,白话:"这批数据理论上能把参数
+    定到多准"的下界)作对照——经验抖动若显著低于理论下界,物理上不可能,
+    说明对照口径错了,触发 D-06 硬告警(经 crlb_alert_check,双档显著性
+    从 cfg.evaluate 读,判 FAIL 的说明带参数名不静默)。
+
+    签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped);
+    noise_report 是读回的 noise.json 字典(σ 只从 sigma_temporal_corner
+    读,缺键中文报错——T-04-04-01)。
+
+    返回 {"schema": "slices-v1", "models": {mX: {"group_params",
+    "empirical_std", "crlb_se_mean", "crlb_alert", "slice_max_disp_px",
+    "n_failed_groups", "n_groups", "sigma_used", "loss_used",
+    "group_records"}}, "meta", "_slice_detail"}——slice_max_disp_px 键名
+    对齐 04-03 判行表 stability_summary 消费面;各组原始 SE 全在明细数组
+    (8 份原始全落盘由 04-05 产物层执行,Open Q2)。
+    """
+    eval_cfg = cfg.evaluate
+    scipy_cfg = cfg.calibrate.scipy
+    cv2.setNumThreads(cfg.cv2_threads)  # 线程锁 = 求解逐位确定(04-02 教训)
+    _check_obs_board(obs, board)
+    sigma = _sigma_temporal_from_noise(noise_report)
+    groups = slice_groups_by_index(obs, cfg)  # 开关/组内断言在 splitting 层内置
+    models = tuple(eval_cfg.models)
+    kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
+
+    tasks = [
+        (
+            m,
+            g["group"],
+            tuple(int(r) for r in g["pose_rows"].values()),
+            obs,
+            scipy_cfg,
+            kernels[m][0],
+            kernels[m][1],
+            sigma,
+        )
+        for m in models
+        for g in groups
+    ]
+    results: dict[tuple[str, int], dict] = {}
+    iterator = run_parallel(tasks, _slice_group_worker, eval_cfg.evaluate_max_workers)
+    for done, task in enumerate(tasks, start=1):
+        model_id, group_idx = task[0], task[1]
+        try:
+            record = next(iterator)
+        except StopIteration:  # pragma: no cover - 任务数与产出数恒相等
+            raise AssertionError(
+                f"并行产出数与任务数对不上(分组任务 {len(tasks)} 个),"
+                f"编排层代码契约被破坏,请检查 slices_by_index。"
+            )
+        except Exception as e:  # noqa: BLE001  双保险:worker 漏网异常转失败契约
+            record = _slice_group_record(
+                model_id,
+                group_idx,
+                n_poses=len(task[2]),
+                failure_note=(f"{model_id} 第 {group_idx} 组未跑成:{type(e).__name__}——{e}"),
+            )
+        results[(model_id, group_idx)] = record
+        if progress:
+            progress({"done": done, "total": len(tasks)})
+
+    models_out: dict[str, dict] = {}
+    detail: dict[str, dict] = {}
+    for m in models:
+        loss, _f_scale = kernels[m]
+        model = create_model(m)
+        names = tuple(model.param_names)
+        records = [results[(m, g["group"])] for g in groups]
+        converged = [r for r in records if r["converged"]]
+        with_se = [r for r in converged if r["se"] is not None]
+
+        group_params = [r["params"] for r in converged]
+        empirical_std: dict[str, float] | None = None
+        crlb_se_mean: dict[str, float] | None = None
+        crlb_alert: dict | None = None
+        alert_note: str | None = None
+        slice_max_disp_px: float | None = None
+
+        if converged:
+            params_arr = np.array([[gp[n] for n in names] for gp in group_params], dtype=np.float64)
+            ref0 = converged[0]
+            slice_max_disp_px = _px_dispersion(
+                group_params,
+                model,
+                obs.object_points,
+                np.asarray(ref0["ref_rvec"], dtype=np.float64),
+                np.asarray(ref0["ref_tvec"], dtype=np.float64),
+            )
+            if len(converged) >= 2:
+                empirical_std = {
+                    n: float(np.std(params_arr[:, i], ddof=1)) for i, n in enumerate(names)
+                }
+        if with_se:
+            se_arr = np.array([[r["se"][n] for n in names] for r in with_se], dtype=np.float64)
+            crlb_se_mean = {n: float(np.mean(se_arr[:, i])) for i, n in enumerate(names)}
+            if empirical_std is not None and len(with_se) >= 2:
+                crlb_alert = crlb_alert_check(
+                    empirical_std,
+                    crlb_se_mean,
+                    n_groups=len(with_se),
+                    alpha_hard=eval_cfg.crlb_alert_alpha_hard,
+                    alpha_soft=eval_cfg.crlb_alert_alpha_soft,
+                )
+            elif empirical_std is None:
+                alert_note = "收敛组不足 2 组,经验抖动无从谈起,CRLB 对照告警跳过(不静默)"
+        else:
+            alert_note = "没有任何一组的 CRLB 对照算成,告警检查跳过(不静默)"
+        if crlb_alert is None and alert_note is None and len(with_se) < 2:
+            alert_note = "CRLB 对照的有效组数不足 2(卡方自由度 = 组数 − 1),告警检查跳过"
+
+        models_out[m] = {
+            "group_params": group_params,
+            "empirical_std": empirical_std,
+            "crlb_se_mean": crlb_se_mean,
+            "crlb_alert": crlb_alert,
+            "crlb_note": alert_note,
+            "slice_max_disp_px": slice_max_disp_px,
+            "n_failed_groups": int(len(records) - len(converged)),
+            "n_groups": len(groups),
+            "sigma_used": sigma,
+            "loss_used": loss,
+            "group_records": records,
+        }
+        detail[m] = {
+            "group_index": np.array([r["group"] for r in records], dtype=np.int64),
+            "group_params": np.array(
+                [
+                    [np.nan if not r["converged"] else r["params"][n] for n in names]
+                    for r in records
+                ],
+                dtype=np.float64,
+            ),
+            "group_se": np.array(
+                [[np.nan if r["se"] is None else r["se"][n] for n in names] for r in records],
+                dtype=np.float64,
+            ),
+            "sigma_used": sigma,
+            "param_names": np.array(names),
+        }
+
+    return {
+        "schema": "slices-v1",
+        "models": models_out,
+        "meta": {
+            "n_models": len(models),
+            "n_groups": len(groups),
+            "n_solves": len(tasks),
+            "n_failed_total": int(sum(m["n_failed_groups"] for m in models_out.values())),
+            "sigma_source": "temporal",
+            "alpha_hard": float(eval_cfg.crlb_alert_alpha_hard),
+            "alpha_soft": float(eval_cfg.crlb_alert_alpha_soft),
+            "seed": int(cfg.seed),
+            "max_workers": int(eval_cfg.evaluate_max_workers),
+        },
+        "_slice_detail": detail,
     }
