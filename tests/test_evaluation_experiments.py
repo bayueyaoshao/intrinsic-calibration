@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,12 +30,20 @@ from scipy.sparse import csr_matrix
 from calib.evaluation import experiments as experiments_mod
 from calib.evaluation.experiments import (
     _px_dispersion,
+    bootstrap_pose,
     cv_pose_grouped,
     lopo,
     make_calibrate_fn,
+    pose_sampling_variance,
     slices_by_index,
 )
-from calib.evaluation.splitting import assign_cv_folds, obs_rows, pose_row_mask, unique_poses
+from calib.evaluation.splitting import (
+    assign_cv_folds,
+    bootstrap_resample,
+    obs_rows,
+    pose_row_mask,
+    unique_poses,
+)
 from calib.io.config import BoardSpec, CalibrationConfig
 from calib.models import create_model
 from calib.solve.baseline import build_object_points
@@ -503,3 +512,138 @@ def test_slices_hard_alert_fires_through_wiring(slice_setup, monkeypatch):
     assert alert["verdict_note"], "告警说明必须非空(D-06 硬告警不静默)"
     assert "fx" in alert["verdict_note"], f"告警说明要带参数名:{alert['verdict_note']}"
     assert alert["lines"]["hard"] > 0 and alert["lines"]["soft"] > alert["lines"]["hard"]
+
+
+# ---------------------------------------------------------------------------
+# Task 3:bootstrap_pose(行为 1–4)+ pose_sampling_variance
+# ---------------------------------------------------------------------------
+
+
+def _boot_cfg(base_cfg, *, n_reps, models=("m1", "m2"), max_workers=1):
+    """bootstrap 小配置:重采样次数/模型集/并行上限按需缩水(快)。"""
+    return replace(
+        base_cfg,
+        evaluate=replace(
+            base_cfg.evaluate, models=models, bootstrap_n=n_reps, evaluate_max_workers=max_workers
+        ),
+    )
+
+
+def test_bootstrap_records_every_rep_and_picks_all_burst_views(cv_setup, monkeypatch):
+    """行为 1:4 次重采样 × 2 模型小样跑通,共求解 8 次;两个模型共用同一批
+    分配(D-04:每个重采样号上两模型抽中的姿态集合一致);抽中姿态带全部
+    连拍且不重复(训练行数 = 抽中姿态去重数 × 2);每次参数向量全记录,
+    param_std/param_ci/var_bootstrap 与明细数组对账;var_slice/pose_sampling_var
+    是占位键(本任务只出 bootstrap 侧,slices 方差由 04-05/04-06 组装)。"""
+    s = cv_setup
+    cfg = _boot_cfg(s["cfg"], n_reps=4)
+
+    captured: list[tuple[str, tuple[str, ...], int]] = []
+    real_solve = experiments_mod.solve_with_scipy
+
+    def spy_solve(obs, model, cfg_, init=None, loss="linear", rms_linear_ref=None):
+        captured.append((model.model_id, tuple(obs.pose_ids), len(obs.pose_ids)))
+        return real_solve(obs, model, cfg_, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
+
+    monkeypatch.setattr(experiments_mod, "solve_with_scipy", spy_solve)
+
+    report = bootstrap_pose(s["obs"], s["board"], cfg, s["optimizer_config"])
+    assert report["schema"] == "bootstrap-v1"
+    assert report["meta"]["n_solves"] == 8, "4 次重采样 × 2 模型 = 8 次求解"
+    assert len(captured) == 8
+
+    assignment = bootstrap_resample(unique_poses(s["obs"]), cfg)
+    assert len(assignment) == 4
+
+    # 共用同一批分配:每份分配的抽中姿态集合,在两个模型上各恰好出现 1 次
+    counter = Counter((m, frozenset(poses)) for m, poses, _ in captured)
+    for entry in assignment:
+        for m in ("m1", "m2"):
+            assert counter[(m, frozenset(entry["pose_ids"]))] == 1, (
+                f"重采样 {entry['rep']} 的分配应被 {m} 恰用一次(共用同一批,D-04)"
+            )
+
+    # 抽中姿态带全部连拍:训练行数 = 抽中姿态去重数 × 每姿态 2 张
+    for _m, pose_ids, n_rows in captured:
+        assert n_rows == len(set(pose_ids)) * 2, (
+            "训练观测集必须去重带全连拍(抽中 3 次的姿态只算一份,2 张全带)"
+        )
+
+    names = create_model("m1").param_names
+    for m in ("m1", "m2"):
+        summary = report["models"][m]
+        assert summary["n_failed"] == 0
+        assert set(summary["param_std"]) == set(names)
+        detail = report["_bootstrap_detail"][m]
+        assert len(detail["rep"]) == 4 and detail["params"].shape == (4, len(names))
+        assert np.isfinite(detail["params"]).all(), "干净合成数据上每次重采样都应收敛"
+
+        # param_std / param_ci / var_bootstrap 都和明细数组对账
+        for i, name in enumerate(names):
+            col = detail["params"][:, i]
+            assert summary["param_std"][name] == pytest.approx(float(np.std(col, ddof=1)))
+            lo, hi = summary["param_ci"][name]
+            assert lo == pytest.approx(float(np.percentile(col, 2.5)))
+            assert hi == pytest.approx(float(np.percentile(col, 97.5)))
+            assert summary["var_bootstrap"][name] == pytest.approx(float(np.var(col, ddof=1))), (
+                "var_bootstrap 必须是方差(std 的平方),供 pose_sampling_variance 相减"
+            )
+        assert summary["param_ci"]["fx"][0] <= summary["param_ci"]["fx"][1]
+        assert summary["max_disp_px"] >= 0.0
+        assert summary["loss_used"] == "linear"
+        # 来源分离占位键(接口在此定死,数值由 04-05/04-06 组装时填)
+        assert summary["var_slice"] is None
+        assert summary["pose_sampling_var"] is None
+
+
+def test_bootstrap_same_seed_reruns_bit_identical(cv_setup):
+    """行为 2:同种子两次运行,分配表 + 参数向量 + 汇总逐位一致(确定性红线)。"""
+    s = cv_setup
+    cfg = _boot_cfg(s["cfg"], n_reps=3)
+    r1 = bootstrap_pose(s["obs"], s["board"], cfg, s["optimizer_config"])
+    r2 = bootstrap_pose(s["obs"], s["board"], cfg, s["optimizer_config"])
+    _assert_reports_equal(r1, r2)
+
+
+def test_bootstrap_parallel_matches_serial(cv_setup):
+    """行为 3:并行(max_workers=2)与串行(max_workers=1)结果逐位一致
+    (种子随任务走,并行不改变任何随机性;不 monkeypatch——子进程拿不到
+    进程内的替身,本测试考的就是真实并行路径)。"""
+    s = cv_setup
+    serial = bootstrap_pose(
+        s["obs"],
+        s["board"],
+        _boot_cfg(s["cfg"], n_reps=2, models=("m1",), max_workers=1),
+        {"m1": {"loss": "linear"}},
+    )
+    par = bootstrap_pose(
+        s["obs"],
+        s["board"],
+        _boot_cfg(s["cfg"], n_reps=2, models=("m1",), max_workers=2),
+        {"m1": {"loss": "linear"}},
+    )
+    _assert_reports_equal(serial, par)
+
+
+def test_pose_sampling_variance_difference_and_clamp():
+    """行为 4(D-07 来源分离):逐参数 var_boot − var_slice(方差相减,非标准差);
+    fx: 4.0 − 1.0 → 位姿抽样方差 3.0、占比 0.75(手算锁死)。切片方差反而更大
+    (抽样噪声)时位姿抽样方差钳 0 并给中文说明;参数集合不一致 / 非有限值
+    中文报错。"""
+    out = pose_sampling_variance({"fx": 4.0}, {"fx": 1.0})
+    fx = out["fx"]
+    assert fx["var_total"] == pytest.approx(4.0)
+    assert fx["var_noise"] == pytest.approx(1.0)
+    assert fx["var_pose_sampling"] == pytest.approx(3.0)
+    assert fx["pose_share"] == pytest.approx(0.75)
+    assert fx["note"] is None
+
+    clamped = pose_sampling_variance({"fx": 1.0}, {"fx": 4.0})
+    assert clamped["fx"]["var_pose_sampling"] == 0.0
+    assert clamped["fx"]["pose_share"] == 0.0
+    assert clamped["fx"]["note"], "负方差钳 0 必须附中文说明,不静默"
+
+    with pytest.raises(ValueError, match="参数"):
+        pose_sampling_variance({"fx": 1.0}, {"fy": 1.0})
+    with pytest.raises(ValueError, match="有限"):
+        pose_sampling_variance({"fx": float("nan")}, {"fx": 1.0})
