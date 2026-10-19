@@ -33,7 +33,7 @@ import cv2
 import numpy as np
 
 from calib.evaluation.artifacts import SCHEMA_VERSION
-from calib.evaluation.parallel import run_parallel
+from calib.evaluation.parallel import TaskFailed, run_parallel
 from calib.evaluation.splitting import _seed_for
 from calib.io.config import BoardSpec, CalibrationConfig, EvaluateConfig, ScipyConfig
 from calib.models import create_model
@@ -136,9 +136,11 @@ def _consume_combo(iterator, model_id: str, loss: str, n_views: int,
         raise AssertionError(
             f"组合({model_id} × {loss})的结果缺失:并行产出数与任务数对不上,"
             f"这是编排层的代码契约被破坏,请检查 run_optimizer_grid。")
-    except Exception as e:  # noqa: BLE001  # 故意宽接:单组合任何异常都转失败契约占行
+    except Exception as e:  # noqa: BLE001  双保险:异常已由并行助手包信封(正常到不了这里)
+        result = TaskFailed(e)
+    if isinstance(result, TaskFailed):
         rows_by_key[(model_id, loss)] = _failure_combo_row(
-            model_id, loss, e, n_views, init_rms)
+            model_id, loss, result.error, n_views, init_rms)
         return
     rows_by_key[(model_id, loss)] = _combo_row(model_id, loss, result,
                                                init_rms)
@@ -536,13 +538,22 @@ def run_multistart(obs, board: BoardSpec, cfg: CalibrationConfig,
                                 eval_cfg.evaluate_max_workers)
         for i in range(n_starts):
             try:
-                start_index, seed, result = next(iterator)
-            except Exception as e:  # noqa: BLE001  单起点异常转契约记录,不中断
+                item = next(iterator)
+            except StopIteration:  # pragma: no cover - 起点数与产出数恒相等
+                raise AssertionError(
+                    f"多起点({model_id})的起点结果缺失:并行产出数与起点数"
+                    f"({n_starts} 起)对不上,编排层代码契约被破坏,"
+                    f"请检查 run_multistart。")
+            except Exception as e:  # noqa: BLE001  双保险:异常已由并行助手包信封(正常到不了这里)
+                item = TaskFailed(e)
+            if isinstance(item, TaskFailed):
+                e = item.error
                 starts.append({"start": i, "seed": seeds[i], "converged": False,
                                "rms_overall": None, "params": {},
                                "failure_note": (f"起点 {i} 求解未跑成:"
                                                 f"{type(e).__name__}——{e}")})
             else:
+                start_index, seed, result = item
                 starts.append({
                     "start": int(start_index),
                     "seed": int(seed),

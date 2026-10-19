@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from calib.evaluation.parallel import run_parallel
+from calib.evaluation.parallel import TaskFailed, run_parallel
 from calib.io.config import load_board, load_calibration
 from calib.util.lineage import make_lineage, sha256_file
 
@@ -660,6 +660,34 @@ def test_run_parallel_progress_counts_to_total():
     expected = [{"done": i, "total": 5} for i in range(1, 6)]
     assert seen_serial == expected
     assert seen_parallel == expected
+
+
+def _flaky_worker(task: tuple) -> int:
+    """测试用小 worker:7 号任务故意抛兜底名单之外的异常(cv2.error 体例),
+    其余照 _square_worker 返回。"""
+    (x,) = task
+    if x == 7:
+        raise KeyError("模拟并行后端之外的异常类型(KeyError/cv2.error 一族)")
+    return (x + 1) ** 2
+
+
+@pytest.mark.parametrize("max_workers", [1, 3])
+def test_run_parallel_worker_exception_yields_envelope_stream_survives(max_workers):
+    """单任务异常包成 TaskFailed 信封,任务流不断、后续任务照常交付。
+
+    回归测试(2026-10-19 真实数据 bootstrap 首轮事故):并行后端在任一
+    任务抛异常时会关闭整条结果流,旧写法只救得了第一个异常,后面任务
+    全部作废——异常隔离必须收拢在 run_parallel 里。"""
+    tasks = [(i,) for i in range(12)]
+    results = list(run_parallel(tasks, _flaky_worker, max_workers))
+    assert len(results) == 12, "任务流被异常截断,后续任务被静默吞掉"
+    for i, item in enumerate(results):
+        if i == 7:
+            assert isinstance(item, TaskFailed), f"{i} 号任务该是失败信封"
+            assert isinstance(item.error, KeyError), \
+                f"信封里该装原始异常,实际 {item.error!r}"
+        else:
+            assert item == (i + 1) ** 2, f"{i} 号任务结果被异常波及:{item!r}"
 
 
 # ---- 血缘指纹(ITER-01 地基)----

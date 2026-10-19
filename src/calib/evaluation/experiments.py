@@ -45,7 +45,7 @@ from dataclasses import replace
 import cv2
 import numpy as np
 
-from calib.evaluation.parallel import run_parallel
+from calib.evaluation.parallel import TaskFailed, run_parallel
 from calib.evaluation.selection import bic_full_fit, crlb_alert_check, mad_outlier_poses
 from calib.evaluation.splitting import (
     _pose_groups,
@@ -428,7 +428,10 @@ def cv_pose_grouped(
                 f"并行产出数与任务数对不上(CV 任务 {len(tasks)} 个),"
                 f"编排层代码契约被破坏,请检查 cv_pose_grouped。"
             )
-        except Exception as e:  # noqa: BLE001  双保险:worker 漏网异常转失败契约
+        except Exception as e:  # noqa: BLE001  双保险:异常已由并行助手包信封(正常到不了这里)
+            payload = TaskFailed(e)
+        if isinstance(payload, TaskFailed):
+            e = payload.error
             payload = {
                 "row": _cv_fold_row(
                     model_id,
@@ -646,7 +649,10 @@ def lopo(
                 f"并行产出数与任务数对不上(留一姿态任务 {len(tasks)} 个),"
                 f"编排层代码契约被破坏,请检查 lopo。"
             )
-        except Exception as e:  # noqa: BLE001  双保险:worker 漏网异常转失败契约
+        except Exception as e:  # noqa: BLE001  双保险:异常已由并行助手包信封(正常到不了这里)
+            row = TaskFailed(e)
+        if isinstance(row, TaskFailed):
+            e = row.error
             row = _lopo_row(
                 model_id,
                 val_pose,
@@ -897,7 +903,10 @@ def slices_by_index(
                 f"并行产出数与任务数对不上(分组任务 {len(tasks)} 个),"
                 f"编排层代码契约被破坏,请检查 slices_by_index。"
             )
-        except Exception as e:  # noqa: BLE001  双保险:worker 漏网异常转失败契约
+        except Exception as e:  # noqa: BLE001  双保险:异常已由并行助手包信封(正常到不了这里)
+            record = TaskFailed(e)
+        if isinstance(record, TaskFailed):
+            e = record.error
             record = _slice_group_record(
                 model_id,
                 group_idx,
@@ -972,6 +981,10 @@ def slices_by_index(
         }
         detail[m] = {
             "group_index": np.array([r["group"] for r in records], dtype=np.int64),
+            # 每组口径标识随明细旁车落盘(组记录本身不进 json,D-13):
+            # 没有这两列,下游核对 CRLB 对照口径时只能信汇总、查无原据
+            "observation_set": np.array([r["observation_set"] for r in records]),
+            "sigma_source": np.array([r["sigma_source"] for r in records]),
             "group_params": np.array(
                 [
                     [np.nan if not r["converged"] else r["params"][n] for n in names]
@@ -1139,7 +1152,10 @@ def bootstrap_pose(
                 f"并行产出数与任务数对不上(bootstrap 任务 {len(tasks)} 个),"
                 f"编排层代码契约被破坏,请检查 bootstrap_pose。"
             )
-        except Exception as e:  # noqa: BLE001  双保险:worker 漏网异常转失败契约
+        except Exception as e:  # noqa: BLE001  双保险:异常已由并行助手包信封(正常到不了这里)
+            record = TaskFailed(e)
+        if isinstance(record, TaskFailed):
+            e = record.error
             record = _bootstrap_record(
                 model_id,
                 rep,
