@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-19T07:49:08.425Z"
+last_updated: "2026-10-19T11:36:26.708Z"
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 23
-  completed_plans: 18
+  completed_plans: 19
   percent: 50
 ---
 
@@ -23,12 +23,12 @@ progress:
 ## Current Position
 
 Phase: 04 (evaluation-model-selection) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 
 - **Phase:** 4
-- **Plan:** 2 of 6
-- **Status:** Executing Phase 04
-- **Progress:** [████████░░] 78%
+- **Plan:** 3 of 6
+- **Status:** Ready to execute
+- **Progress:** [████████░░] 83%
 - **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
   产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
 
@@ -41,6 +41,7 @@ Plan: 2 of 6
 | Plans this phase | 6(planned) |
 | Blocked items | 0 |
 | Phase 04 P01 | 12min | 2 tasks | 9 files |
+| Phase 4 P02 | 3h43min | 4 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -77,19 +78,24 @@ Plan: 2 of 6
 
 ## Session Continuity
 
-- **Last action:** 04-01 执行完成(2026-10-19,12min,9531d43/2c5ade7/9f70707)
-  — EvaluateConfig 25 键契约 + evaluate yaml 段 + splitting 四种切分纯函数
-  (零重叠硬门禁双保险)+ parallel.py joblib 助手;377 测试绿;EVA-01 标记完成
+- **Last action:** 04-02 执行完成(2026-10-19,3h43min,ef0ad06/078abb5/5f0962e/858de5a)
+  — optimizer.json 8 键契约 + 16 组合网格(共同 OpenCV 初值)+ 推荐配置
+  + 多起点双容差检验;真实数据轮 output/evaluate/run_20261019_112926
+  (四模型推荐均 linear;m1 多起点 inconsistent);SOL-02 标记完成
 
-- **Next action:** 继续阶段四执行(Wave 2:04-02 优化器对比 ∥ 04-03 选型
-  统计,两者只依赖 04-01 已就绪)
+- **Next action:** 继续阶段四执行(Plan 3:04-03 选型统计;Wave 2 的
+  另一条 04-02 已完成,04-03 可直接消费 optimizer.json)
 
 - **Notes for next session:** 决策在 04-CONTEXT.md(D-01~D-16);训练/交付
   一律全 640 视图(聚合策略裁决定案);上游取数 = sb 角点 npz + noise.json
-  双口径 + m{X}__scipy linear 收敛解 + crlb.json;04-01 已交付 EvaluateConfig
-  25 键 / splitting 分配表 / run_parallel(消费面见 04-01-SUMMARY.md)
+  双口径 + m{X}__scipy linear 收敛解 + crlb.json + optimizer.json(04-02 起,
+  推荐配置从 recommended_solver 读);真实数据单次 scipy 求解 8 并行实测
+  1.5-3 分钟,大网格工时按此估;04-01 已交付 EvaluateConfig 25 键 /
+  splitting 分配表 / run_parallel(消费面见 04-01-SUMMARY.md)
 
 ## Decisions
 
 - [Phase 04]: 阶段四切分函数取整个 CalibrationConfig(读 cfg.seed + cfg.evaluate.*),照 run_injection_experiment 体例;evaluate 核名白名单独立建表(含 cauchy,D-14)
 - [Phase 04]: 零重叠硬门禁双保险:split_by_pose_ids 函数体断言 + 16 例测试对 80 姿态×25 折显式断言姿态级与行级零交集(成功标准 1 执行位);切分分配表纯 str/int 可 json 落盘复查
+- [Phase 04]: 优化器对比真实数据定案——四模型推荐均 linear 核(千分之一并列线内无鲁棒核优势);m1 的 soft_l1/cauchy status=0 未过实用收敛,与历史轮 run_20261018_163713 对账一致,写进 SOL-02 结论材料
+- [Phase 04]: 多起点一致性实测——m1 判 inconsistent(RMS 极差 2.8e-07 px 而参数位移 0.205 px 超容差,可辨识性发现),m2/m3/m4 consistent;run_multistart 取 CalibrationConfig(要 cfg.seed),worker 层异常兜底转 make_failure 防生成器断流

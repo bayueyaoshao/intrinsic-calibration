@@ -33,7 +33,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 求解 (SOL)
 
 - [x] **SOL-01**: 求解器统一接口 + 双后端(OpenCV 初始化 → scipy least_squares 精化,含鲁棒核),后端可互换、结果同构(CalibrationResult)
-- [ ] **SOL-02**: 多优化器/鲁棒核/初始化策略对比实验,验证是否按预期提升精度
+- [x] **SOL-02**: 多优化器/鲁棒核/初始化策略对比实验,验证是否按预期提升精度
 
 ### 评估 (EVAL)
 
@@ -123,7 +123,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EVA-03 | Phase 4 | Pending |
 | EVA-04 | Phase 4 | Pending |
 | EVA-05 | Phase 4 | Pending |
-| SOL-02 | Phase 4 | Pending |
+| SOL-02 | Phase 4 | Complete |
 | ANA-01 | Phase 5 | Pending |
 | ANA-02 | Phase 5 | Pending |
 | ANA-03 | Phase 5 | Pending |
