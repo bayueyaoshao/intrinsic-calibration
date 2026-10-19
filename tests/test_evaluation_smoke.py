@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -25,6 +27,27 @@ from calib.evaluation.artifacts import (
     load_evaluate_report,
     make_failure_evaluate,
     save_evaluate_report,
+)
+from calib.evaluation.experiments import (
+    bootstrap_pose,
+    cv_pose_grouped,
+    lopo,
+    pose_sampling_variance,
+    run_delivery,
+    slices_by_index,
+)
+from calib.evaluation.optimizer import run_optimizer_grid
+from calib.evaluation.selection import build_verdict_table, select_model
+from calib.io.config import BoardSpec, CalibrationConfig, ScipyConfig
+from calib.models import create_model
+from calib.solve.observation import load_observation_set
+from calib.solve.opencv import solve_with_opencv
+from calib.solve.result import compute_result_metrics, save_result
+from calib.util.lineage import make_lineage
+from calib.visualization.evaluate_figs import (
+    plot_cv_errorbars,
+    plot_dispersion_compare,
+    plot_lopo_pose_errors,
 )
 
 # ---------------------------------------------------------------------------
@@ -201,3 +224,318 @@ def test_evaluate_broken_npz_reference_raises_chinese(tmp_path):
     (tmp_path / "experiments" / "cv.npz").unlink()
     with pytest.raises(FileNotFoundError, match="明细旁车"):
         load_evaluate_report(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Task 3:合成数据全链冒烟(优化器小网格 → 四实验 → 交付 → 选型 → 契约 → 三图)
+# ---------------------------------------------------------------------------
+
+# 实验返回值里不进 json 的键:私有明细键(转 npz 旁车)与行级大表(逐姿态 /
+# 逐张明细同样在 npz 数组里,json 只留汇总与引用——D-13 汇总只是索引)
+_JSON_EXCLUDED_KEYS = {
+    "_cv_detail",
+    "_bootstrap_detail",
+    "_slice_detail",
+    "_lopo_detail",
+    "_delivery_detail",
+    "per_pose_rows",
+    "group_records",
+    "rows",
+    "test_rows",
+}
+
+
+def _json_section(section: dict) -> dict:
+    """实验返回值 → evaluate.json 的段:摘掉明细键,只留汇总(契约形状)。"""
+    return {k: v for k, v in section.items() if k not in _JSON_EXCLUDED_KEYS}
+
+
+def _assert_reports_equal(a, b, path="报告") -> None:
+    """递归逐位比较(数组用 np.array_equal,浮点 NaN 视为相等)——
+    "同种子重跑逐位一致"的硬断言工具(体例照 test_evaluation_experiments.py)。"""
+    if isinstance(a, dict):
+        assert isinstance(b, dict), path
+        assert set(a) == set(b), f"{path}: 键集合不一致 {set(a) ^ set(b)}"
+        for k in a:
+            _assert_reports_equal(a[k], b[k], f"{path}.{k}")
+    elif isinstance(a, (list, tuple)):
+        assert isinstance(b, (list, tuple)) and len(a) == len(b), path
+        for i, (x, y) in enumerate(zip(a, b)):
+            _assert_reports_equal(x, y, f"{path}[{i}]")
+    elif isinstance(a, np.ndarray):
+        assert isinstance(b, np.ndarray) and a.shape == b.shape, (
+            f"{path}: 数组形状不一致 {a.shape} vs {getattr(b, 'shape', None)}"
+        )
+        if a.dtype.kind == "f":
+            assert np.array_equal(a, b, equal_nan=True), f"{path}: 数组数值不一致"
+        else:
+            assert np.array_equal(a, b), f"{path}: 数组数值不一致"
+    elif isinstance(a, float):
+        if np.isnan(a):
+            assert isinstance(b, float) and np.isnan(b), f"{path}: NaN 不对称"
+        else:
+            assert a == b, f"{path}: {a!r} != {b!r}"
+    else:
+        assert a == b, f"{path}: {a!r} != {b!r}"
+
+
+@pytest.fixture
+def smoke_setup(make_true_views, tmp_path):
+    """全链冒烟地基:15 视角合成数据(12 训练 = 6 姿态 × 2 连拍,3 考试)、
+    训练/考试两套角点文件与数据清单(走真实装载路径)、伪标定轮
+    (m1/m2__opencv 初值产物,网格从文件读回共同初值,D-14)。
+
+    配置小样化:2 模型 × 2 核 × 2 折 × 2 轮 × 4 次 bootstrap;并行上限写 1
+    走串行回退(体例照 test_optimizer_comparison.py)。
+    """
+    views, _k = make_true_views(n_views=15)
+    board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+
+    def _write_split(stem, image_ids, pose_ids, uv, split):
+        """一套角点 npz + 数据清单(体例照 test_optimizer_comparison.py)。"""
+        corners_path = tmp_path / f"corners_{stem}_sb.npz"
+        np.savez(
+            corners_path,
+            image_ids=np.asarray(image_ids),
+            uv=np.asarray(uv, dtype=np.float64),
+            detected=np.ones(len(image_ids), dtype=bool),
+            source=np.asarray(["sb"] * len(image_ids)),
+        )
+        manifest_path = tmp_path / f"manifest_{stem}.json"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "images": [
+                        {"image_id": img, "pose_id": pose, "split": split}
+                        for img, pose in zip(image_ids, pose_ids)
+                    ],
+                    "summary": {"resolution": [640, 480]},
+                },
+                f,
+            )
+        return corners_path, manifest_path
+
+    corners_train, manifest_train = _write_split(
+        "train",
+        [f"img_{k:02d}" for k in range(12)],
+        [f"pose_{k // 2:02d}" for k in range(12)],
+        np.asarray(views[:12], dtype=np.float64),
+        "train",
+    )
+    corners_test, manifest_test = _write_split(
+        "test",
+        ["timg_00", "timg_01", "timg_02"],
+        ["tpose_00", "tpose_01", "tpose_02"],
+        np.asarray(views[12:], dtype=np.float64),
+        "test",
+    )
+
+    obs_train = load_observation_set(corners_train, manifest_train, board, split="train")
+    run_dir = tmp_path / "calibration" / "run_fake"
+    for mid in ("m1", "m2"):
+        model = create_model(mid)
+        init = solve_with_opencv(obs_train, model)
+        assert init.converged, f"合成数据上 {mid} OpenCV 初值应收敛:{init.failure_note}"
+        _rms, _per_view, residuals = compute_result_metrics(
+            obs_train,
+            np.array([init.params[n] for n in model.param_names]),
+            init.rvecs,
+            init.tvecs,
+            model,
+        )
+        save_result(run_dir / f"{mid}__opencv", init, residuals=residuals)
+
+    base = CalibrationConfig()
+    cfg = replace(
+        base,
+        evaluate=replace(
+            base.evaluate,
+            models=("m1", "m2"),
+            optimizer_losses=("linear", "soft_l1"),
+            cv_n_folds=2,
+            cv_n_rounds=2,
+            bootstrap_n=4,
+            evaluate_max_workers=1,
+        ),
+    )
+    return {
+        "board": board,
+        "cfg": cfg,
+        "corners_train": corners_train,
+        "manifest_train": manifest_train,
+        "corners_test": corners_test,
+        "manifest_test": manifest_test,
+        "run_dir": run_dir,
+    }
+
+
+def test_full_chain_smoke_optimizer_to_contract(smoke_setup):
+    """全链冒烟:优化器小网格 → 四实验 → 全量重训交付 → 来源分离组装 →
+    判行表与选型 → evaluate.json 落盘 → 三张判行表图,一条龙跑通不散架。
+    04-06 的命令层只是把这里的调用序列接上取数与中文播报。"""
+    s = smoke_setup
+    models = tuple(s["cfg"].evaluate.models)
+    t0 = time.perf_counter()
+
+    # ① 优化器小网格:推荐配置从这里出(D-13:四实验统一用推荐配置)
+    grid = run_optimizer_grid(
+        s["corners_train"],
+        s["manifest_train"],
+        s["board"],
+        ScipyConfig(),
+        s["cfg"].evaluate,
+        s["run_dir"],
+    )
+    assert grid["failure_note"] is None
+    optimizer_config = grid["recommended_solver"]
+    assert set(optimizer_config) == set(models), "推荐配置应覆盖全部参选模型"
+
+    # ② 四实验(观测集走真实装载路径,split 行序契约在入口内置断言)
+    obs_train = load_observation_set(
+        s["corners_train"], s["manifest_train"], s["board"], split="train"
+    )
+    obs_test = load_observation_set(s["corners_test"], s["manifest_test"], s["board"], split="test")
+    cv = cv_pose_grouped(obs_train, s["board"], s["cfg"], optimizer_config)
+    boot = bootstrap_pose(obs_train, s["board"], s["cfg"], optimizer_config)
+    slices = slices_by_index(
+        obs_train,
+        s["board"],
+        s["cfg"],
+        optimizer_config,
+        {"sigma_temporal_corner": 0.30},
+    )
+    lopo_rep = lopo(obs_train, s["board"], s["cfg"], optimizer_config)
+    for m in models:
+        assert cv["models"][m]["mean_heldout_px"] is not None
+        assert cv["models"][m]["n_failed_folds"] == 0, "干净合成数据上不该有失败折"
+        assert boot["models"][m]["max_disp_px"] is not None
+        assert slices["models"][m]["slice_max_disp_px"] is not None
+        assert lopo_rep["models"][m]["mean_lopo_px"] is not None
+
+    # ③ 全量重训交付(CV 只管选型,交付一律全量重训;test 逐张并排评分)
+    delivery = run_delivery(obs_train, obs_test, s["board"], s["cfg"], optimizer_config)
+    for m in models:
+        entry = delivery["models"][m]
+        assert entry["converged"], f"{m} 全量重训在合成数据上应收敛:{entry['failure_note']}"
+        assert entry["bic"] is not None and np.isfinite(entry["bic"])
+    assert len(delivery["test_rows"]) == 2 * 3, "test 评分行 = 模型数 × 考试照片数"
+    assert all(row["rms_px"] is not None for row in delivery["test_rows"])
+
+    # ④ 来源分离组装(填 bootstrap 的 var_slice / pose_sampling_var 占位键,
+    # D-07:相减的是方差,分组侧经验标准差先平方)
+    source_separation: dict[str, dict] = {}
+    stability_summary: dict[str, dict] = {}
+    crlb_summary: dict[str, dict] = {}
+    for m in models:
+        var_slice = {n: float(v) ** 2 for n, v in slices["models"][m]["empirical_std"].items()}
+        sep = pose_sampling_variance(boot["models"][m]["var_bootstrap"], var_slice)
+        boot["models"][m]["var_slice"] = var_slice
+        boot["models"][m]["pose_sampling_var"] = sep
+        source_separation[m] = sep
+        stability_summary[m] = {
+            "max_disp_px": boot["models"][m]["max_disp_px"],
+            "slice_max_disp_px": slices["models"][m]["slice_max_disp_px"],
+        }
+        # CRLB 对照缺席时的兜底(冒烟小样组数少,告警可能算不成;不冒充数值)
+        crlb_summary[m] = slices["models"][m]["crlb_alert"] or {
+            "n_below_hard": 0,
+            "verdict_note": "冒烟小样 CRLB 对照缺席,硬告警按 0 计",
+        }
+
+    # ⑤ 判行表 + BIC 写入 + 选型(BIC 在交付里算好,这里只落账,D-10)
+    verdicts = build_verdict_table(
+        cv["models"],
+        stability_summary,
+        crlb_summary,
+        {},
+        {
+            "gen_overfit_ratio_max": s["cfg"].evaluate.gen_overfit_ratio_max,
+            "stability_disp_px_max": s["cfg"].evaluate.stability_disp_px_max,
+        },
+    )
+    for row in verdicts["verdicts"]:
+        row["bic"] = delivery["models"][row["model_id"]]["bic"]
+    selection = select_model(verdicts["verdicts"], cv["models"], s["cfg"])
+    assert selection["selected"] in models or (
+        selection["selected"] is None and selection["reasons"]
+    ), "选型结论要么给模型名,要么 None + 逐模型未当选原因"
+    assert selection["selection_rule"], "选型规则说明必须随结论落盘(可考)"
+
+    # ⑥ 组装 evaluate 报告落盘(明细转 npz 旁车,json 只留汇总与引用)
+    lineage = make_lineage(
+        {},
+        {
+            "corners_train": s["corners_train"],
+            "manifest_train": s["manifest_train"],
+            "corners_test": s["corners_test"],
+            "manifest_test": s["manifest_test"],
+        },
+        "run_smoke",
+    )
+    report = {
+        "schema_version": SCHEMA_VERSION_EVALUATE,
+        "created": lineage["created"],
+        "lineage": {},  # save_evaluate_report 落位
+        "optimizer": optimizer_config,
+        "cv": _json_section(cv),
+        "bootstrap": _json_section(boot),
+        "slices": _json_section(slices),
+        "lopo": _json_section(lopo_rep),
+        "source_separation": source_separation,
+        "selection": selection,
+        "delivery": _json_section(delivery),
+        "meta": {"round_id": "run_smoke"},
+        "failure_note": None,
+    }
+    report["_cv_detail"] = cv["_cv_detail"]
+    report["_bootstrap_detail"] = boot["_bootstrap_detail"]
+    report["_slice_detail"] = slices["_slice_detail"]
+    report["_lopo_detail"] = lopo_rep["_lopo_detail"]
+    report["_delivery_detail"] = delivery["_delivery_detail"]
+
+    out_dir = s["run_dir"].parent / "evaluate" / "run_smoke"
+    save_evaluate_report(out_dir, report, lineage)
+    doc = load_evaluate_report(out_dir)["report"]
+    for key in EVALUATE_KEYS:
+        assert key in doc, f"读回的报告缺契约键:{key}"
+    assert doc["failure_note"] is None
+    for section in ("cv", "bootstrap", "slices", "lopo", "delivery"):
+        assert doc[section]["detail_npz"] == f"experiments/{section}.npz"
+    assert doc["lineage"]["upstream"], "血缘 upstream 不能为空(T-04-05-04)"
+    # 来源分离:每个参数的位姿占比都是 [0, 1] 内的实数
+    for m in models:
+        for name, block in source_separation[m].items():
+            share = block["pose_share"]
+            assert isinstance(share, float) and 0.0 <= share <= 1.0, (
+                f"{m}.{name} 的位姿占比越界:{share}"
+            )
+
+    # ⑦ 三张判行表图(库函数只管画图;冒烟里要真画出来且非空)
+    fig_dir = out_dir / "figures"
+    fig_paths = (
+        plot_cv_errorbars(cv["models"], fig_dir / "cv_errorbars.png"),
+        plot_lopo_pose_errors(lopo_rep, fig_dir / "lopo_pose_errors.png"),
+        plot_dispersion_compare(
+            boot["models"], slices["models"], fig_dir / "dispersion_compare.png"
+        ),
+    )
+    for p in fig_paths:
+        assert p.is_file() and p.stat().st_size > 0, f"冒烟图没画出来:{p}"
+
+    # 冒烟也有时间上限:超 300 秒说明小样配置退化成了正式口径,装配有误
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 300.0, f"全链冒烟耗时 {elapsed:.1f} 秒,超过 300 秒上限"
+
+
+def test_full_chain_rerun_numeric_sections_bit_identical(smoke_setup):
+    """同种子重跑:cv / bootstrap 两段逐位一致——随机性只从全局种子按标签
+    确定性派生的承诺(04-02 教训:线程锁与派生规则任一失守这里先显形)。"""
+    s = smoke_setup
+    obs = load_observation_set(s["corners_train"], s["manifest_train"], s["board"], split="train")
+    optimizer_config = {"m1": {"loss": "linear"}, "m2": {"loss": "linear"}}
+    first_cv = cv_pose_grouped(obs, s["board"], s["cfg"], optimizer_config)
+    first_boot = bootstrap_pose(obs, s["board"], s["cfg"], optimizer_config)
+    second_cv = cv_pose_grouped(obs, s["board"], s["cfg"], optimizer_config)
+    second_boot = bootstrap_pose(obs, s["board"], s["cfg"], optimizer_config)
+    _assert_reports_equal(first_cv, second_cv)
+    _assert_reports_equal(first_boot, second_boot)
