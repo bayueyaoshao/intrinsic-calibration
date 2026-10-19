@@ -35,8 +35,10 @@ from calib.evaluation.experiments import (
     lopo,
     make_calibrate_fn,
     pose_sampling_variance,
+    run_delivery,
     slices_by_index,
 )
+from calib.evaluation.selection import bic_full_fit
 from calib.evaluation.splitting import (
     assign_cv_folds,
     bootstrap_resample,
@@ -48,6 +50,7 @@ from calib.io.config import BoardSpec, CalibrationConfig
 from calib.models import create_model
 from calib.solve.baseline import build_object_points
 from calib.solve.observation import ObservationSet
+from calib.solve.scoring import solve_pose_only
 
 
 def _assert_reports_equal(a, b, path="报告") -> None:
@@ -650,3 +653,166 @@ def test_pose_sampling_variance_difference_and_clamp():
         pose_sampling_variance({"fx": 1.0}, {"fy": 1.0})
     with pytest.raises(ValueError, match="有限"):
         pose_sampling_variance({"fx": float("nan")}, {"fx": 1.0})
+
+
+# ---------------------------------------------------------------------------
+# Task 1(04-05):run_delivery 全量重训 × 全模型 + test 逐张并排评分(D-16)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def delivery_setup(make_true_views):
+    """交付评分地基:6 姿态 × 2 张训练观测集 + 3 张独立 test 观测集 + 2 模型。
+
+    test 侧照片与姿态独立编号(白话:考题不与练习题重叠);正式口径由
+    调用方经 load_observation_set(split="test") 装载(04-06 命令层),
+    这里按同一行序契约直构造(体例照 cv_setup)。
+    """
+    views, _k = make_true_views(n_views=15)  # 前 12 张训练(6 姿态 × 2),后 3 张 test
+    board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+    train_obs = ObservationSet(
+        image_ids=tuple(f"img_{k:02d}" for k in range(12)),
+        pose_ids=tuple(f"pose_{k // 2:02d}" for k in range(12)),
+        object_points=build_object_points(board),
+        image_points=np.asarray(views[:12], dtype=np.float64),
+        image_size=(640, 480),
+        corner_source=("sb",) * 12,
+    )
+    test_obs = ObservationSet(
+        image_ids=tuple(f"timg_{k:02d}" for k in range(3)),
+        pose_ids=tuple(f"tpose_{k:02d}" for k in range(3)),
+        object_points=build_object_points(board),
+        image_points=np.asarray(views[12:], dtype=np.float64),
+        image_size=(640, 480),
+        corner_source=("sb",) * 3,
+    )
+    base = CalibrationConfig()
+    cfg = replace(
+        base,
+        evaluate=replace(base.evaluate, models=("m1", "m2"), evaluate_max_workers=1),
+    )
+    optimizer_config = {"m1": {"loss": "linear"}, "m2": {"loss": "linear"}}
+    return {
+        "train": train_obs,
+        "test": test_obs,
+        "board": board,
+        "cfg": cfg,
+        "optimizer_config": optimizer_config,
+    }
+
+
+def test_delivery_full_refits_and_test_rows(delivery_setup):
+    """行为 1:2 模型全量重训 + 2 × 3 = 6 行 test 评分;每模型交付键齐
+    (final_params/rms_px/rss/n_intrinsic_params/n_views/bic);RSS 与整体
+    RMS 换算对账(RSS = RMS² × 视图数 × 每视图角点数,手算);BIC 与
+    bic_full_fit(rss, k, n) 逐位一致,k = 内参数 + 6 × 视图数(D-10)。"""
+    s = delivery_setup
+    report = run_delivery(s["train"], s["test"], s["board"], s["cfg"], s["optimizer_config"])
+    assert report["schema"] == "delivery-v1"
+    assert set(report["models"]) == {"m1", "m2"}
+    n_views = len(s["train"].image_ids)
+    for m in ("m1", "m2"):
+        entry = report["models"][m]
+        model = create_model(m)
+        assert entry["converged"], f"{m} 在干净合成数据上应重训收敛:{entry['failure_note']}"
+        assert set(entry["final_params"]) == set(model.param_names)
+        assert entry["rms_px"] is not None and 0.0 < entry["rms_px"] < 0.5
+        n_int = len(model.param_names)
+        assert entry["n_intrinsic_params"] == n_int
+        assert entry["n_views"] == n_views
+        # RSS 手算对账:整体 RMS = sqrt(全部平方残差的均值) → RSS = RMS²·V·P
+        assert entry["rss"] == pytest.approx(entry["rms_px"] ** 2 * n_views * 88, rel=1e-9)
+        k = n_int + 6 * n_views
+        assert entry["bic"] == bic_full_fit(entry["rss"], k, s["cfg"].evaluate.bic_n_poses), (
+            "交付段 BIC 必须恰好是 bic_full_fit(全量解 RSS, 内参数 + 6×视图数, "
+            "cfg.evaluate.bic_n_poses)——04-03 select_model 只消费现成值"
+        )
+
+    rows = report["test_rows"]
+    assert len(rows) == 6, "2 模型 × 3 张 test = 6 行并排评分"
+    assert {(r["model_id"], r["image_id"]) for r in rows} == {
+        (m, f"timg_{i:02d}") for m in ("m1", "m2") for i in range(3)
+    }
+    for r in rows:
+        for key in ("model_id", "image_id", "rms_px", "failure_note"):
+            assert key in r, f"test 评分行缺键:{key}(D-16 逐张逐模型全存)"
+        assert r["rms_px"] is not None and np.isfinite(r["rms_px"])
+        assert r["failure_note"] is None
+
+
+def test_delivery_test_scores_match_hand_computation(delivery_setup):
+    """行为 2:test 评分行数值与手算一致——同一份交付参数重解
+    solve_pose_only 逐位一致(评分只是"内参当尺子、只挪位姿"的投影计算,
+    不允许有第二套算法,T-04-05-01 的对账位)。"""
+    s = delivery_setup
+    report = run_delivery(s["train"], s["test"], s["board"], s["cfg"], s["optimizer_config"])
+    by_key = {(r["model_id"], r["image_id"]): r for r in report["test_rows"]}
+    for m in ("m1", "m2"):
+        model = create_model(m)
+        params = report["models"][m]["final_params"]
+        params_vec = np.array([params[n] for n in model.param_names], dtype=np.float64)
+        for i, image_id in enumerate(s["test"].image_ids):
+            _rv, _tv, rms = solve_pose_only(
+                s["test"].image_points[i], s["test"].object_points, params_vec, model
+            )
+            assert by_key[(m, image_id)]["rms_px"] == pytest.approx(rms, rel=1e-12), (
+                f"{m} 对 {image_id} 的评分与手算 solve_pose_only 不一致"
+            )
+
+
+def test_delivery_uses_recommended_optimizer_config(delivery_setup, monkeypatch):
+    """行为 3(D-13):重训统一走传入的推荐配置——solve_with_scipy 实参的
+    loss 与 f_scale 和推荐配置逐项一致,不许悄悄回退默认配置。"""
+    s = delivery_setup
+    optimizer_config = {
+        "m1": {"loss": "soft_l1", "f_scale_px": 2.5},
+        "m2": {"loss": "linear"},
+    }
+    captured: list[tuple[str, str, object]] = []
+    real_solve = experiments_mod.solve_with_scipy
+
+    def spy_solve(obs, model, cfg, init=None, loss="linear", rms_linear_ref=None):
+        captured.append((model.model_id, loss, cfg.f_scale))
+        return real_solve(obs, model, cfg, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
+
+    monkeypatch.setattr(experiments_mod, "solve_with_scipy", spy_solve)
+    report = run_delivery(s["train"], s["test"], s["board"], s["cfg"], optimizer_config)
+
+    got = {m: (loss, fsc) for m, loss, fsc in captured}
+    assert got["m1"][0] == "soft_l1", f"m1 重训应收到推荐核 soft_l1,实际 {got['m1'][0]}"
+    assert got["m1"][1] == pytest.approx(2.5), "推荐配置的 f_scale_px 必须覆盖 auto 档"
+    assert got["m2"][0] == "linear"
+    assert report["models"]["m1"]["loss_used"] == "soft_l1"
+    assert report["models"]["m2"]["loss_used"] == "linear"
+
+
+def test_delivery_model_failure_contract(delivery_setup, monkeypatch):
+    """行为 4:单模型重训失败转失败契约占行,不中断其余模型——失败模型的
+    test 评分行记契约占行(rms_px=None + 中文 failure_note),健康模型照常
+    全量重训与逐张评分(一个模型病了不拖死并排成绩单)。"""
+    s = delivery_setup
+    real_solve = experiments_mod.solve_with_scipy
+
+    def boom(obs, model, cfg, init=None, loss="linear", rms_linear_ref=None):
+        if model.model_id == "m2":
+            raise RuntimeError("人为注入的重训爆炸")
+        return real_solve(obs, model, cfg, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
+
+    monkeypatch.setattr(experiments_mod, "solve_with_scipy", boom)
+    report = run_delivery(s["train"], s["test"], s["board"], s["cfg"], s["optimizer_config"])
+
+    bad = report["models"]["m2"]
+    assert bad["converged"] is False
+    assert bad["final_params"] == {}
+    assert bad["rms_px"] is None and bad["rss"] is None and bad["bic"] is None
+    assert bad["failure_note"], "失败模型必须带非空中文说明"
+    assert "RuntimeError" in bad["failure_note"]
+    m2_rows = [r for r in report["test_rows"] if r["model_id"] == "m2"]
+    assert len(m2_rows) == 3, "失败模型的 test 评分行照常占行(键一个不少)"
+    assert all(r["rms_px"] is None and r["failure_note"] for r in m2_rows)
+
+    good = report["models"]["m1"]
+    assert good["converged"] and good["rss"] is not None and good["bic"] is not None
+    m1_rows = [r for r in report["test_rows"] if r["model_id"] == "m1"]
+    assert len(m1_rows) == 3
+    assert all(r["rms_px"] is not None and r["failure_note"] is None for r in m1_rows)
