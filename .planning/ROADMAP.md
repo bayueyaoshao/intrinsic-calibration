@@ -141,7 +141,7 @@ Plans:
   4. bootstrap 与重复张分组实验对照,可分离"纯噪声"与"位姿抽样"两种不确定度来源;留一姿态表能点名问题姿态
   5. 优化器/鲁棒核/初始化策略对比表落盘,含收敛状态与多起点一致性检验(鱼眼模型初值不当时求解会卡在坏解上,须验证没有这种情况);选定模型用全量 train 重训,并在 test/65 张独立照片上评分一次
 
-**Plans:** 4/6 plans executed
+**Plans:** 5/6 plans executed
 Plans:
 **Wave 1**
 
@@ -158,7 +158,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 04-05-PLAN.md — 交付与契约:全量重训 × 4 + test 65 张并排评分 + evaluate.json 主契约与 npz 旁车 + 判行表三图 + 全链冒烟(EVA-02/SOL-02 收口,D-16)
+- [x] 04-05-PLAN.md — 交付与契约:全量重训 × 4 + test 65 张并排评分 + evaluate.json 主契约与 npz 旁车 + 判行表三图 + 全链冒烟(EVA-02/SOL-02 收口,D-16)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
