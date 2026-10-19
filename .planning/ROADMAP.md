@@ -141,7 +141,28 @@ Plans:
   4. bootstrap 与重复张分组实验对照,可分离"纯噪声"与"位姿抽样"两种不确定度来源;留一姿态表能点名问题姿态
   5. 优化器/鲁棒核/初始化策略对比表落盘,含收敛状态与多起点一致性检验(鱼眼模型初值不当时求解会卡在坏解上,须验证没有这种情况);选定模型用全量 train 重训,并在 test/65 张独立照片上评分一次
 
-**Plans:** TBD
+**Plans:** 6 plans
+Plans:
+**Wave 1**
+
+- [ ] 04-01-PLAN.md — 考试地基:joblib 依赖 + EvaluateConfig 全量契约 + evaluate 配置段 + 姿态切分纯函数库(零泄漏断言硬门禁)+ 并行助手(EVA-01,D-01/02/03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 04-02-PLAN.md — 优化器对比先行:16 组合网格 + 推荐优化配置 + 多起点双容差一致性 + optimizer.json 落盘与真实数据试车(SOL-02 前半,D-13/14/15)
+- [ ] 04-03-PLAN.md — 选型统计纯函数:配对检验三分支平局判定 + BIC + 卡方硬告警线 + MAD 离群判据 + 三判据判行表(EVA-02 判定核心/EVA-05 判据,D-06/08/09/10/11/12)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 04-04-PLAN.md — 四类实验函数:K 折交叉验证 + 留一姿态 + 重复张分组与同口径 CRLB 硬告警 + bootstrap 与来源分离(EVA-01 实验侧/EVA-03/04/05,D-04/05/07)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 04-05-PLAN.md — 交付与契约:全量重训 × 4 + test 65 张并排评分 + evaluate.json 主契约与 npz 旁车 + 判行表三图 + 全链冒烟(EVA-02/SOL-02 收口,D-16)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 04-06-PLAN.md — `calib evaluate` 命令闭环 + 真实数据全链对账(成功标准 1–5)+ 人工核查判行表 + 需求状态收口(EVA-02/SOL-02,含 checkpoint)
 
 ### Phase 5: 误差预算 + 诊断 + 角点提取寻优
 
