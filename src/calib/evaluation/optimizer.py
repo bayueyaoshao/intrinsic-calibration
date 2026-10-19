@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from math import radians
 from pathlib import Path
 
@@ -247,11 +248,16 @@ def run_optimizer_grid(corners_npz_path: Path | str,
     # 看到的是"同一模型的四个核并排相邻"
     combos = [rows_by_key[(m, loss)] for m in models for loss in losses]
 
+    # 返回值直接组齐 optimizer.json 的 8 键契约(created / failure_note
+    # 也由这里给:组合级失败照常占行,整轮失败只在调用方走
+    # make_failure_optimizer 的失败契约,正常返回即 success 轮)
     return {
         "schema_version": SCHEMA_VERSION,
+        "created": datetime.now(UTC).isoformat(timespec="seconds"),
         "recommended_solver": recommend_optimization_config(combos, eval_cfg),
         "combos": combos,
         "multistart": None,   # 由 run_multistart 产出后合并进同一份报告
+        "failure_note": None,
         "meta": {
             "n_combos": len(combos),
             "n_failed": sum(1 for row in combos if not row["converged"]),

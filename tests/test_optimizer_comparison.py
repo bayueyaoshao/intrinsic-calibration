@@ -234,6 +234,14 @@ def test_small_grid_runs_and_rows_are_complete(small_grid_setup):
     report = run_optimizer_grid(s["corners"], s["manifest"], s["board"],
                                 ScipyConfig(), s["eval_cfg"], s["run_dir"])
     assert report["schema_version"] == "optimizer-v1"
+    # 网格返回值直接组齐契约(created / failure_note 由这里给,省得每个
+    # 调用方手工补——真实数据轮漏补就被落盘校验拦下);lineage 是唯一
+    # 例外:由调用方经 make_lineage 组装,save_optimizer_report 落位
+    for key in OPTIMIZER_KEYS:
+        if key != "lineage":
+            assert key in report, f"网格返回值缺契约键:{key}"
+    assert report["failure_note"] is None
+    assert report["created"] is not None
     assert report["meta"]["n_combos"] == 2
     assert report["meta"]["calibration_run"] == "run_fake"
     assert report["multistart"] is None
