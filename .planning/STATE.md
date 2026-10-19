@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-10-19T03:24:30.120Z"
+status: planning
+last_updated: "2026-10-19T04:18:02.783Z"
 progress:
   total_phases: 6
   completed_phases: 3
@@ -17,19 +17,19 @@ progress:
 ## Project Reference
 
 - **Core Value:** 对给定的一批标定图像,产出可论证为当前数据下最优的内参(held-out 泛化误差最小 + 参数稳定 + 误差逼近 CRLB),并量化"距离数据极限还有多远"
-- **Current Focus:** Phase 03 — fisher-crlb
+- **Current Focus:** Phase 04 — 评估实验 + 模型选型 + 优化器对比
 - **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md
 
 ## Current Position
 
-Phase: 03 (fisher-crlb) — PLANS COMPLETE,AWAITING VERIFICATION
+Phase: 03 (fisher-crlb) — COMPLETE(2026-10-19,验证 passed 5/5)
 
-- **Phase:** 3
-- **Plan:** 6 of 6(全部完成,含人工核查检查点通过)
-- **Status:** Phase 03 执行完毕,待 code review / 回归门 / verify 后关相
+- **Phase:** 4
+- **Plan:** Not started
+- **Status:** Ready to plan
 - **Progress:** [█████-----] 50%(3/6 相)
-- **备注:** 检查点发现并修复条件数单位伪影(0a9b247),修正后谱产物
-  output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
+- **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
+  产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
 
 ## Performance Metrics
 
