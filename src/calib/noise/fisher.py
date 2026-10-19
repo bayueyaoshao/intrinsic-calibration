@@ -215,26 +215,48 @@ def sensitivity_band(se: np.ndarray, rel: float = SIGMA_BAND_REL_8) -> dict:
     return {"low": arr * (1.0 - r), "high": arr * (1.0 + r), "rel": r}
 
 
+# 以像素为单位的内参(其余参数——k1/k2/p1/p2 等畸变系数——无量纲)。
+# 谱的无量纲化约定按参数名走:名单里的参数除以焦距,名单外原样。
+_GEOMETRIC_PARAMS = ("fx", "fy", "cx", "cy")
+
+
 def spectrum_report(F_marg: np.ndarray, param_names: tuple[str, ...],
-                    cond_warning: float = 1e4,
+                    focal_px: float, cond_warning: float = 1e4,
                     cond_degenerate: float = 1e6) -> dict:
-    """边际化协方差的特征谱报告:特征值、条件数、"软方向"载荷表、退化旗标。
+    """边际化协方差的特征谱报告(无量纲坐标):特征值、条件数、"软方向"
+    载荷表、退化旗标。
 
     术语白话:特征分解 = 把矩阵拆成"一个个互不相关的方向 + 每个方向上
     的方差大小"。协方差矩阵(即 inv(F_marg))的最大特征值方向,是参数
-    空间的"软方向"——这个参数组合方向上精度最差,典型如 fx–cy 类摆位
-    退化。措辞红线(研究 Pattern 3 第 5 点):报告里说"该组合方向上
-    精度最差",不要写成"强耦合"——耦合是原因,软方向才是可测量的后果。
+    空间的"软方向"——这个参数组合方向上精度最差。措辞红线(研究
+    Pattern 3 第 5 点):报告里说"该组合方向上精度最差",不要写成
+    "强耦合"——耦合是原因,软方向才是可测量的后果。
 
-    参数:cond_warning / cond_degenerate 是条件数分档阈值(默认值放函数
-    参数,03-05 的 FisherConfig 会按 config 覆盖)。
+    为什么先做无量纲化(实测教训,2026-10 真实数据上发现):条件数对
+    单位敏感。像素单位的参数(fx/fy/cx/cy)方差是"平方像素"量级,无量纲
+    畸变系数(k1/p1 等)方差是 1e-8 量级,两者混在同一个矩阵里,条件数被
+    单位差灌好几个数量级——看着吓人,其实只是"米和厘米没统一单位",
+    不代表数据退化。所以谱先换到无量纲坐标再算:像素内参除以焦距
+    (像素/像素 = 无量纲),畸变系数本来就是无量纲,原样。白话:相当于
+    先把米和厘米统一成同一个单位,再谈"谁的方向精度差"。
+    原始单位下的条件数另存 condition_number_raw_units 供对照(它只说
+    "单位跨度多大",不作退化判据)。
 
-    返回:{"eigvals" 协方差特征值(升序),
-          "condition_number" = λmax(F_marg)/λmin(F_marg),
+    参数:
+        focal_px: 焦距(像素),无量纲化的基准长度——传线性化点解出的 fx
+                  即可(调用方 03-05 编排传 params["fx"])。
+        cond_warning / cond_degenerate: 条件数分档阈值(默认值放函数参数,
+                  03-05 的 FisherConfig 会按 config 覆盖)。**判档用无量纲
+                  条件数**——无量纲化之后仍超阈值,才是真退化信号。
+
+    返回:{"eigvals" 无量纲协方差特征值(升序),
+          "condition_number" 无量纲条件数 λmax/λmin(F 的同尺度变换),
+          "condition_number_raw_units" 原始单位条件数(对照位,不判档),
+          "normalization" 无量纲化约定的说明文字(随记录落盘,防口头失传),
           "top_directions" 软方向的逐项说明(按 |载荷| 降序取前 2–3 个
-            参数名与载荷数值),
-          "flag" "" / "warning"(cond ≥ cond_warning)/ "degenerate"
-            (cond ≥ cond_degenerate)}。
+            参数名与载荷数值,载荷正负号无意义、绝对值才是权重),
+          "flag" "" / "warning"(无量纲 cond ≥ cond_warning)/ "degenerate"
+            (无量纲 cond ≥ cond_degenerate)}。
     """
     F = np.asarray(F_marg, dtype=np.float64)
     if F.ndim != 2 or F.shape[0] != F.shape[1]:
@@ -248,13 +270,29 @@ def spectrum_report(F_marg: np.ndarray, param_names: tuple[str, ...],
             f"载荷表没法按参数名标注。请传入与 F_marg 同长、同序的参数名元组"
             f"(即 model.param_names)。"
         )
+    focal_px = float(focal_px)
+    if not (np.isfinite(focal_px) and focal_px > 0.0):
+        raise AssertionError(
+            f"focal_px 必须是正的有限值(无量纲化的基准焦距),实际 {focal_px!r}。"
+            f"请传线性化点解出的 fx(像素)。"
+        )
 
-    cov = np.linalg.inv(F_marg)          # 边际化协方差(σ=1 基准)
-    eigvals, eigvecs = np.linalg.eigh(cov)   # 特征值升序(白话见 docstring 开头)
-    f_eigvals = np.linalg.eigvalsh(F)
+    # 无量纲化:协方差 C → D C D(D = diag(1/scale)),对应的 F → D⁻¹ F D⁻¹。
+    # 尺度向量:像素内参取焦距,无量纲参数取 1。
+    scale = np.ones(F.shape[0], dtype=np.float64)
+    for i, name in enumerate(param_names):
+        if name in _GEOMETRIC_PARAMS:
+            scale[i] = focal_px
+
+    cov = np.linalg.inv(F)                    # 边际化协方差(σ=1 基准)
+    cov_dimless = cov / np.outer(scale, scale)
+    eigvals, eigvecs = np.linalg.eigh(cov_dimless)  # 特征值升序
+    f_eigvals = np.linalg.eigvalsh(F * np.outer(scale, scale))
     condition_number = float(f_eigvals[-1] / f_eigvals[0])
+    f_raw_eigvals = np.linalg.eigvalsh(F)
+    cond_raw = float(f_raw_eigvals[-1] / f_raw_eigvals[0])
 
-    # 软方向:协方差最大特征值对应的特征向量,按 |载荷| 降序取前 2–3 个参数
+    # 软方向:无量纲协方差最大特征值对应的特征向量,按 |载荷| 降序取前 2–3 个
     top_vec = eigvecs[:, -1]
     order = np.argsort(-np.abs(top_vec))
     k = min(3, len(order))
@@ -274,6 +312,11 @@ def spectrum_report(F_marg: np.ndarray, param_names: tuple[str, ...],
     return {
         "eigvals": eigvals,
         "condition_number": condition_number,
+        "condition_number_raw_units": cond_raw,
+        "normalization": ("谱与条件数在无量纲坐标上计算:像素内参(fx/fy/cx/cy)"
+                          "÷焦距,畸变系数原样;退化判档看无量纲条件数,"
+                          "原始单位条件数(condition_number_raw_units)只反映"
+                          "单位跨度,不作为退化判据。"),
         "top_directions": top_directions,
         "flag": flag,
     }
@@ -432,7 +475,8 @@ def build_aggregated_observation_set(board: BoardSpec, aggregate: dict) -> Obser
 CRLB_RECORD_KEYS = (
     "observation_set", "sigma_source", "sigma_used", "param_names",
     "se", "band_low", "band_high", "band_rel",
-    "condition_number", "eigvals", "top_directions", "flag",
+    "condition_number", "condition_number_raw_units", "normalization",
+    "eigvals", "top_directions", "flag",
     "n_views", "max_pose_block_cond", "status", "failure_note",
     "sigma_reduction",
 )
@@ -459,6 +503,8 @@ def _failure_record(obs_name: str, sigma_name: str, param_names, exc: Exception)
         "band_high": None,
         "band_rel": None,
         "condition_number": None,
+        "condition_number_raw_units": None,
+        "normalization": None,
         "eigvals": None,
         "top_directions": [],
         "flag": "",
@@ -730,6 +776,7 @@ def run_fisher_matrix(corners_npz_path: Path | str, manifest_path: Path | str,
                         band = sensitivity_band(se, cfg.sigma_band_rel)
                         spec = spectrum_report(
                             spec_set["F_marg"], model.param_names,
+                            float(params["fx"]),
                             cfg.cond_warning, cfg.cond_degenerate)
                         record = {
                             "observation_set": obs_name,
@@ -741,6 +788,9 @@ def run_fisher_matrix(corners_npz_path: Path | str, manifest_path: Path | str,
                             "band_high": band["high"],
                             "band_rel": band["rel"],
                             "condition_number": spec["condition_number"],
+                            "condition_number_raw_units": spec[
+                                "condition_number_raw_units"],
+                            "normalization": spec["normalization"],
                             "eigvals": spec["eigvals"],
                             "top_directions": spec["top_directions"],
                             "flag": spec["flag"],
@@ -817,12 +867,20 @@ def run_fisher_matrix(corners_npz_path: Path | str, manifest_path: Path | str,
                         "compare": None,
                     }
 
-            # FIM 明细挂在本模型名下(save 侧按模型取出转 npz,绝不进 json)
+            # FIM 明细挂在本模型名下(save 侧按模型取出转 npz,绝不进 json)。
+            # 特征谱用与 crlb.json 同一套无量纲坐标(像素内参 ÷ 焦距),
+            # scale_dimless 一并存档,审计时可还原回原始单位。
+            scale640 = np.ones(F640.shape[0], dtype=np.float64)
+            for _i, _name in enumerate(model.param_names):
+                if _name in _GEOMETRIC_PARAMS:
+                    scale640[_i] = float(params["fx"])
+            cov640_dimless = np.linalg.inv(F640) / np.outer(scale640, scale640)
             model_entry["_fisher_detail"] = {
                 "F_marg_views640": F640,
                 "F_marg_poses80": obs_sets["poses80"]["F_marg"],
-                "eigvals_cov": np.linalg.eigvalsh(np.linalg.inv(F640)),
-                "eigvecs_cov": np.linalg.eigh(np.linalg.inv(F640))[1],
+                "eigvals_cov": np.linalg.eigvalsh(cov640_dimless),
+                "eigvecs_cov": np.linalg.eigh(cov640_dimless)[1],
+                "scale_dimless": scale640,
                 "param_names": list(model.param_names),
             }
         except Exception as e:  # noqa: BLE001  模型级失败:该模型全部组合转失败契约

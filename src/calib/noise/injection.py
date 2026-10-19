@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
@@ -43,7 +43,7 @@ def _seed_for(image_id: str, level_value: float, rep: int, base_seed: int) -> in
     原图 + 配置里的 base_seed,不需要任何落盘的加噪副本。
     """
     digest = hashlib.sha1(
-        f"{image_id}|{level_value!r}|{rep}".encode("utf-8")).hexdigest()
+        f"{image_id}|{level_value!r}|{rep}".encode()).hexdigest()
     return (base_seed + int(digest, 16)) % 2**32
 
 
@@ -85,11 +85,9 @@ def _anchor_grid(sigma_values: list[float], cfg: NoiseConfig) -> list[float]:
             f"{sigma_med!r}。请检查输入图像是否全部读取失败。")
     if cfg.injection_sigma_min is not None and cfg.injection_sigma_max is not None:
         lo, hi = float(cfg.injection_sigma_min), float(cfg.injection_sigma_max)
-        auto = False
     else:
         lo = max(0.25, sigma_med / 4.0)
         hi = min(128.0, sigma_med * 32.0)
-        auto = True
     if hi < lo:
         raise AssertionError(
             f"σ 网格上限({hi!r})小于下限({lo!r}),对数网格没有跨度。"
@@ -243,26 +241,22 @@ def run_injection_experiment(
     if noise_cfg.injection_max_workers <= 1:
         # 串行:不开子进程(小样与调试用),结果与并行完全一致(种子只看三元组)
         results = {}
-        done = 0
-        for task in dispatch:
+        for done, task in enumerate(dispatch, start=1):
             image_id = task[0]
             try:
                 results[image_id] = _inject_one_image(task)
             except Exception as e:  # noqa: BLE001  # 故意宽接:单张失败不拖垮整批
                 worker_errors[image_id] = f"{type(e).__name__}:{e}"
-            done += 1
             if progress:
                 progress({"done": done, "total": len(dispatch), "image_id": image_id})
     else:
         with ProcessPoolExecutor(max_workers=noise_cfg.injection_max_workers) as pool:
             futures = {pool.submit(_inject_one_image, t): t[0] for t in dispatch}
-            done = 0
-            for fut, image_id in futures.items():
+            for done, (fut, image_id) in enumerate(futures.items(), start=1):
                 try:
                     results[image_id] = fut.result()
                 except Exception as e:  # noqa: BLE001  # 同上:单张失败转留痕
                     worker_errors[image_id] = f"{type(e).__name__}:{e}"
-                done += 1
                 if progress:
                     progress({"done": done, "total": len(dispatch),
                               "image_id": image_id})
