@@ -24,11 +24,27 @@ import typer
 from calib.corners.artifacts import CANONICAL_RULE_VERSION, save_corners
 from calib.corners.canonical import burst_consistency
 from calib.corners.detect import detect_classic, detect_sb
+from calib.evaluation.artifacts import (
+    SCHEMA_VERSION_EVALUATE,
+    make_failure_evaluate,
+    save_evaluate_report,
+)
+from calib.evaluation.experiments import (
+    bootstrap_pose,
+    cv_pose_grouped,
+    lopo,
+    pose_sampling_variance,
+    run_delivery,
+    slices_by_index,
+)
+from calib.evaluation.optimizer import run_multistart, run_optimizer_grid
+from calib.evaluation.selection import build_verdict_table, select_model
 from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
 from calib.noise.artifacts import (
+    load_crlb_report,
     load_noise_report,
     make_failure_crlb,
     make_failure_report,
@@ -48,6 +64,11 @@ from calib.solve.matrix import run_calibration_matrix
 from calib.solve.observation import excluded_image_ids, load_observation_set
 from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
+from calib.visualization.evaluate_figs import (
+    plot_cv_errorbars,
+    plot_dispersion_compare,
+    plot_lopo_pose_errors,
+)
 from calib.visualization.mosaic import write_mosaics
 from calib.visualization.noise_figs import plot_spectrum, plot_transfer_curve
 from calib.visualization.overlay import (
@@ -1164,9 +1185,431 @@ def fisher() -> None:
                f"{figures_dir})")
 
 
+def _evaluate_json_section(section: dict | None) -> dict | None:
+    """实验返回值 → evaluate.json 的段:摘掉行级大表,只留汇总(契约形状)。
+
+    逐姿态/逐张/逐组的行级大表(per_pose_rows / group_records / rows /
+    test_rows)不进 json——它们的完整内容已随各实验的私有明细键转到
+    experiments/<段名>.npz 旁车(产物保真:逐行全存,json 只是索引,
+    D-13);私有明细键本身由 save_evaluate_report 落盘时摘走。
+    """
+    if section is None:
+        return None
+    excluded = {"per_pose_rows", "group_records", "rows", "test_rows"}
+    return {k: v for k, v in section.items() if k not in excluded}
+
+
 @app.command(help="⑥ 防作弊考试:用没见过的新题考试、换着分组复测、逐一抽查,用数据挑出最合适的相机模型")
 def evaluate() -> None:
-    _not_implemented(6, "防作弊考试")
+    """流水线第⑥步:防作弊考试一条龙(判行表 + 选型结论 + test 并排成绩)。
+
+    步骤:读配置 → 上游四轮定位(corners / noise / calibration / fisher
+    各找最新一轮,血缘登记防串轮;缺文件当场中文报错)→ 优化器对比先行
+    (16 组合网格 + 多起点一致性检验,D-13/D-14/D-15;后面的四类实验与
+    全量重训统一用每模型的推荐优化配置)→ 四类实验并行:按姿态分组交叉
+    验证、bootstrap 重采样、重复张分组、留一姿态(逐实验独立兜底:某实验
+    失败该段记 None 并播报,不中断其余实验)→ 全量重训交付 + test 独立
+    照片全模型并排逐张评分(D-16)→ 来源分离组装(bootstrap 总晃动 −
+    分组纯噪声晃动 = 换姿态本身的贡献,相减的是方差,D-07)→ 三判据判行表
+    + 选型(Fisher 谱退化预警随行标注进 notes,D-11;复杂模型 m3/m4 胜出
+    必须写明它与该发现的关系)→ evaluate.json + experiments/*.npz 明细
+    旁车 + 判行表三图落盘(图失败只播报不拦主产物)→ 中途失败也照常落盘
+    失败契约再退出码 1 → 打印中文汇总与人工核查四要素指引。
+
+    硬性规则:命令行零算法参数(一切从 config/calibration.yaml 的
+    evaluate 段读,D-12);只写 output/evaluate/run_<时间戳>/,input_data
+    只读不动。
+    """
+    started = datetime.now(UTC)
+    board = load_board(BOARD_PATH)
+    cfg = load_calibration(CALIBRATION_PATH)
+    eval_cfg = cfg.evaluate
+    models = tuple(eval_cfg.models)
+
+    # ---- 上游四轮定位(照 fisher() 体例:各阶段独立跑,各找最新)----
+    corners_run = latest_run_dir(OUTPUT_ROOT, "corners")
+    manifest_path = _manifest_path_for(corners_run, "sb")
+    corners_train_npz = corners_run / "corners_train_sb.npz"
+    corners_test_npz = corners_run / "corners_test_sb.npz"
+    noise_run = latest_run_dir(OUTPUT_ROOT, "noise")
+    calib_run = latest_run_dir(OUTPUT_ROOT, "calibration")
+    fisher_run = latest_run_dir(OUTPUT_ROOT, "fisher")
+    # 缺文件当场中文报错(T-04-06-01:串轮/缺文件会让全链在错误输入上跑几小时)
+    for path, how in (
+        (corners_train_npz, "calib corners(训练侧 sb 路线)"),
+        (corners_test_npz, "calib corners(考试侧 sb 路线)"),
+        (noise_run / "noise.json", "calib noise"),
+        (fisher_run / "crlb.json", "calib fisher"),
+    ):
+        if not path.is_file():
+            raise ValueError(
+                f"上游产物缺失:{path}。防作弊考试的四类实验与 Fisher 预警都"
+                f"要从它取数,请先运行 {how} 再来。")
+    # 上游质量检查:失败轮的数值字段是 null,拿它当输入等于在空数据上考试
+    noise_report = load_noise_report(noise_run)["report"]
+    if noise_report.get("failure_note"):
+        raise ValueError(
+            f"上游 noise.json 是失败轮({noise_run / 'noise.json'}):"
+            f"{noise_report['failure_note']}。请先排查 calib noise 再重跑评估。")
+    crlb_report = load_crlb_report(fisher_run)["report"]
+    if crlb_report.get("failure_note"):
+        raise ValueError(
+            f"上游 crlb.json 是失败轮({fisher_run / 'crlb.json'}):"
+            f"{crlb_report['failure_note']}。Fisher 预警必须随判行表落盘"
+            f"(D-11,不静默跳过),请先排查 calib fisher 再重跑评估。")
+
+    round_id = f"run_{started.strftime('%Y%m%d_%H%M%S')}"
+    out_dir = OUTPUT_ROOT / "evaluate" / round_id
+
+    # 血缘指纹:角点双 npz + 数据清单 + 噪声底 + 每个模型的标定产物 +
+    # crlb.json(Fisher 预警的出处,判行表要引它)
+    upstream: dict = {
+        "corners_train_sb.npz": corners_train_npz,
+        "corners_test_sb.npz": corners_test_npz,
+        "manifest.json": manifest_path,
+        "noise.json": noise_run / "noise.json",
+        "crlb.json": fisher_run / "crlb.json",
+    }
+    for model_id in models:
+        # 标定产物按组合子目录存放(m{X}__scipy/result.json),不在 run 根下
+        for rel in (f"{model_id}__scipy/result.json",
+                    f"{model_id}__scipy/extrinsics.npz",
+                    f"{model_id}__opencv/result.json"):
+            candidate = calib_run / rel
+            if candidate.is_file():
+                upstream[rel] = candidate
+    lineage = make_lineage(
+        config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH},
+        upstream=upstream,
+        round_id=round_id,
+    )
+
+    typer.echo(f"开始防作弊考试:{len(models)} 个模型 × (优化器 16 组合 + 多起点"
+               f"一致性 + 交叉验证 100 折 + bootstrap {eval_cfg.bootstrap_n} 次 + "
+               f"重复张分组 + 留一姿态 80 题)+ 全量重训 × {len(models)} + "
+               f"test 独立照片逐张评分……")
+    typer.echo(f"  上游:corners {corners_run.name} / noise {noise_run.name} / "
+               f"calibration {calib_run.name} / fisher {fisher_run.name}"
+               f"(血缘已登记;合计千余次完整求解,小时级,请稍等)")
+
+    def _count_progress(label: str, every: int):
+        """按次数播报的进度回调(每 every 条播一行,收尾必播)。"""
+        def _cb(state: dict) -> None:
+            done, total = state["done"], state["total"]
+            if done % every == 0 or done == total:
+                typer.echo(f"  {label}:已完成 {done}/{total}……")
+        return _cb
+
+    # 变量先置 None:某段失败时报告里该段记 None,后面照常落盘已算成的部分
+    optimizer_section: dict | None = None
+    cv = boot = slices = lopo_rep = delivery = None
+    source_separation: dict | None = None
+    selection: dict | None = None
+
+    try:
+        # ---- ① 优化器对比先行(D-13/D-14:16 组合网格,共同 OpenCV 初值;
+        #         多起点一致性检验 D-15)----
+        combo_done = [0]
+
+        def _combo_progress(row: dict) -> None:
+            combo_done[0] += 1
+            if row["converged"]:
+                flag = f"收敛,RMS {row['rms_overall']:.4f} px"
+            else:
+                flag = f"未收敛({(row['failure_note'] or '')[:36]})"
+            typer.echo(f"  优化器网格:已完成 {combo_done[0]}/{len(models) * len(eval_cfg.optimizer_losses)}"
+                       f" —— {row['name']}:{flag}")
+
+        def _multistart_progress(state: dict) -> None:
+            if state["done"] % 5 == 0 or state["done"] == state["total"]:
+                typer.echo(f"  多起点一致性({state['model']}):"
+                           f"已完成 {state['done']}/{state['total']}……")
+
+        grid = run_optimizer_grid(
+            corners_train_npz, manifest_path, board, cfg.calibrate.scipy,
+            eval_cfg, calib_run,
+            exclude_images=tuple(cfg.exclude_images),
+            progress=_combo_progress)
+        optimizer_section = dict(grid)
+        obs_train = load_observation_set(
+            corners_train_npz, manifest_path, board, split="train",
+            exclude_images=tuple(cfg.exclude_images))
+        obs_test = load_observation_set(
+            corners_test_npz, manifest_path, board, split="test")
+        optimizer_section["multistart"] = run_multistart(
+            obs_train, board, cfg, progress=_multistart_progress)
+        # 四实验与全量重训统一用每模型的推荐优化配置(D-13:先定配置再考试,
+        # 避免"选型用默认配置、事后发现更优配置,结论返工")
+        optimizer_config = grid["recommended_solver"]
+
+        # ---- ② 四类实验(逐实验独立兜底:失败该段记 None 不中断)----
+        def _stage(name: str, run):
+            try:
+                return run()
+            except Exception as e:  # noqa: BLE001  故意宽接:单实验失败转缺席段
+                typer.echo(f"  {name}未跑成(该段记 None,不中断其余实验):"
+                           f"{type(e).__name__}——{e}")
+                return None
+
+        cv = _stage("交叉验证", lambda: cv_pose_grouped(
+            obs_train, board, cfg, optimizer_config,
+            progress=_count_progress("交叉验证", 10)))
+        boot = _stage("bootstrap 重采样", lambda: bootstrap_pose(
+            obs_train, board, cfg, optimizer_config,
+            progress=_count_progress("bootstrap 重采样", 50)))
+        slices = _stage("重复张分组", lambda: slices_by_index(
+            obs_train, board, cfg, optimizer_config, noise_report,
+            progress=_count_progress("重复张分组", 8)))
+        lopo_rep = _stage("留一姿态", lambda: lopo(
+            obs_train, board, cfg, optimizer_config,
+            progress=_count_progress("留一姿态", 20)))
+
+        # ---- ③ 全量重训交付 + test 逐张并排评分(D-16;CV 只管选型,
+        #         交付一律全量重训——PROJECT.md 算法惯例)----
+        delivery = _stage("全量重训交付", lambda: run_delivery(
+            obs_train, obs_test, board, cfg, optimizer_config,
+            progress=_count_progress("全量重训交付", 1)))
+
+        # ---- ④ 来源分离 + 判行表 + 选型(只在三判据的实验全到位时组装;
+        #         组装失败记 None,不让几小时的实验数据陪葬)----
+        if cv is not None and boot is not None and slices is not None:
+            try:
+                # 来源分离(D-07):分组侧经验标准差先平方成方差(独立来源的
+                # 方差才可加),再用 bootstrap 侧方差相减,差 = 换姿态的贡献
+                stability_summary: dict[str, dict] = {}
+                crlb_summary: dict[str, dict] = {}
+                source_separation = {}
+                for m in models:
+                    emp = slices["models"][m].get("empirical_std")
+                    if emp:
+                        var_slice = {n: float(v) ** 2 for n, v in emp.items()}
+                        sep = pose_sampling_variance(
+                            boot["models"][m]["var_bootstrap"], var_slice)
+                        boot["models"][m]["var_slice"] = var_slice
+                        boot["models"][m]["pose_sampling_var"] = sep
+                        source_separation[m] = sep
+                    else:
+                        typer.echo(f"  来源分离({m}):分组侧经验标准差缺席,"
+                                   f"该模型的位姿抽样方差暂缺(var_slice_note 有说明)")
+                    stability_summary[m] = {
+                        "max_disp_px": boot["models"][m]["max_disp_px"],
+                        "slice_max_disp_px": slices["models"][m]["slice_max_disp_px"],
+                    }
+                    # CRLB 对照缺席时兜底记 0 并写明缺席,不冒充数值(04-05 体例)
+                    crlb_summary[m] = slices["models"][m]["crlb_alert"] or {
+                        "n_below_hard": 0,
+                        "verdict_note": "同口径 CRLB 对照缺席,硬告警按 0 计"
+                                        "(缺席原因见 slices 段该模型的 crlb_note)",
+                    }
+
+                # Fisher 预警(D-11/T-04-06-03):crlb.json 谱退化结论生成中文
+                # 预警文案,原样进判行表 notes
+                fisher_warnings: dict[str, str] = {}
+                for m in models:
+                    rec = ((crlb_report.get("models") or {}).get(m)
+                           or {}).get("observation_sets", {}).get("views640", {})
+                    record = rec.get("detector") or rec.get("temporal") or {}
+                    flag = record.get("flag") or ""
+                    if not flag:
+                        continue
+                    tops = record.get("top_directions") or []
+                    dir_txt = "、".join(
+                        "+".join(item.get("params") or []) for item in tops[:2])
+                    fisher_warnings[m] = (
+                        f"Fisher 预警({flag}):crlb.json 谱体检记录条件数 "
+                        f"{record.get('condition_number'):.2e},最软方向集中在 "
+                        f"{dir_txt}——这批数据定不住这些参数组合;"
+                        f"D-11 不预否决,由三判据实证制衡。")
+
+                verdicts = build_verdict_table(
+                    cv["models"], stability_summary, crlb_summary,
+                    fisher_warnings,
+                    {
+                        "gen_overfit_ratio_max": eval_cfg.gen_overfit_ratio_max,
+                        "stability_disp_px_max": eval_cfg.stability_disp_px_max,
+                    })
+                # BIC 在交付轮算好,这里只落账(D-10:select_model 只消费现成值)
+                for row in verdicts["verdicts"]:
+                    row["bic"] = ((delivery or {}).get("models", {})
+                                  .get(row["model_id"], {}).get("bic"))
+                selection = select_model(verdicts["verdicts"], cv["models"], cfg)
+                # 判行表随选型结论一起落盘(下游与人工核查都按
+                # selection.verdicts 取数——逐行三判据数值 + PASS/FAIL + 判定式)
+                selection["verdicts"] = verdicts["verdicts"]
+                selection["verdict_thresholds"] = verdicts["thresholds"]
+                # 复杂模型胜出必须解释它与 Fisher 退化发现的关系(D-11)
+                if selection.get("selected") in ("m3", "m4"):
+                    m = selection["selected"]
+                    record = (((crlb_report.get("models") or {}).get(m) or {})
+                              .get("observation_sets", {}).get("views640", {})
+                              .get("detector") or {})
+                    tops = record.get("top_directions") or []
+                    dir_txt = "、".join(
+                        "+".join(item.get("params") or []) for item in tops[:2])
+                    selection["fisher_relation_note"] = (
+                        f"复杂模型 {m} 胜出与 Fisher 退化发现的关系(D-11):"
+                        f"crlb.json 谱体检记录其条件数 "
+                        f"{record.get('condition_number'):.2e}(退化线以上),"
+                        f"最软方向落在 {dir_txt}——高阶畸变参数组合在这批数据里"
+                        f"信息量不足。本次仍凭三判据实证当选:泛化(考题误差没有"
+                        f"因高阶项起飞)、稳定(bootstrap 与分组的参数位移当量"
+                        f"都在阈值内)、逼近 CRLB(分组实测不低于同口径理论下界,"
+                        f"零硬告警)。若稳定判据数值贴近阈值,或当选经过了 BIC "
+                        f"平局裁决,建议先人工复核 bootstrap 逐次参数明细"
+                        f"(experiments/bootstrap.npz)与判行表 notes 再采信。")
+            except Exception as e:  # noqa: BLE001  组装失败不拖垮已算成的实验段
+                typer.echo(f"  判行表与选型未组装成(选型段记 None,实验数据照常"
+                           f"落盘):{type(e).__name__}——{e}")
+                selection = None
+    except Exception as e:  # 故意宽接:失败契约(T-04-06-04),失败也落盘
+        note = f"评估阶段中途失败:{type(e).__name__}——{e}"
+        save_evaluate_report(out_dir, make_failure_evaluate(lineage, note), lineage)
+        typer.echo(f"防作弊考试失败(失败报告已照常落盘,各实验段为 null):{note}")
+        typer.echo(f"  失败报告:{out_dir / 'evaluate.json'}")
+        raise typer.Exit(code=1) from e
+
+    # ---- ⑤ 组装报告落盘:json 各段只留汇总,行级明细在 npz 旁车(D-13)----
+    partial = [name for name, sec in (("cv", cv), ("bootstrap", boot),
+                                      ("slices", slices), ("lopo", lopo_rep),
+                                      ("delivery", delivery)) if sec is None]
+    report = {
+        "schema_version": SCHEMA_VERSION_EVALUATE,
+        "created": lineage["created"],
+        "lineage": {},  # save_evaluate_report 统一填(失败报告同样带全血缘)
+        "optimizer": _evaluate_json_section(optimizer_section),
+        "cv": _evaluate_json_section(cv),
+        "bootstrap": _evaluate_json_section(boot),
+        "slices": _evaluate_json_section(slices),
+        "lopo": _evaluate_json_section(lopo_rep),
+        "source_separation": source_separation,
+        "selection": selection,
+        "delivery": _evaluate_json_section(delivery),
+        "meta": {
+            "round_id": round_id,
+            "corners_run": corners_run.name,
+            "noise_run": noise_run.name,
+            "calibration_run": calib_run.name,
+            "fisher_run": fisher_run.name,
+            "partial_sections": partial,
+            "duration_s": round((datetime.now(UTC) - started).total_seconds(), 1),
+        },
+        "failure_note": None,
+    }
+    if cv is not None:
+        report["_cv_detail"] = cv["_cv_detail"]
+    if boot is not None:
+        report["_bootstrap_detail"] = boot["_bootstrap_detail"]
+    if slices is not None:
+        report["_slice_detail"] = slices["_slice_detail"]
+    if lopo_rep is not None:
+        report["_lopo_detail"] = lopo_rep["_lopo_detail"]
+    if delivery is not None:
+        report["_delivery_detail"] = delivery["_delivery_detail"]
+    paths = save_evaluate_report(out_dir, report, lineage)
+
+    # ---- ⑥ 判行表三张图(附加产物:单张失败只播报,不拦主产物)----
+    figures_dir = out_dir / "figures"
+    n_figs = 0
+    if cv is not None:
+        try:
+            plot_cv_errorbars(cv["models"], figures_dir / "cv_errorbars.png")
+            n_figs += 1
+        except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
+            typer.echo(f"  CV 误差棒图未生成(不影响数据产物):{type(e).__name__}——{e}")
+    if lopo_rep is not None:
+        try:
+            plot_lopo_pose_errors(lopo_rep, figures_dir / "lopo_pose_errors.png")
+            n_figs += 1
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"  留一姿态散点图未生成(不影响数据产物):{type(e).__name__}——{e}")
+    if boot is not None and slices is not None:
+        try:
+            plot_dispersion_compare(
+                boot["models"], slices["models"],
+                figures_dir / "dispersion_compare.png")
+            n_figs += 1
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"  离散对比图未生成(不影响数据产物):{type(e).__name__}——{e}")
+
+    # ---- ⑦ 中文汇总:推荐配置 → 判行表 → 选型 → test 并排 → 四要素指引 ----
+    typer.echo("防作弊考试完成,evaluate.json 与判行表证据已写盘。")
+    if optimizer_section is not None:
+        meta_g = optimizer_section.get("meta") or {}
+        typer.echo(f"  优化器对比({meta_g.get('n_combos')} 组合,"
+                   f"未收敛 {meta_g.get('n_failed')} 个),推荐配置:")
+        for m, rec in (optimizer_section.get("recommended_solver") or {}).items():
+            if rec.get("loss") is None:
+                typer.echo(f"    {m}:没有收敛组合可推荐({(rec.get('note') or '')[:40]})")
+            else:
+                scale = (f",f_scale {rec['f_scale_px']:.3f} px"
+                         if "f_scale_px" in rec else "")
+                typer.echo(f"    {m}:{rec['loss']} 核{scale}")
+        for m, blk in ((optimizer_section.get("multistart") or {})
+                       .get("models") or {}).items():
+            typer.echo(f"    {m} 多起点一致性:{blk['n_converged']}/{blk['n_starts']}"
+                       f" 收敛,判定 {blk['verdict']}")
+    if selection and selection.get("verdicts"):
+        typer.echo(f"  判行表(三判据:泛化 = 考题误差没因训练起飞 / 稳定 = 换姿态"
+                   f"重标参数挪动小 / 逼近 CRLB = 实测不高于理论下界):")
+        typer.echo(f"    {'模型':<6}{'held-out(px)':<14}{'训练(px)':<12}"
+                   f"{'过拟合比':<10}{'位移当量(px)':<14}{'BIC':<14}{'判定':<6}")
+        for row in selection["verdicts"]:
+            gen, stab = row["generalization"], row["stability"]
+            bic = row.get("bic")
+            bic_text = f"{bic:.1f}" if bic is not None and np.isfinite(bic) else "—"
+            typer.echo(f"    {row['model_id']:<6}{gen['mean_heldout_px']:<14.4f}"
+                       f"{gen['mean_train_px']:<12.4f}{gen['overfit_ratio']:<10.3f}"
+                       f"{stab['max_disp_px_overall']:<14.4f}{bic_text:<14}"
+                       f"{row['overall']}")
+        for row in selection["verdicts"]:
+            if row["overall"] == "FAIL":
+                failed = [name for key, name in (
+                    ("generalization", "泛化"), ("stability", "稳定"),
+                    ("crlb", "逼近 CRLB")) if not row[key]["pass"]]
+                typer.echo(f"    {row['model_id']} FAIL 于:{'、'.join(failed)}"
+                           f"(判定式与数值见 evaluate.json 的 selection.verdicts)")
+    if selection:
+        typer.echo(f"  选型结论:{selection.get('selected') or '无(没有任何模型三判据全 PASS)'}")
+        typer.echo(f"    理由:{selection.get('reason')}")
+        typer.echo(f"    规则:{selection.get('selection_rule')}")
+        if selection.get("fisher_relation_note"):
+            typer.echo(f"    {selection['fisher_relation_note']}")
+    if delivery is not None:
+        typer.echo("  test 独立照片并排成绩(全量重训后的内参在 65 张没见过的新题上):")
+        for m in models:
+            entry = (delivery.get("models") or {}).get(m) or {}
+            rows = [r["rms_px"] for r in delivery.get("test_rows", [])
+                    if r["model_id"] == m and r["rms_px"] is not None]
+            if entry.get("rms_px") is not None and rows:
+                typer.echo(f"    {m}:train 全量 RMS {entry['rms_px']:.4f} px,"
+                           f"test {len(rows)} 张 中位 {np.median(rows):.4f} / "
+                           f"最大 {np.max(rows):.4f} px")
+            else:
+                typer.echo(f"    {m}:重训或评分未跑成({(entry.get('failure_note') or '')[:44]})")
+    for name, sec in (("交叉验证", cv), ("bootstrap 重采样", boot),
+                      ("重复张分组", slices), ("留一姿态", lopo_rep),
+                      ("全量重训交付", delivery)):
+        if sec is None:
+            typer.echo(f"  警告:{name}段缺席(报告中该段为 null,原因见上方播报)")
+    typer.echo("  人工核查四要素指引:")
+    typer.echo(f"  1) 看哪个文件:{out_dir / 'evaluate.json'}(主契约)与 "
+               f"{figures_dir} 下 {n_figs} 张 PNG(图只是可视化,数字以 json 为准)。")
+    typer.echo("  2) 文件作用:evaluate.json 是判行表与选型结论的主契约"
+               "(每模型三判据数值、PASS/FAIL、BIC、选型结果);figures/ 是 "
+               "CV 误差棒、留一姿态问题点、噪声/位姿抽样来源对比三张证据图。")
+    typer.echo("  3) 具体看哪里:selection.selected(当选模型)与 "
+               "selection.verdicts(逐模型三段数值与 pass 布尔);cv.models "
+               "各模型 mean_heldout_px 并排;slices 段各模型的 crlb_alert"
+               ".per_param(有无 below_hard=true);notes 里的 Fisher 预警文案。")
+    typer.echo("  4) 好坏判据:三判据全 PASS 的模型里 held-out 最小者当选;"
+               "任何参数实测低于同口径 CRLB 告警线(硬线数值见 slices 段 "
+               "crlb_alert.lines.hard,本数据约 0.42 px 量级)都应有 FAIL + "
+               "告警说明而非静默;当选的是 m3/m4 时,应能读到它与 Fisher "
+               "退化发现的关系说明;test 并排成绩应与 CV held-out 排序大体一致"
+               "(明显倒挂要提问)。")
+    typer.echo(f"  评估产物:{out_dir}")
+    typer.echo(f"  汇总报告:{paths['evaluate_json']}(明细旁车 "
+               f"{len(paths['detail_npz'])} 份:experiments/)")
 
 
 @app.command(help="⑦ 误差归因:实际误差 vs 理论极限,差在哪个方向、哪一环、还有没有优化空间")
