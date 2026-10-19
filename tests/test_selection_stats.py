@@ -21,9 +21,13 @@ import pytest
 
 from calib.evaluation.selection import (
     bic_full_fit,
+    build_verdict_table,
+    crlb_alert_check,
     mad_outlier_poses,
     paired_comparison,
+    select_model,
 )
+from calib.io.config import CalibrationConfig
 
 # 固定种子:每个分支的合成样本逐位可复现,期望值都经手工核过
 SEED_EQ, SEED_TIE, SEED_DIFF, SEED_EXP, SEED_MAD = 11, 22, 33, 44, 55
@@ -175,3 +179,240 @@ class TestMadOutlierPoses:
 
     def test_empty_input_returns_empty(self):
         assert mad_outlier_poses({}, threshold=3.5) == []
+
+
+# ---------------------------------------------------------------------------
+# 任务 2:卡方硬告警线(D-05/D-06)+ 三判据判行表 + 选型规则(D-11/D-12)
+# ---------------------------------------------------------------------------
+
+# 判行表阈值(从 EvaluateConfig 取的两个执行位;测试里直接传字面量)
+TH = {"gen_overfit_ratio_max": 1.5, "stability_disp_px_max": 0.05}
+
+# 卡方告警线的 venv 实测期望值(df=7 与 df=3,alpha=0.01):
+#   线 = sqrt(chi2.ppf(alpha, df) / df),随组数自适应
+HARD_LINE_DF7 = 0.42072086191744923
+SOFT_LINE_DF7 = 0.5564363536057004
+HARD_LINE_DF3 = 0.19564576995096442
+
+
+def _sigma_named() -> dict[str, float]:
+    """8 个参数的合成 CRLB 下界(每个 0.01,量级随意,判定只看比值)。"""
+    names = ("fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2")
+    return {nm: 0.01 for nm in names}
+
+
+def _cv_entry(held: float, train: float, folds=None, n_failed: int = 0) -> dict:
+    """判行表输入的 CV 摘要(接口先行,形状照 04-03 计划定死)。"""
+    return {
+        "mean_heldout_px": held,
+        "mean_train_px": train,
+        "fold_heldout": list(folds) if folds is not None else [held] * 25,
+        "n_failed_folds": n_failed,
+    }
+
+
+def _stab_entry(boot_disp: float, slice_disp: float) -> dict:
+    """判行表输入的稳定性摘要(bootstrap 与分组离散的像素位移当量)。"""
+    return {"max_disp_px": boot_disp, "slice_max_disp_px": slice_disp}
+
+
+def _passing_crlb() -> dict:
+    """一份全 PASS 的 crlb_alert_check 返回值(比值 0.9,高于两条线)。"""
+    emp = {nm: 0.009 for nm in _sigma_named()}
+    return crlb_alert_check(emp, _sigma_named(), 8, 0.01, 0.05)
+
+
+def _row(mid: str, gen: bool, stab: bool, crlb: bool, bic: float | None = None) -> dict:
+    """构造一行判行表结果(只带 select_model 消费的判定键)。"""
+    row = {
+        "model_id": mid,
+        "generalization": {"pass": gen},
+        "stability": {"pass": stab},
+        "crlb": {"pass": crlb},
+        "notes": [],
+        "overall": "PASS" if (gen and stab and crlb) else "FAIL",
+    }
+    if bic is not None:
+        row["bic"] = bic
+    return row
+
+
+class TestCrlbAlertCheck:
+    """「实测好于理论下界」两档告警(D-05/D-06):卡方线数学 + 不静默。"""
+
+    def test_all_above_lines_pass(self):
+        # 8 个经验标准差全部 0.9 × σ_CRLB(高于软线 0.56)→ 零告警,判 pass
+        emp = {nm: 0.009 for nm in _sigma_named()}
+        out = crlb_alert_check(emp, _sigma_named(), n_groups=8,
+                               alpha_hard=0.01, alpha_soft=0.05)
+        assert out["verdict"] == "pass"
+        assert out["n_below_hard"] == 0
+        assert out["n_below_soft"] == 0
+        assert out["n_no_bound"] == 0
+        # 卡方线数学:alpha=0.01/df=7 → 0.4207…(venv 实测值写死对照)
+        assert out["lines"]["hard"] == pytest.approx(HARD_LINE_DF7, rel=1e-12)
+        assert out["lines"]["soft"] == pytest.approx(SOFT_LINE_DF7, rel=1e-12)
+        assert out["df"] == 7
+
+    def test_below_hard_line_fails_loudly(self):
+        # 某参数经验 std = 0.3 × σ_CRLB(低于 0.42 硬线)→ FAIL 且不静默:
+        # 告警说明必须含参数名与两个数值(实测比值、告警线)
+        emp = {nm: 0.009 for nm in _sigma_named()}
+        emp["k1"] = 0.003
+        out = crlb_alert_check(emp, _sigma_named(), 8, 0.01, 0.05)
+        assert out["verdict"] == "fail"
+        assert out["n_below_hard"] == 1
+        assert out["per_param"]["k1"]["below_hard"] is True
+        assert "k1" in out["verdict_note"]
+        assert "0.30" in out["verdict_note"]
+        assert "0.42" in out["verdict_note"]
+
+    def test_soft_line_counts_but_does_not_fail(self):
+        # 经验 std = 0.50 × σ_CRLB(在 0.42 与 0.56 之间)→ 软提示计数,不拦
+        emp = {nm: 0.005 for nm in _sigma_named()}
+        out = crlb_alert_check(emp, _sigma_named(), 8, 0.01, 0.05)
+        assert out["verdict"] == "pass"
+        assert out["n_below_hard"] == 0
+        assert out["n_below_soft"] == 8
+
+    def test_inf_crlb_skipped_and_counted(self):
+        # σ_CRLB = inf 的参数(数据定不住的方向)跳过检查,计入 n_no_bound:
+        # 不进 FAIL 也不进 PASS 分母
+        emp = {nm: 0.009 for nm in _sigma_named()}
+        emp["k6"] = 1.0
+        crlb = _sigma_named()
+        crlb["k6"] = float("inf")
+        out = crlb_alert_check(emp, crlb, 8, 0.01, 0.05)
+        assert out["verdict"] == "pass"
+        assert out["n_no_bound"] == 1
+        assert out["per_param"]["k6"]["ratio"] is None
+        assert out["n_below_hard"] == 0
+
+    def test_df_adapts_to_group_count(self):
+        # 4 组经验 std(自由度 3):硬线 = sqrt(chi2.ppf(0.01, 3)/3),手算对照
+        emp = {nm: 0.009 for nm in ("fx", "fy", "cx", "cy")}
+        crlb = {nm: 0.01 for nm in emp}
+        out = crlb_alert_check(emp, crlb, 4, 0.01, 0.05)
+        assert out["df"] == 3
+        assert out["lines"]["hard"] == pytest.approx(HARD_LINE_DF3, rel=1e-12)
+
+    def test_too_few_groups_raises_in_chinese(self):
+        with pytest.raises(ValueError, match="至少"):
+            crlb_alert_check({"fx": 0.009}, {"fx": 0.01}, 1, 0.01, 0.05)
+
+
+class TestBuildVerdictTable:
+    """三判据判行表(D-12):行结构、判定式落盘、Fisher 预警与失败率进 notes(D-11)。"""
+
+    def test_row_structure_and_overall(self):
+        cv = {
+            "m1": _cv_entry(0.10, 0.12),   # 比值 0.833 < 1.5 → 泛化 PASS
+            "m2": _cv_entry(0.10, 0.12),
+        }
+        stab = {"m1": _stab_entry(0.01, 0.02), "m2": _stab_entry(0.09, 0.02)}
+        crlb = {"m1": _passing_crlb(), "m2": _passing_crlb()}
+        table = build_verdict_table(cv, stab, crlb, {}, TH)
+        assert table["schema"] == "evaluate-verdict-v1"
+        assert table["thresholds"] == TH  # 实际用值随表落盘(T-04-03-02)
+        rows = {r["model_id"]: r for r in table["verdicts"]}
+        assert rows["m1"]["overall"] == "PASS"
+        assert rows["m2"]["overall"] == "FAIL"
+        assert rows["m2"]["stability"]["pass"] is False
+        assert rows["m2"]["generalization"]["pass"] is True
+        assert rows["m1"]["crlb"]["pass"] is True
+        # 每条判据的判定式随结论落盘:数值 + 阈值都能从 note 读出来
+        assert "0.833" in rows["m1"]["generalization"]["note"]
+        assert "1.5" in rows["m1"]["generalization"]["note"]
+        assert "0.05" in rows["m2"]["stability"]["note"]
+        assert "pass" in rows["m1"]["crlb"]["note"]
+
+    def test_fisher_warning_and_failed_folds_go_into_notes(self):
+        cv = {"m3": _cv_entry(0.15, 0.12, n_failed=4)}
+        stab = {"m3": _stab_entry(0.01, 0.02)}
+        crlb = {"m3": _passing_crlb()}
+        warning = "Fisher 预警:高阶畸变方向谱退化(条件数 5.7e11)"
+        table = build_verdict_table(cv, stab, crlb, {"m3": warning}, TH)
+        row = table["verdicts"][0]
+        # Fisher 预警原样进 notes(D-11),失败折数说明同进
+        assert warning in row["notes"]
+        assert any("4" in s for s in row["notes"])
+        assert row["generalization"]["n_failed_folds"] == 4
+
+    def test_missing_sibling_summary_raises_in_chinese(self):
+        cv = {"m1": _cv_entry(0.10, 0.12), "m2": _cv_entry(0.11, 0.12)}
+        stab = {"m1": _stab_entry(0.01, 0.02)}  # m2 缺稳定性摘要
+        with pytest.raises(ValueError, match="m2"):
+            build_verdict_table(cv, stab, {"m1": _passing_crlb(), "m2": _passing_crlb()}, {}, TH)
+
+    def test_nonfinite_cv_numbers_rejected(self):
+        cv = {"m1": _cv_entry(float("nan"), 0.12)}
+        with pytest.raises(ValueError, match="非有限"):
+            build_verdict_table(cv, {"m1": _stab_entry(0.01, 0.02)},
+                                {"m1": _passing_crlb()}, {}, TH)
+
+
+class TestSelectModel:
+    """选型规则(D-09/D-10/D-12):全 PASS 才当选、取简、BIC 裁决、无当选给原因。"""
+
+    def test_single_passing_candidate_selected(self):
+        verdicts = [_row("m1", True, True, True), _row("m3", True, False, True)]
+        cv = {"m1": _cv_entry(0.10, 0.12), "m3": _cv_entry(0.11, 0.12)}
+        out = select_model(verdicts, cv, CalibrationConfig())
+        assert out["selected"] == "m1"
+        assert "唯一" in out["reason"]
+        assert "全 PASS" in out["selection_rule"]
+
+    def test_equivalent_takes_simpler_over_heldout_min(self):
+        # m2 的 held-out 均值最小,但与 m1 的差距整体落在等价带内 → 取更简的 m1
+        rng = np.random.default_rng(67)
+        n1 = rng.normal(0.0, 1e-4, 25)
+        n2 = rng.normal(0.0, 1e-4, 25)
+        folds_m1 = (0.1000 + n1).tolist()
+        folds_m2 = (0.10001 + n2).tolist()
+        cv = {"m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
+              "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2)}
+        out = select_model([_row("m1", True, True, True), _row("m2", True, True, True)],
+                           cv, CalibrationConfig())
+        assert out["comparison"]["verdict"] == "equivalent"
+        assert out["selected"] == "m1"  # m1 = 8 参,m2 = 9 参(D-09 取简)
+        assert "m1" in out["reason"] and "等价" in out["reason"]
+
+    def test_tie_resolved_by_bic(self):
+        # 折级差距太大 → 统计平局;BIC 更小者胜:更复杂的 m2(9 参)凭
+        # BIC 1000 < 1010 胜出。取简兜底会给 m1(8 参),本断言证明走的
+        # 真是 BIC 裁决(D-10),不是拿"取简"冒充
+        rng = np.random.default_rng(66)
+        d = rng.normal(0.0, 1.0, 25)
+        folds_m1 = (0.100 - d / 2.0).tolist()  # 均值小 → held-out 第一名
+        folds_m2 = (0.100 + d / 2.0).tolist()
+        cv = {"m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
+              "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2)}
+        verdicts = [_row("m1", True, True, True, bic=1010.0),
+                    _row("m2", True, True, True, bic=1000.0)]
+        out = select_model(verdicts, cv, CalibrationConfig())
+        assert out["comparison"]["verdict"] == "tie"
+        assert out["selected"] == "m2"
+        assert "BIC" in out["reason"]
+
+    def test_tie_without_bic_falls_back_to_simpler(self):
+        # 行内没带 BIC 数值:退回 D-09 取简,且理由里说明 BIC 缺席
+        rng = np.random.default_rng(66)
+        d = rng.normal(0.0, 1.0, 25)
+        folds_m1 = (0.100 - d / 2.0).tolist()
+        folds_m2 = (0.100 + d / 2.0).tolist()
+        cv = {"m1": _cv_entry(float(np.mean(folds_m1)), 0.12, folds_m1),
+              "m2": _cv_entry(float(np.mean(folds_m2)), 0.12, folds_m2)}
+        out = select_model([_row("m1", True, True, True), _row("m2", True, True, True)],
+                           cv, CalibrationConfig())
+        assert out["comparison"]["verdict"] == "tie"
+        assert out["selected"] == "m1"
+        assert "BIC" in out["reason"]
+
+    def test_no_passing_candidate_returns_null_with_reasons(self):
+        verdicts = [_row("m3", True, False, True), _row("m4", False, True, False)]
+        cv = {"m3": _cv_entry(0.10, 0.12), "m4": _cv_entry(0.10, 0.12)}
+        out = select_model(verdicts, cv, CalibrationConfig())
+        assert out["selected"] is None
+        assert set(out["reasons"]) == {"m3", "m4"}
+        assert "稳定" in out["reasons"]["m3"]
+        assert "泛化" in out["reasons"]["m4"] and "CRLB" in out["reasons"]["m4"]
