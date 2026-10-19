@@ -115,11 +115,9 @@ class TestBicFullFit:
         # rss = 80×(0.1)² = 0.8,n = 80 个有效姿态,k = 8 内参 + 6×10 外参 = 68
         rss, n, k = 0.8, 80, 68
         expected = n * np.log(rss / n) + k * np.log(n)
-        assert bic_full_fit(rss, n_params=k, n_poses=n) == pytest.approx(
-            expected, rel=1e-12)
+        assert bic_full_fit(rss, n_params=k, n_poses=n) == pytest.approx(expected, rel=1e-12)
         # 手算期望写死:-70.43580372122335(80·ln(0.008) + 68·ln(80))
-        assert bic_full_fit(0.8, 68) == pytest.approx(-70.43580372122335,
-                                                      rel=1e-12)
+        assert bic_full_fit(0.8, 68) == pytest.approx(-70.43580372122335, rel=1e-12)
 
     def test_zero_rss_returns_inf_without_crash(self):
         # 完美拟合对数无定义且物理上可疑:返回 +inf,让它在 BIC 比较里必输
@@ -140,8 +138,7 @@ class TestMadOutlierPoses:
     def test_injected_outlier_named_with_z_score(self):
         # 80 个 N(0,1) 里注入一个 10.0:恰好它被点名,且只点它
         rng = np.random.default_rng(SEED_MAD)
-        vals = {f"pose_{i:03d}": float(v)
-                for i, v in enumerate(rng.normal(0.0, 1.0, 80))}
+        vals = {f"pose_{i:03d}": float(v) for i, v in enumerate(rng.normal(0.0, 1.0, 80))}
         vals["pose_007"] = 10.0
         out = mad_outlier_poses(vals, threshold=3.5)
         assert len(out) == 1
@@ -157,17 +154,15 @@ class TestMadOutlierPoses:
     def test_threshold_read_from_parameter(self):
         # 阈值从参数读(config 化):提到 100 → 同一批数据零点名
         rng = np.random.default_rng(SEED_MAD)
-        vals = {f"pose_{i:03d}": float(v)
-                for i, v in enumerate(rng.normal(0.0, 1.0, 80))}
+        vals = {f"pose_{i:03d}": float(v) for i, v in enumerate(rng.normal(0.0, 1.0, 80))}
         vals["pose_007"] = 10.0
         assert mad_outlier_poses(vals, threshold=100.0) == []
 
     def test_results_sorted_by_z_descending(self):
         rng = np.random.default_rng(SEED_MAD)
-        vals = {f"pose_{i:03d}": float(v)
-                for i, v in enumerate(rng.normal(0.0, 1.0, 80))}
+        vals = {f"pose_{i:03d}": float(v) for i, v in enumerate(rng.normal(0.0, 1.0, 80))}
         vals["pose_007"] = 10.0
-        vals["pose_042"] = 4.0  # 次强离群
+        vals["pose_042"] = 5.0  # 次强离群(z ≈ 3.95,过 3.5 线;4.0 的 z ≈ 3.0 过不了)
         out = mad_outlier_poses(vals, threshold=3.5)
         assert [p for p, _ in out] == ["pose_007", "pose_042"]
         assert out[0][1] > out[1][1]
