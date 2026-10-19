@@ -3,7 +3,7 @@ phase: 4
 slug: evaluation-model-selection
 status: draft
 nyquist_compliant: false
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-10-19
 ---
 
@@ -85,7 +85,7 @@ created: 2026-10-19
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| 判行表与选型结论的人工核查(四要素:看哪个文件/作用/看哪里/好坏判据) | EVA-02 | 选型结论是"可论证性"交付,需人眼核对判行表与证据链指向 | 打开 output/evaluate/ 最新轮的 selection.json 与判行表,核对三判据 PASS/FAIL 与 held-out 并排表一致;CV 曲线误差棒不重叠/重叠的视觉判断 |
+| 判行表与选型结论的人工核查(四要素:看哪个文件/作用/看哪里/好坏判据) | EVA-02 | 选型结论是"可论证性"交付,需人眼核对判行表与证据链指向 | 打开 output/evaluate/ 最新轮的 evaluate.json 的 selection 段与判行表,核对三判据 PASS/FAIL 与 held-out 并排表一致;CV 曲线误差棒不重叠/重叠的视觉判断 |
 
 ---
 
@@ -98,4 +98,4 @@ created: 2026-10-19
 - [ ] Feedback latency < 30s
 - [ ] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending(计划定稿回填对照表后复核)
+**Approval:** pending(对照表已回填——2026-10-19 计划修订定稿;执行期按 Per-Task Verification Map 状态列回写后复核)

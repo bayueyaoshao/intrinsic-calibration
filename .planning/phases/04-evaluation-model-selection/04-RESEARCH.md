@@ -452,22 +452,25 @@ for model_id, final_params in final_params_by_model.items():
 | A6 | 等价带 δ = max(0.005 px, 较简模型均值 2%) 的具体数值 | Pattern 3 | 中——影响平局判定松紧;已 config 化,判行表会呈现实际值,可复核后调整 |
 | A7 | 多起点 RMS 容差 0.001 px / 参数位移当量 0.1 px | Pattern 6 | 中——同 A6,config 化呈现,可调 |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **bootstrap 参数稳定判据的"区间宽"阈值取多少**
    - What we know: 判行表第二判据需要一条 PASS 线(如 bootstrap 相对区间宽、切片离散度相对值);D-12 只说三判据各自 PASS,未定线。
    - What's unclear: m1–m4 的实际区间宽度要跑完才知道;先验定线有拍脑袋风险。
    - Recommendation: 规划时按"config 化默认值 + 判行表同时呈现绝对数值"处理——默认线可参照 Phase 3 谱分析的量级(条件数正常模型 vs 退化模型之间差数个量级,先给宽松默认如相对宽 < 50% PASS),真正定线留到数据在手后由判行表数值支撑;这属于规划任务级裁量,不阻塞执行。
+   - **RESOLVED:** 已按建议采纳——默认线落为 EvaluateConfig.stability_disp_px_max = 0.05 px(04-01 Task 1 配置契约);判行表稳定判据消费该阈值并同表呈现绝对数值(04-03 Task 2 build_verdict_table),数据到手后可复核调线。
 
 2. **D-05 对照 CRLB 取 8 份切片 Fisher 的均值还是单切片**
    - What we know: 每切片一份 Fisher(8 次,秒级)成本可忽略;切片间位姿结构相同,SE 差异极小。
    - What's unclear: 严格对齐应该"每切片对照每切片",但经验 std 是 8 份合并算的,没有逐切片对应物。
    - Recommendation: 8 份 SE 取均值(逐参数)作对照基准,8 份原始 SE 全部落盘供复核;规划里作为一个明确的小任务写死口径。
+   - **RESOLVED:** 已采纳——8 份 SE 逐参数均值作对照、8 份原始 SE 全落盘,口径写死在 04-04 Task 2 slices_by_index(同口径 CRLB 对照组)。
 
 3. **m4 在 CV/LOPO 小训练集上的失败率**
    - What we know: Fisher 已判 m4 高阶方向退化;Phase 2 全量 640 视图上 m4 收敛正常(RMS 0.0857)。
    - What's unclear: 512 视图(CV 折)/ 79 姿态(LOPO)下是否仍收敛;失败率直接影响其判行表"稳定性"维度的样本量。
    - Recommendation: 不预判(D-11);实验函数失败契约已兜底,汇总时失败率作为独立列呈现。
+   - **RESOLVED:** 已采纳——四实验(04-04)失败契约兜底、失败率进汇总;04-03 build_verdict_table 泛化判据行记录 n_failed_folds,失败率随判行表落盘。
 
 ## Environment Availability
 
