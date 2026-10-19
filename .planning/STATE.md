@@ -75,6 +75,14 @@ Phase: 03 (fisher-crlb) — COMPLETE(2026-10-19,验证 passed 5/5)
 
 ## Session Continuity
 
-- **Last action:** 阶段二规划完成(2026-10-17)— 研究(02-RESEARCH.md,710 行,公式/flags/稀疏求解全实测)+ 模式映射 + 6 计划(02-01~02-06,5 波)+ 校验两轮通过(0 阻断,3 警告已修订:soft_l1 判定统一 / unproject 改真实现 / 研究问题闭环)
-- **Next action:** `/gsd-execute-phase 2`(Wave 1:02-01 模型数学核心 ∥ 02-02 观测集装载)
-- **Notes for next session:** 讨论决策在 .planning/phases/02-m1-m4/02-CONTEXT.md;角点输入 = sb 路线 npz(705 全覆盖,run_20261017_104817);阶段一 UAT 遗留(存疑帧 per_view_rms 对比)已收编进阶段二 D-04
+- **Last action:** 阶段四讨论完成(2026-10-19,62f502f)— 16 条决策定案写入
+  04-CONTEXT.md + 04-DISCUSSION-LOG.md:CV 5 折×5 轮(训 640 全视图/验按姿态
+  聚合/随机固定种子)、分组实验新算同口径 CRLB(80 视图单张 temporal σ)、
+  bootstrap 200×4 全模型、LOPO 预测误差型×4、统计平局取简 + BIC 裁决 +
+  三判据全 PASS 才当选(m3/m4 不预否决)、优化器 4 核×4 模型先行、多起点
+  扰动×10、test 65 张全模型并排评分
+- **Next action:** `/gsd-plan-phase 4`(研究要点:配对检验方法/BIC 自由度/
+  f_scale/扰动幅度留白待研究;joblib 需新增依赖)
+- **Notes for next session:** 附带裁决——训练/交付一律全 640 视图,poses80
+  聚合只用于噪声与 Fisher(Phase 3"聚合策略正式裁决"就此定案);上游取数 =
+  sb 角点 npz + noise.json 双口径 + m{X}__scipy linear 收敛解 + crlb.json
