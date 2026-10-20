@@ -192,6 +192,40 @@ def test_solve_pose_only_noise_free_hits_machine_precision():
     assert float(np.abs(tvec - tvec_true).max()) < 1e-3
 
 
+def test_solve_pose_only_steep_angle_strong_distortion_recovers():
+    """回归锁定(真实事故复刻):大倾角 + 强畸变 + 棋盘偏画面中心。
+
+    事故:位姿初值曾按"零畸变直接解像素坐标"生成,真实数据里一帧
+    40° 倾角、棋盘落在画面右侧远端的照片被误评 4.82px(六个位姿参数
+    的精化被带进错误盆地;四模型同坑,CV 过拟合比也被抬到 1.9+)。
+    修复:初值改走 model.unproject 反投影(自带去畸变)。
+
+    本测试取那帧事故照片解出的真实位姿当真值,在无噪声合成角点上
+    锁定:回代 RMS 必须到机器精度级(旧实现在该几何下稳定得 4.8px)。
+    位姿数值来自 output/evaluate/run_20261019_161219 的 m3 参数与
+    test 帧 20260722_111311_776691。
+    """
+    model = create_model("m3")
+    params = np.array([1856.5874739921012, 1846.9623770530927,
+                       1270.406963856863, 723.4551764467808,
+                       -0.18290202397863123, -0.013102878776047239,
+                       0.00010844192139618278, -3.77188516846806e-05,
+                       0.07741825749757655, 0.23223734749296612,
+                       -0.20524602204652825, 0.15043676409027326])
+    board = BoardSpec(cols=11, rows=8, square_size_mm=25.0)
+    objp = build_object_points(board)
+    rvec_true = np.array([0.152, 0.62, 0.288])
+    tvec_true = np.array([345.2, 64.7, 1071.0])
+    uv = _project_view(objp, params, rvec_true, tvec_true, model)
+
+    rvec, tvec, rms = solve_pose_only(uv, objp, params, model)
+
+    assert rms < 1e-3, \
+        f"大倾角强畸变帧回代 RMS {rms:.4f}px 超线 1e-3(旧实现误评 4.82px)"
+    assert float(np.linalg.norm(rvec - rvec_true)) < 1e-3
+    assert float(np.abs(tvec - tvec_true).max()) < 0.5
+
+
 # ---- 行为 2:score_views 与 compute_result_metrics 逐位一致 ----
 
 def test_score_views_bit_identical_with_compute_result_metrics():
@@ -244,15 +278,15 @@ def test_solve_pose_only_works_for_registered_toy_model():
 
 def test_scoring_source_has_no_specific_models_or_projectpoints():
     """源码级锁定(D-09 延伸到评分层):scoring.py 不 import 任何具体
-    模型、不出现 projectPoints——投影与初值的 K 全部只经
-    model.project 与 model.intrinsics_matrix 唯一路径。"""
+    模型、不出现 projectPoints——投影只经 model.project、初值反投影
+    只经 model.unproject 唯一路径。"""
     source = (REPO_ROOT / "src/calib/solve/scoring.py").read_text(encoding="utf-8")
     assert "from calib.models.pinhole_brown" not in source
     assert "from calib.models.kb4" not in source
     assert "projectPoints" not in source, \
         "scoring.py 不得出现 projectPoints:投影只准经 model.project"
-    assert "intrinsics_matrix" in source, \
-        "solvePnP 的初值 K 必须经 model.intrinsics_matrix 组出"
+    assert "unproject" in source, \
+        "PnP 初值必须经 model.unproject 反投影(自带去畸变、模型无关)"
     assert "CameraModel" in source
     # 注册表白名单:from calib.models import 只准引 create_model(按短名
     # 查表是注册机制本体,与矩阵编排层同权);具体模型的名字仍然禁止

@@ -5,15 +5,16 @@
 平移),让棋盘投影到画面上的位置尽量贴近检测到的角点——挪完之后还剩下
 的偏差就是这张照片的重投影误差。内参固定、只估位姿,解的是个 6 参数的
 小最小二乘,每张毫秒级。任何注册模型都适用(玩具模型也不例外,D-09):
-投影只走 model.project,给 solvePnP 的初值 K 只走 model.intrinsics_matrix,
+投影只走 model.project,初值的反投影只走 model.unproject,
 本文件不出现任何具体模型的名字,也不出现 OpenCV 的投影函数。
 
 两个入口:
 - score_views:整批回代评分——位姿已知(train 帧标定时解过)时逐帧算
   RMS。实现直接委托 compute_result_metrics(同一把尺只此一份,严禁分叉);
 - solve_pose_only:单视角只估位姿小求解——位姿未知(test 帧没参与标定)
-  时先把位姿估出来再算 RMS。初值用 cv2.solvePnP(线性方法,模型无关:
-  只要拿得到标准 K 就能调),精化用 scipy 的 least_squares。
+  时先把位姿估出来再算 RMS。初值先用 model.unproject 把角点反投影成
+  视线方向(反投影本身就完成了去畸变),再在归一化平面坐标里用
+  cv2.solvePnP 解位姿(线性方法、模型无关),精化用 scipy 的 least_squares。
 
 在两者之上还有一个编排入口 review_suspects:把"体检判存疑的照片算起来
 是不是真的差"(阶段一人工验收遗留问题,D-04)做成带血缘的落盘结论——
@@ -86,9 +87,13 @@ def solve_pose_only(uv_view: np.ndarray,
     内参全程固定不动——它是"尺子",不是被量对象。
 
     步骤(两段,全部只经 CameraModel 接口):
-    1. 初值 = cv2.solvePnP(物点, 角点, model.intrinsics_matrix(params),
-       零畸变)——线性方法,模型无关的通用钥匙;初值天然带偏差
-       (PnP 不知道畸变),正好当"扰动的初值"喂给下一段;
+    1. 初值 = 角点先经 model.unproject 反投影成单位视线方向(反投影的
+       牛顿迭代天然完成去畸变),取 x/z、y/z 转成归一化平面坐标,再
+       cv2.solvePnP(物点, 归一化坐标, 单位阵 K, 零畸变)解位姿——
+       线性方法、模型无关,且初值不带畸变偏差。直接拿像素坐标按零畸变
+       解 PnP 的老路线在大倾角 + 强畸变 + 棋盘偏画面中心时会把第二段的
+       精化带进错误盆地(真实案例:40° 倾角帧被误评 4.82px,正确解
+       0.07px,四模型同坑——反投影路线在四模型上全部救回);
     2. 精化 = scipy least_squares(6 参数,残差仅
        model.project(transform_to_camera(物点, rvec, tvec)) − 角点,
        method="trf",x_scale="jac")。
@@ -120,9 +125,18 @@ def solve_pose_only(uv_view: np.ndarray,
         )
     p = as_params(params, model.model_id, model.param_names)
 
-    # ---- 初值:solvePnP(K 由模型组出、畸变按零处理)----
+    # ---- 初值:反投影到归一化平面坐标后按单位阵 K 解 PnP ----
+    # 零畸变直接解像素坐标的老路线会把精化带进错误盆地(见函数 docstring
+    # 的真实案例),反投影路线对针孔与鱼眼一律成立,且只经 CameraModel 接口。
+    rays = model.unproject(uv, p)
+    if not bool((rays[:, 2] > 0).all()):
+        raise ValueError(
+            f"模型 {model.model_id} 的视线反投影出现 Z 分量非正的角点,"
+            f"归一化平面坐标不存在,该帧几何可疑:"
+            f"请按单帧失败记录,不影响其余帧。")
     ok, rvec0, tvec0 = cv2.solvePnP(
-        objp, uv, model.intrinsics_matrix(p), np.zeros(5, dtype=np.float64))
+        objp, rays[:, :2] / rays[:, 2:3], np.eye(3, dtype=np.float64),
+        np.zeros(5, dtype=np.float64))
     if not ok:
         raise ValueError(
             f"模型 {model.model_id} 的位姿初值求解失败(solvePnP 解不出):"
