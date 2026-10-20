@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import pathlib
 
+import cv2
 import numpy as np
 import pytest
 
 from calib.corners.canonical import burst_consistency, canonicalize
-from calib.corners.detect import detect_classic, detect_sb
+from calib.corners.detect import detect_classic, detect_sb, grid_defects
 from calib.corners.window import (
     derive_window_frame,
     derive_window_per_corner,
@@ -129,6 +130,7 @@ def test_detector_accuracy_within_half_pixel(make_chessboard_image, detector):
     assert result["detector"] == detector
     assert result["uv"].shape == (88, 2)
     assert result["uv"].dtype == np.float64
+    assert result["recovery"] is None, "干净合成图不该触发缺陷闸门恢复"
     truth = canonicalize(corners, 11, 8)
     max_err = float(np.linalg.norm(result["uv"] - truth, axis=1).max())
     assert max_err < 0.5, f"{detector} 最大定位误差 {max_err:.3f}px 超过 0.5px"
@@ -159,6 +161,56 @@ def test_detect_sb_source_guard_single_refinement_call():
         "二次亚像素精化的调用形式必须在全文件恰好出现 1 次(只许经典分支调用);"
         "SB 路线再精化属于头号污染错误"
     )
+
+
+# ---------- 缺陷闸门与窗口阶梯恢复(158294 事故的修复) ----------
+
+def test_grid_defects_clean_grid_has_zero(make_chessboard_image):
+    """干净网格(强侧转真值角点,间距本来就渐变)必须数出零缺陷:
+    闸门只抓硬伤,不许对正常透视误报。"""
+    _img, corners, _ = make_chessboard_image(
+        square_px=24.0, rvec=np.array([0.0, 0.35, 0.0]))
+    d = grid_defects(corners, 11, 8)
+    assert d["total"] == 0, f"干净网格被误报缺陷:{d}"
+    assert d["n_dup"] == 0 and d["n_zigzag"] == 0
+
+
+def test_grid_defects_flags_duplicate_and_zigzag(make_chessboard_image):
+    """两类硬伤都必须被抓到:两点叠同处(重复点)+ 中间一点被拉走(锯齿)。"""
+    _img, corners, _ = make_chessboard_image(square_px=24.0)
+    bad = corners.copy()
+    g = bad.reshape(8, 11, 2)
+    g[1, 10] = g[1, 9]                # 重复点:相邻两角点叠在同处
+    g[4, 5] += np.array([0.0, -8.0])  # 锯齿:列方向中间一点被拉离原位
+    d = grid_defects(bad, 11, 8)
+    assert d["n_dup"] >= 1, f"重复点没被抓到:{d}"
+    assert d["n_zigzag"] >= 1, f"锯齿没被抓到:{d}"
+    assert d["total"] == d["n_dup"] + d["n_zigzag"]
+
+
+@pytest.mark.integration
+def test_detect_classic_recovers_incident_image_158294():
+    """真实事故帧回归:SB 检不出的 20260722_111500_158294,帧级窗口 18
+    越过右缘局部小方格(25~29px),初次精化产生重复点/锯齿——缺陷闸门
+    必须触发窗口阶梯恢复,恢复后网格零缺陷、窗口对齐头号陷阱不等式。"""
+    path = pathlib.Path("input_data/test/20260722_111500_158294.jpg")
+    if not path.exists():
+        pytest.skip("本机没有真实数据 input_data,跳过事故帧回归")
+    gray = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    result = detect_classic(gray, 11, 8, _CFG)
+    assert result is not None, "事故帧 classic 应当能粗检出"
+    rec = result["recovery"]
+    assert rec is not None, "事故帧初次精化必有缺陷,闸门必须触发恢复"
+    assert rec["defects_before"] >= 1
+    assert rec["defects_after"] == 0, f"恢复后仍有缺陷:{rec}"
+    assert rec["used_win"] < rec["initial_win"], "恢复窗口必须小于闯祸的帧级窗口"
+    assert 2 * result["win_size"] + 1 < result["sq_px"], "恢复后仍须满足头号陷阱不等式"
+    # 恢复后网格的相邻间距全部健康:没有任何"叠点"(最小间距远离 0)
+    assert grid_defects(result["uv"], 11, 8)["total"] == 0
+    min_spacing = float(np.linalg.norm(
+        result["uv"].reshape(8, 11, 2)[:, 1:, :] - result["uv"].reshape(8, 11, 2)[:, :-1, :],
+        axis=2).min())
+    assert min_spacing > 0.25 * result["sq_px"], f"恢复后仍有叠点:最小间距 {min_spacing:.2f}px"
 
 
 # ---------- Task 2:连拍一致性断言 ----------

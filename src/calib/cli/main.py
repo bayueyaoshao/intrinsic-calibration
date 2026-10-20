@@ -440,6 +440,10 @@ def corners() -> None:
     # SB 缺失帧也是 "")。经典路线没有兜底概念,不记来源、产物保持纯净。
     sources = np.full(n, "", dtype="<U16")
 
+    # 经典路线的缺陷闸门恢复留痕:哪几张图触发了窗口阶梯恢复、
+    # 恢复前后各多少缺陷、最终用的窗口——进 classic meta.json 供审查
+    classic_recoveries: list[dict] = []
+
     typer.echo(f"开始找角点:共 {n} 张照片 × 2 颗检测器(经典较慢,请稍等)……")
     for i, rec in enumerate(images):
         gray = imread_checked(Path(rec["path"]))
@@ -452,6 +456,13 @@ def corners() -> None:
             slot["sq_px"][i] = classic_result["sq_px"]
             slot["win_size"][i] = classic_result["win_size"]
             slot["detected"][i] = True
+            if classic_result["recovery"] is not None:
+                classic_recoveries.append(
+                    {"image_id": rec["image_id"], **classic_result["recovery"]})
+                typer.echo(
+                    f"  缺陷闸门:{rec['image_id']} 初次精化发现重复点/锯齿,"
+                    f"窗口 {classic_result['recovery']['initial_win']}→"
+                    f"{classic_result['recovery']['used_win']} 重提后修复")
 
         sb_result = detect_sb(gray, board.cols, board.rows, cfg.corners)
         sb = arrays["sb"]
@@ -505,7 +516,14 @@ def corners() -> None:
             slot = arrays[name]
             source_arg = None
             extra = meta_extra
-            if name == "sb":
+            if name == "classic":
+                # 经典路线带缺陷闸门恢复留痕(没触发过就是空表)
+                extra = {
+                    **meta_extra,
+                    "n_grid_defect_recovered": len(classic_recoveries),
+                    "grid_defect_recoveries": classic_recoveries,
+                }
+            elif name == "sb":
                 # 仅 SB 路线带 source 数组与兜底留痕;classic 的调用一字不变
                 source_arg = sources[rows]
                 extra = {
