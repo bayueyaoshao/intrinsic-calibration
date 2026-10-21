@@ -21,6 +21,7 @@ import numpy as np
 
 from calib.corners.artifacts import save_corners
 from calib.io.config import BoardSpec, CalibrationConfig
+from calib.visualization.analyze_figs import plot_budget_bars
 from calib.visualization.mosaic import build_mosaic, write_mosaics
 from calib.visualization.overlay import (
     render_all,
@@ -677,3 +678,65 @@ def test_suspect_mosaic_falls_back_to_original_path_when_copy_missing(tmp_path):
                     if img["image_id"] == "img2")
     cells = {c["image_id"]: c for c in index["suspect"]["cells"]}
     assert cells["img2"]["source"] == original
+
+
+# ---------------------------------------------------------- 误差预算图 analyze_figs
+
+def _synthetic_budget_section() -> dict:
+    """合成最小预算段(键与 run_budget 的 budget 行契约一致,画图只消费
+    段内现成键):前四个参数利用率比值有值(fx/fy/cx/cy),其余置 None
+    (k1–k3/p1/p2 的下界对照无意义);后两个参数像素当量近零。"""
+    layout = [
+        ("fx", 0.059, 0.036, 0.002, 41.5),
+        ("fy", 0.057, 0.019, 0.001, 41.6),
+        ("cx", 0.056, 0.056, 0.001, 361.0),
+        ("cy", 0.058, 0.058, 0.001, 378.0),
+        ("k1", 4.0e-5, 0.052, 1.0e-4, None),
+        ("k2", 1.3e-4, 0.135, 2.0e-4, None),
+        ("k3", 1.1e-4, 0.094, 3.0e-4, None),
+        ("p1", 3.5e-6, 0.009, 4.0e-4, None),
+        ("p2", 2.5e-6, 0.010, 5.0e-4, None),
+    ]
+    return {
+        "schema": "analyze-budget-v1",
+        "model_id": "m2",
+        "rows": [
+            {
+                "param": name,
+                "empirical_std": emp,
+                "empirical_std_px": px,
+                "bootstrap_std": 0.2,
+                "pose_sampling_std": 0.1,
+                "multistart_disp_px": 0.07,
+                "crlb_se": se,
+                "utilization_ratio": util,
+            }
+            for name, emp, px, se, util in layout
+        ],
+    }
+
+
+def test_plot_budget_bars_renders_png(tmp_path):
+    """合成预算段:PNG 生成、返回路径与入参一致、文件非空(双子图布局
+    含对数轴与中文标注,渲染不抛)。"""
+    out = plot_budget_bars(_synthetic_budget_section(), tmp_path / "budget_bars.png")
+    assert out == tmp_path / "budget_bars.png"
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_plot_budget_bars_none_or_empty_draws_no_data(tmp_path):
+    """无数据不冒充 0:budget 段为 None 或 rows 空都不抛异常,
+    照常生成含"无数据"标注的 PNG。"""
+    out_none = plot_budget_bars(None, tmp_path / "empty1.png")
+    assert out_none.is_file() and out_none.stat().st_size > 0
+    out_empty = plot_budget_bars({"rows": []}, tmp_path / "empty2.png")
+    assert out_empty.is_file() and out_empty.stat().st_size > 0
+
+
+def test_plot_budget_bars_chinese_labels_render(tmp_path):
+    """中文标题/轴标签照常渲染(font.sans-serif 三件套已配,字体缺失
+    只会变方框,不允许抛异常):真值近零参数(p1/p2)走"画面影响可忽略"
+    标注分支,整图落盘成功。"""
+    section = _synthetic_budget_section()
+    out = plot_budget_bars(section, tmp_path / "中文预算图.png")
+    assert out.is_file() and out.stat().st_size > 0
