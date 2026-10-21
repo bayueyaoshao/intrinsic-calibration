@@ -178,7 +178,7 @@ Plans:
   4. 敏感度排序(协方差/特征分解)落盘,并针对最大敏感维度给出可操作建议(补拍位姿/加约束)
   5. 角点合成退化实验(加噪/模糊/低对比栅格,含 winSize 扫描与 SB 候选)产出定位误差曲线,以数据锁定当前条件最优角点配置;同姿态连拍角点 x/y 方向重复性各向异性分析落盘
 
-**Plans:** 1/6 plans executed
+**Plans:** 2/6 plans executed
 Plans:
 **Wave 1**
 
@@ -186,7 +186,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 05-02-PLAN.md — `calib analyze` 命令骨架(上游六轮定位/血缘/失败契约/四要素播报)+ ANA-01 端到端:真实数据预算表与证据图 + findings 结论 4 对账
+- [x] 05-02-PLAN.md — `calib analyze` 命令骨架(上游六轮定位/血缘/失败契约/四要素播报)+ ANA-01 端到端:真实数据预算表与证据图 + findings 结论 4 对账
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -228,7 +228,7 @@ Plans:
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete    | 2026-10-18 |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 6/6 | Complete    | 2026-10-19 |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 6/6 | Complete    | 2026-10-21 |
-| 5. 误差预算 + 诊断 + 角点提取寻优 | 1/6 | In Progress|  |
+| 5. 误差预算 + 诊断 + 角点提取寻优 | 2/6 | In Progress|  |
 | 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/TBD | Not started | - |
 
 ## Phase Closing Checklist (applies to every phase)

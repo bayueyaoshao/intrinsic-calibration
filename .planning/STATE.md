@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-21T16:35:40Z"
+last_updated: "2026-10-22T01:05:40Z"
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 29
-  completed_plans: 24
-  percent: 83
+  completed_plans: 25
+  percent: 86
 ---
 
 # STATE: intrinsic-calibration
@@ -23,15 +23,15 @@ progress:
 ## Current Position
 
 Phase: 5 (误差预算 + 诊断 + 角点提取寻优) — EXECUTING
-Plan: 2 of 6
+Plan: 3 of 6
 
 - **Phase:** 5
-- **Plan:** 1 of 6 完成(05-01 阶段⑦地基)
-- **Status:** 执行中(下一计划 05-02:calib analyze 命令骨架 + ANA-01 端到端)
-- **Progress:** [████████░░] 83%
-- **备注:** 05-01 落地三层——AnalyzeConfig(analyze 段 16 键)+ analyze
-  产物契约(11 键 + 六段 npz 旁车 + 失败契约)+ run_budget 预算库(复核/
-  预算行/铁律硬报错);ANA-01 标记 Shipped,全套 515 passed
+- **Plan:** 2 of 6 完成(05-02 calib analyze 命令骨架 + ANA-01 端到端)
+- **Status:** 执行中(下一计划 05-03:残差结构诊断 + test 三维误差)
+- **Progress:** [█████████░] 86%
+- **备注:** 05-02 接通 calib analyze——上游六轮定位 + 13 项血缘 +
+  budget 直调(违例走失败契约退出码 1)+ 预算条形图;真实数据首跑
+  run_20261021_165501 零违例,findings 结论 4 对账通过,全套 523 passed
 
 ## Performance Metrics
 
@@ -39,8 +39,9 @@ Plan: 2 of 6
 |--------|-------|
 | Phases complete | 4/6 |
 | Requirements shipped | 18/32 |
-| Plans this phase | 1/6 |
+| Plans this phase | 2/6 |
 | Blocked items | 0 |
+| Phase 05 P02 | 18min | 3 tasks | 5 files |
 | Phase 05 P01 | 20min | 3 tasks | 7 files |
 | Phase 04 P01 | 12min | 2 tasks | 9 files |
 | Phase 4 P04 | 58min | 3 tasks | 2 files |
@@ -84,38 +85,45 @@ Plan: 2 of 6
 
 ## Session Continuity
 
-- **Last action:** 05-01 执行完成(2026-10-22 凌晨,20min,63f1815/a215641/
-  7cf3004)— 配置/契约/库三层:AnalyzeConfig(analyze 段 16 键中文校验)+
-  analyze 产物契约层(11 键 + make_failure_analyze 失败契约 + 六段
-  analysis/*.npz 旁车,读回 allow_pickle=False)+ run_budget 误差预算库
-  (三统计量独立重算 vs evaluate 落账 isclose 1e-9 复核、逐参数预算行 +
-  像素当量、逐行实测低于下界或比值跌破硬线当场中文硬报错);k1–k3/p1p2
-  利用率置 None + crlb_caliber_note 随表。26 例新测试,全套 515 passed;
-  ANA-01 标记 Shipped(累计 18/32)
+- **Last action:** 05-02 执行完成(2026-10-22,18min,a011c0c/06b2511/
+  9da81d1)— calib analyze 命令端到端:上游六轮定位 + 失败轮拒绝 + 13 项
+  血缘一次性登记 + budget 直调(铁律违例冒泡失败契约,退出码 1)+
+  plot_budget_bars 预算条形图(参数空间对数轴 + 像素当量 0.1px 参考线)+
+  四要素播报;真实数据首跑 run_20261021_165501 verdict=pass 零违例,
+  102/1108/1444 倍、最小比值 2.8,findings 结论 4 对账通过(阶段四遗留
+  销账)。13 例新测试,全套 523 passed + 42 integration
 
-- **Previous action:** 04-06 执行完成 + 阶段四收口(2026-10-21)——`calib evaluate`
+- **Previous action:** 05-01 执行完成(2026-10-22 凌晨,20min,63f1815/
+  a215641/7cf3004)— 配置/契约/库三层:AnalyzeConfig(analyze 段 16 键
+  中文校验)+ analyze 产物契约层(11 键 + 失败契约 + 六段 npz 旁车)+
+  run_budget 误差预算库(复核 + 预算行 + 铁律硬报错);ANA-01 标记
+  Shipped,全套 515 passed
+
+- **Earlier action:** 04-06 执行完成 + 阶段四收口(2026-10-21)——`calib evaluate`
   命令闭环(5ac256f/05fc97f)+ 真实数据全链对账集成测试(d47dcf2)+ 执行期
   三轮提速与重构:并行修复与砍冗余(cd5a066)、温启动真实数据否决(默认关
   闭)、test 整体 RMS 简单优先选型 + quick/full 两档(74935b8)+ findings
   结论 1/2/5 落账(2c1d4b5/8428d83)。选型定案 m2(test 0.1598 px,
   hold-out 0.0904 px 稳定,三判据第二意见不翻案)
 
-- **Next action:** 05-02 接线 `calib analyze` 命令骨架(上游六轮定位/血缘/
-  失败契约/四要素播报)+ ANA-01 端到端:真实数据预算表与证据图 +
-  findings 结论 4 对账;阶段四遗留的 quick 档 evaluate 重跑对账仍在会话外
-  待办(与 05-02 真实数据跑批可同批进行)
+- **Next action:** 05-03 残差结构诊断 + test 三维误差(residual_structure /
+  test_xyz 两段按 _stage 接入 analyze 六块留位);分析段集成测试直接复用
+  test_analysis_realdata 的 _latest_analyze_or_skip 取数助手;真实 analyze
+  轮已在盘(run_20261021_165501),上游未变则指纹门直接放行消费
 
-- **Notes for next session:** run_budget 入参取数来源已实测对齐——
-  evaluate_report 需 slices/delivery/bootstrap/source_separation/optimizer/
-  lineage 六段(source_separation 直接按模型名取键,无 models 中间层);
-  slices.npz 键 = {model_id}__group_uv/group_bound_px/group_params/
-  param_names(quick 档只含当选模型);σ 从 noise.json 顶层键
-  sigma_detector_corner 读入后传参,run_budget 不自己读文件;复核要求
-  evaluate.json 与 slices.npz 同一轮产物,串轮即「口径漂移」报错;analyze
-  命令体组装时六段明细键必须挂在字典段下(体例照 evaluation/artifacts.py)
+- **Notes for next session:** analyze() 命令体取数已实测跑通——evaluate 上游
+  轮从 latest_run_dir 找最新,失败轮经 load_*_report 的 failure_note 检查
+  当场拒绝;五段留位接线时把直调改 _stage 体例(单段失败转
+  make_failure_analyze 照常出报告,budget 的铁律违例例外必须退出码 1);
+  参考位姿 = extrinsics.npz 首视图 rvecs[0]/tvecs[0];每接一段,
+  meta.missing_sections 清单同步收缩,集成测试随之把对应段断言从 None
+  改为有值
 
 ## Decisions
 
+- [Phase 05]: budget 直调不套逐块兜底——CRLB 口径铁律违例冒泡到外层失败契约(退出码 1 + 中文 failure_note + 六段全 None),坏结论不许静默出表;后续五段才用 _stage(单段失败照常出报告)
+- [Phase 05]: analyze 上游 13 项文件 + 配置哈希在取数前一次性登记血缘;集成测试血缘指纹门逐位核对 sha256,上游任何一轮重跑过旧轮即不可消费(中文跳过理由 + 要求重跑 calib analyze)
+- [Phase 05]: 图与数据分离——plot_budget_bars 只画 budget 段现成键,数字结论以 analyze.json 为准,图失败不拦主产物;k1–k3/p1/p2 不画下界条(与利用率置 None 同口径),近零参数就地标注「画面影响可忽略」
 - [Phase 05]: 预算判定与 evaluate 同一条判定线——三统计量比值从 slices.npz 独立重算与 crlb_alert.per_param 落账 isclose(1e-9) 对账,漂移即中文报错,不重写第二套判据;σ 只认调用方传入的 noise.json:sigma_detector_corner,坏值进任何取数前拒绝
 - [Phase 05]: k1–k3 与 p1/p2 利用率比值置 None(单独下界被参数间补偿空间撑大),CRLB_CALIBER_NOTE 照抄 experiments.py 现成文案不重写第二份;正式判定在像素空间(逐角点重投影位移)
 - [Phase 05]: analysis 产物契约整文件照 evaluation/artifacts.py 体例、不跨模块借私有件;测试用「自洽合成底账」(底账与落账比值同源使复核必过,8 组等差构造标准差可手算),真实数据端到端留给 05-02
