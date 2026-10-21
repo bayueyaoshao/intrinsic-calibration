@@ -11,3 +11,6 @@ __pycache__/
 .ruff_cache/
 
 # 注意:uv.lock 是锁文件,必须进 git,不要把它加进来
+
+# GSD/Claude 本地运行时文件(锁文件与并行工作树,不入库)
+.claude/
