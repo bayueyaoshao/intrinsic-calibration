@@ -4,29 +4,33 @@
 fisher 上游产物,日常开发用 `uv run pytest -m "not integration"` 自动跳过;
 前置产物缺失时整文件跳过并写明原因,不误报失败)。
 
-测的是什么(对应 ROADMAP Phase 4 成功标准 1–5 与 PLAN 04-06 Task 2):
+测的是什么(对应 ROADMAP Phase 4 成功标准 1–5 与 PLAN 04-06 Task 2;
+2026-10-21 选型重构后按"档位感知"对账:quick 档四类实验只考当选模型、
+重复缩水,full 档全模型全量,参试模型与次数以 meta 落账为准):
 0. 取数体例(先于一切断言):最新 output/evaluate/run_*/evaluate.json 的
    血缘指纹(配置哈希 + 全部上游文件哈希)与当前上游产物一致就直接复用
    (全链千余次求解、小时级,不盲目重跑);指纹对不上才 subprocess 重跑
    一条 `calib evaluate`(T-04-06-02:比对不严会复用错轮产物)。
-1. 标准 1:四实验段(cv/bootstrap/slices/lopo)全部在;交叉验证每模型
+1. 标准 1:四实验段(cv/bootstrap/slices/lopo)全部在;参试模型与
+   meta.experiment_models 落账一致(quick 档 = 当选模型);交叉验证每模型
    fold_heldout 恰 = 轮数 × 折数个样本;折分配明细 npz 键齐,并逐折复核
    训练/验证姿态零交集、同轮每姿态恰好考一次(姿态级防泄漏的产物侧
    复核;函数级门禁在 04-01 单测,这里对账的是真实落盘产物)。
-2. 标准 2:cv 段四模型"训练误差 vs 考题误差"并排数值;判行表四行齐,
-   每行三判据(泛化/稳定/逼近 CRLB)各带数值、PASS/FAIL 与判定式;
-   选型结论与选型规则可读;判行表逐行带 BIC 数值(平局裁决要用它,
-   数值先于裁决落盘)。
+2. 标准 2:cv 段参试模型"训练误差 vs 考题误差"并排数值;判行表行 =
+   参试模型,每行三判据(泛化/稳定/逼近 CRLB)各带数值、PASS/FAIL 与
+   判定式;test 整体 RMS 选型(method/walk/规则)与三判据第二意见、
+   两处一致性落账;判行表逐行带 BIC 数值(平局裁决要用它)。
 3. 标准 3:重复张分组每组口径标识(views80_single_frame + detector,
    匹配口径 2026-10-20 定案)随明细旁车落盘(下游不可能拿错口径对账);
    CRLB 硬告警线用记录的显著性 alpha 与自由度反推核验(不写死;df=7 时
    硬线约 0.42);低于硬线的统计量计数、判定与说明相互一致。
-4. 标准 4:bootstrap 逐次参数明细 npz(200 次 × 4 模型)可读;来源
+4. 标准 4:bootstrap 逐次参数明细 npz(档位次数 × 参试模型)可读;来源
    分离段数值可读(方差相减、钳 0 生效、位姿占比在 0–1);留一姿态
-   逐姿态表 + 问题姿态点名名单可读。
+   逐姿态表 + 问题姿态点名名单可读(单模型也过,lopo 是诊断实验)。
 5. 标准 5:优化器 16 组合行齐 + 推荐配置四模型键齐 + 多起点判定落盘;
-   交付段四模型 final_params/rms/BIC 齐,test 独立照片评分行数 =
-   模型数 × 65;Fisher 谱退化预警随判行表 notes 标注(退化模型必带)。
+   交付段四模型 final_params/rms/BIC 齐(交付与档位无关,恒全模型),
+   test 独立照片评分行数 = 模型数 × 65;Fisher 谱退化预警随判行表
+   notes 标注(退化模型必带)。
 6. 血缘与图:evaluate.json 的 lineage.upstream 各文件真实存在;判行表
    三张 PNG(cv 误差棒 / LOPO 点名 / 离散对比)齐。
 
@@ -170,14 +174,36 @@ def evaluate_tree() -> dict:
     }
 
 
+def _exp_profile_and_counts(report: dict, eval_cfg) -> tuple:
+    """按报告档位推"四类实验实际参试模型与重复次数"(2026-10-21 选型重构)。
+
+    quick 档:四类实验只考当选模型、重复缩水(quick_* 覆盖);full 档:
+    全部模型、正式档次数。实验参试模型以 meta.experiment_models 落账为准
+    (缺键的老轮按全模型处理,但老轮血缘已对不上、不会被复用)。"""
+    meta = report.get("meta") or {}
+    profile = str(meta.get("profile", "full"))
+    exp_models = tuple(meta.get("experiment_models") or _EXPECTED_MODELS)
+    if profile == "quick":
+        counts = (int(eval_cfg.quick_cv_n_rounds), int(eval_cfg.quick_cv_n_folds),
+                  int(eval_cfg.quick_bootstrap_n))
+    else:
+        counts = (int(eval_cfg.cv_n_rounds), int(eval_cfg.cv_n_folds),
+                  int(eval_cfg.bootstrap_n))
+    assert profile in ("quick", "full"), f"档位越枚举:{profile!r}"
+    assert exp_models and set(exp_models) <= set(_EXPECTED_MODELS), \
+        f"实验参试模型越名单:{exp_models}"
+    return profile, exp_models, counts
+
+
 # ---------------------------------------------------------------------------
 # 成功标准 1:防泄漏切分的产物侧对账 + 四实验段全在
 # ---------------------------------------------------------------------------
 
 
 def test_criterion_1_four_sections_and_cv_samples(evaluate_tree: dict):
-    """标准 1:四实验段全部在且无缺席;cv 每模型 fold_heldout 恰
-    = 轮数 × 折数(25)个样本;折分配明细 npz 键齐可读。"""
+    """标准 1:四实验段全部在且无缺席;四类实验的参试模型与档位落账一致
+    (quick 只考当选模型);cv 每模型 fold_heldout 恰 = 轮数 × 折数;
+    折分配明细 npz 键齐可读。"""
     report = evaluate_tree["report"]
     for section in ("cv", "bootstrap", "slices", "lopo", "delivery"):
         assert isinstance(report.get(section), dict), \
@@ -186,14 +212,20 @@ def test_criterion_1_four_sections_and_cv_samples(evaluate_tree: dict):
         f"有实验段缺席:{report['meta']['partial_sections']}"
 
     eval_cfg = evaluate_tree["eval_cfg"]
-    n_samples = int(eval_cfg.cv_n_rounds) * int(eval_cfg.cv_n_folds)
+    profile, exp_models, (n_rounds, n_folds, _n_boot) = \
+        _exp_profile_and_counts(report, eval_cfg)
+    if profile == "quick":
+        selected = (report.get("selection") or {}).get("selected")
+        assert tuple(exp_models) == (selected,), \
+            f"quick 档实验应只考当选模型 {selected!r},实际:{exp_models}"
+    n_samples = n_rounds * n_folds
     cv_models = report["cv"]["models"]
-    assert set(cv_models) == set(_EXPECTED_MODELS), \
-        f"cv 段模型键不全:{tuple(cv_models)}"
+    assert set(cv_models) == set(exp_models), \
+        f"cv 段模型键 {tuple(cv_models)} 与实验参试名单 {exp_models} 不一致"
     for model_id, block in cv_models.items():
         assert len(block["fold_heldout"]) == n_samples, \
             (f"{model_id} fold_heldout 应为 {n_samples} 个样本"
-             f"({eval_cfg.cv_n_rounds} 轮 × {eval_cfg.cv_n_folds} 折),"
+             f"({n_rounds} 轮 × {n_folds} 折,{profile} 档),"
              f"实际 {len(block['fold_heldout'])}")
         assert len(block["fold_train"]) == n_samples, \
             f"{model_id} 训练侧样本数与考题侧对不上"
@@ -210,7 +242,8 @@ def test_criterion_1_pose_partition_zero_overlap(evaluate_tree: dict):
     detail = evaluate_tree["details"]["cv"]
     eval_cfg = evaluate_tree["eval_cfg"]
     rounds = [int(v) for v in detail["assignment_round"]]
-    n_rounds, n_folds = int(eval_cfg.cv_n_rounds), int(eval_cfg.cv_n_folds)
+    _profile, _exp, (n_rounds, n_folds, _n_boot) = \
+        _exp_profile_and_counts(evaluate_tree["report"], eval_cfg)
     assert sorted(set(rounds)) == list(range(n_rounds)), "折分配轮号不齐"
 
     for r in range(n_rounds):
@@ -242,11 +275,14 @@ def test_criterion_1_pose_partition_zero_overlap(evaluate_tree: dict):
 
 
 def test_criterion_2_train_vs_heldout_and_verdicts(evaluate_tree: dict):
-    """标准 2:cv 四模型训练/考题并排数值;selection.verdicts 四行齐,
-    每行三判据带数值 + PASS/FAIL + 判定式;选型结论与规则可读。"""
+    """标准 2:cv 参试模型训练/考题并排数值;判行表行 = 参试模型
+    (quick 档只考当选模型),每行三判据带数值 + PASS/FAIL + 判定式;
+    test RMS 选型(method/walk/rule)与三判据第二意见、两处一致性落账。"""
     report = evaluate_tree["report"]
+    eval_cfg = evaluate_tree["eval_cfg"]
+    _profile, exp_models, _counts = _exp_profile_and_counts(report, eval_cfg)
     cv_models = report["cv"]["models"]
-    for model_id in _EXPECTED_MODELS:
+    for model_id in exp_models:
         block = cv_models[model_id]
         for key in ("mean_train_px", "mean_heldout_px", "n_failed_folds"):
             assert key in block, f"{model_id} 的 cv 摘要缺 {key}(并排表缺一列)"
@@ -256,9 +292,9 @@ def test_criterion_2_train_vs_heldout_and_verdicts(evaluate_tree: dict):
     selection = report["selection"]
     assert isinstance(selection, dict) and selection, "selection 段缺席"
     verdicts = selection.get("verdicts") or []
-    assert len(verdicts) == len(_EXPECTED_MODELS), \
-        f"判行表应四行,实际 {len(verdicts)}"
-    assert {v["model_id"] for v in verdicts} == set(_EXPECTED_MODELS)
+    assert len(verdicts) == len(exp_models), \
+        f"判行表应 {len(exp_models)} 行(参试模型),实际 {len(verdicts)}"
+    assert {v["model_id"] for v in verdicts} == set(exp_models)
     for row in verdicts:
         m = row["model_id"]
         for criterion in ("generalization", "stability", "crlb"):
@@ -271,25 +307,34 @@ def test_criterion_2_train_vs_heldout_and_verdicts(evaluate_tree: dict):
             pytest.approx(cv_models[m]["mean_heldout_px"]), \
             f"{m} 判行表的 held-out 与 cv 段不一致"
     selected = selection.get("selected")
-    if selected is None:
-        # 真实数据判了"无当选"(D-12 不硬选):逐模型未当选原因必须齐且非空,
-        # 结论仍要可读(PLAN Task 2:selection.selected **或** reasons 可读)
-        reasons = selection.get("reasons") or {}
-        assert set(reasons) == set(_EXPECTED_MODELS), \
-            f"无当选结论缺逐模型未当选原因:{sorted(reasons)}"
-        for m in _EXPECTED_MODELS:
-            assert reasons[m], f"{m} 的未当选原因为空(不硬选也要说得清)"
-        print("\n[标准 2] 选型结论:无当选(D-12 不硬选),逐模型原因齐")
-    else:
-        assert selected in _EXPECTED_MODELS, \
-            f"选型结论不可读:{selected!r}"
+    assert selected in _EXPECTED_MODELS, f"选型结论不可读:{selected!r}"
+    assert selection.get("method") == "test_rms_simplicity", \
+        f"选型方法标识不对:{selection.get('method')!r}"
+    assert selection.get("rule"), "选型缺规则记录(凭空下结论)"
     assert selection.get("reason"), "选型结论缺理由说明"
-    assert selection.get("selection_rule"), "选型缺规则记录(凭空下结论)"
+    assert isinstance(selection.get("walk"), list) and selection["walk"], \
+        "选型缺逐档走查流水(walk):每步比较数字必须落账"
+    test_rms = selection.get("test_rms_px") or {}
+    assert set(test_rms) == set(_EXPECTED_MODELS), \
+        f"test 整体 RMS 表缺模型:{tuple(test_rms)}"
+    # 当选模型的 test 整体 RMS 必须有成绩(选型原料)
+    assert test_rms.get(selected) is not None, \
+        f"当选模型 {selected} 的 test 整体 RMS 无成绩,选型结论无凭"
+    # 三判据第二意见与两处一致性落账
+    tc = selection.get("three_criteria") or {}
+    assert tc, "三判据第二意见缺席"
+    assert tc.get("selected") in _EXPECTED_MODELS or tc.get("selected") is None
+    agreement = selection.get("agreement") or {}
+    assert isinstance(agreement.get("consistent"), bool) and agreement.get("note"), \
+        "两处选型的一致性判定与说明缺席"
+    print(f"\n[标准 2] 选型:{selected}(test RMS 简单优先);"
+          f"三判据第二意见:{tc.get('selected') or '无'};"
+          f"{'两处一致' if agreement.get('consistent') else '两处打架'}")
 
 
 def test_criterion_2_verdict_rows_carry_bic(evaluate_tree: dict):
     """标准 2(平局裁决的弹药在案):判行表逐行带有限 BIC 数值,且与
-    交付段的 BIC 同源一致——发生平局裁决时记录里必须有值可查。"""
+    交付段的 BIC 同源一致(quick 档判行表只有参试模型行,逐行对账)。"""
     report = evaluate_tree["report"]
     delivery_models = report["delivery"]["models"]
     for row in report["selection"]["verdicts"]:
@@ -323,7 +368,8 @@ def test_criterion_3_slices_markers_and_alert_lines(evaluate_tree: dict):
     assert alpha_soft == pytest.approx(float(eval_cfg.crlb_alert_alpha_soft))
 
     detail = evaluate_tree["details"]["slices"]
-    for model_id in _EXPECTED_MODELS:
+    _profile, exp_models, _counts = _exp_profile_and_counts(report, eval_cfg)
+    for model_id in exp_models:
         block = slices["models"][model_id]
         assert block["n_groups"] >= 2, f"{model_id} 分组数 {block['n_groups']} < 2,经验抖动无从谈起"
         assert block["slice_max_disp_px"] is not None, \
@@ -374,16 +420,16 @@ def test_criterion_3_slices_markers_and_alert_lines(evaluate_tree: dict):
 
 
 def test_criterion_4_bootstrap_detail_and_separation(evaluate_tree: dict):
-    """标准 4:bootstrap 逐次参数明细 npz(次数 = 配置值 × 4 模型);
+    """标准 4:bootstrap 逐次参数明细 npz(次数 = 档位配置值 × 参试模型);
     来源分离段数值可读(方差相减、负值钳 0、位姿占比 0–1);组装侧
     var_slice 与分组经验标准差平方一致(D-07:方差才可加)。"""
     report = evaluate_tree["report"]
     eval_cfg = evaluate_tree["eval_cfg"]
-    n_boot = int(eval_cfg.bootstrap_n)
+    _profile, exp_models, (_r, _f, n_boot) = _exp_profile_and_counts(report, eval_cfg)
     detail = evaluate_tree["details"]["bootstrap"]
     slices_models = report["slices"]["models"]
 
-    for model_id in _EXPECTED_MODELS:
+    for model_id in exp_models:
         reps = detail.get(f"{model_id}__rep")
         params = detail.get(f"{model_id}__params")
         assert reps is not None and params is not None, \
@@ -410,16 +456,20 @@ def test_criterion_4_bootstrap_detail_and_separation(evaluate_tree: dict):
             assert entry["var_total"] == pytest.approx(
                 entry["var_noise"] + entry["var_pose_sampling"], rel=1e-9), \
                 f"{model_id}.{name} 总方差 ≠ 两来源之和(方差可加被改坏)"
-    print(f"\n[标准 4] bootstrap {n_boot} 次 × 4 模型明细在案;来源分离逐参数核验通过")
+    print(f"\n[标准 4] bootstrap {n_boot} 次 × {len(exp_models)} 参试模型明细在案;"
+          f"来源分离逐参数核验通过")
 
 
 def test_criterion_4_lopo_table_and_outliers(evaluate_tree: dict):
     """标准 4(留一姿态):逐姿态表(lopo-v1 契约:per_pose 为 姿态号→
-    误差 的字典,失败姿态记 None,行级明细在 rows)四模型姿态集一致;
-    问题姿态点名名单可读,且点到的姿态确实在逐姿态表里。"""
+    误差 的字典,失败姿态记 None,行级明细在 rows)参试模型姿态集一致
+    (2026-10-21 提速裁定:lopo 只考一个模型,单模型也过);问题姿态
+    点名名单可读,且点到的姿态确实在逐姿态表里。"""
     report = evaluate_tree["report"]
     lopo_models = report["lopo"]["models"]
-    assert set(lopo_models) == set(_EXPECTED_MODELS)
+    assert lopo_models, "lopo 段没有模型"
+    assert set(lopo_models) <= set(_EXPECTED_MODELS), \
+        f"lopo 模型越名单:{tuple(lopo_models)}"
     table_ids: set[str] | None = None
     for model_id, block in lopo_models.items():
         per_pose = block["per_pose"]
@@ -452,10 +502,10 @@ def test_criterion_4_lopo_table_and_outliers(evaluate_tree: dict):
                 assert v == pytest.approx(per_pose[row["val_pose"]], rel=1e-9), \
                     f"{model_id} 行 {row['val_pose']} 误差与逐姿态表不一致"
     n_poses = len(table_ids)
-    print(f"\n[标准 4] 留一姿态:{n_poses} 姿态 × 4 模型;点名名单:"
+    print(f"\n[标准 4] 留一姿态:{n_poses} 姿态 × {len(lopo_models)} 模型;点名名单:"
           + "; ".join(
               f"{m}:{len(lopo_models[m]['outlier_poses'])} 个"
-              for m in _EXPECTED_MODELS))
+              for m in lopo_models))
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +593,8 @@ def test_criterion_5_fisher_warnings_in_notes(evaluate_tree: dict):
             flagged.add(model_id)
 
     rows = {row["model_id"]: row for row in report["selection"]["verdicts"]}
-    for model_id in _EXPECTED_MODELS:
-        notes = rows[model_id].get("notes") or []
+    for model_id, row in rows.items():
+        notes = row.get("notes") or []
         has_warning = any("Fisher" in str(note) for note in notes)
         if model_id in flagged:
             assert has_warning, \

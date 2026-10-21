@@ -44,6 +44,8 @@
 
 血缘:evaluate run_20261020_103552(delivery/_delivery_detail);fisher run_20261019_025859(crlb.json,谱退化背景)。
 
+**已落地(2026-10-21)**:本条规则已实现为 evaluate 的默认选型步骤——`calib evaluate` 先全量重训交付 + test 逐张评分,再按"复杂度逐档走查、更复杂一档整体 RMS 提升 ≥ `evaluate.selection_improve_min`(默认 0.10)才升级"从 config 选出当选模型;quick 档四类实验只考当选模型。选型结论落账在 evaluate.json 的 selection 段(method = test_rms_simplicity,walk = 逐档走查流水),旧三判据规则降为第二意见(three_criteria),两处打架当场播报(agreement)。
+
 ## 3. 温启动否决 + 这批数据的解不唯一性(2026-10-21)
 
 **结论:实验提速用的"温启动"(从全量精化解出发只做精化)被真实数据否决,默认已关闭(`warm_start_experiments: false`);根因是这批数据在 Fisher 退化方向上解不唯一。**

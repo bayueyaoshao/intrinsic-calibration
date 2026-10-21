@@ -33,6 +33,7 @@ from calib.evaluation.experiments import (
     cv_pose_grouped,
     lopo,
     make_calibrate_fn,
+    overall_test_rms_by_model,
     pose_sampling_variance,
     run_delivery,
     slices_by_index,
@@ -958,3 +959,63 @@ def test_delivery_model_failure_contract(delivery_setup, monkeypatch):
     m1_rows = [r for r in report["test_rows"] if r["model_id"] == "m1"]
     assert len(m1_rows) == 3
     assert all(r["rms_px"] is not None and r["failure_note"] is None for r in m1_rows)
+
+
+# ---------------------------------------------------------------------------
+# 选型重构(2026-10-21):models 参数验证 + test 整体 RMS 合成
+# ---------------------------------------------------------------------------
+
+
+def test_cv_models_param_runs_subset(cv_setup):
+    """models 参数给了合法子集 → 只跑子集内的模型(quick 档当选模型-only 的执行位)。"""
+    s = cv_setup
+    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"],
+                             models=("m2",))
+    assert set(report["models"]) == {"m2"}, f"只应跑 m2,实际:{set(report['models'])}"
+    # 折级样本仍是 轮 × 折 = 4,只是全部属于 m2(分配表本身不分模型)
+    assert len(report["_cv_detail"]["assignment_round"]) == 4
+    assert len(report["models"]["m2"]["fold_heldout"]) == 4
+
+
+def test_experiment_models_param_rejects_unknown_in_chinese(cv_setup):
+    """三个实验函数的 models 参数:空表 / 名单外模型 → 当场中文报错(不许静默全跑)。"""
+    s = cv_setup
+    noise = {"sigma_detector_corner": 0.01}
+    for fn, kwargs in (
+        (cv_pose_grouped, {}),
+        (bootstrap_pose, {}),
+        (slices_by_index, {"noise_report": noise}),
+    ):
+        with pytest.raises(ValueError, match="非空子集"):
+            fn(s["obs"], s["board"], s["cfg"], s["optimizer_config"],
+               models=(), **kwargs)
+        with pytest.raises(ValueError, match="非空子集"):
+            fn(s["obs"], s["board"], s["cfg"], s["optimizer_config"],
+               models=("m9",), **kwargs)
+
+
+def overall_test_rms_by_model_synthesizes_and_keeps_failures_none():
+    """test 整体 RMS = 有成绩行的均方根;全失败模型记 None(不冒充 0 分)。"""
+    delivery = {
+        "_delivery_detail": {
+            "test_model": np.array(["m1", "m1", "m1", "m2", "m2"]),
+            "test_image": np.array(["a", "b", "c", "a", "b"]),
+            "test_rms": np.array([0.1, 0.2, 0.2, np.nan, np.nan]),
+        }
+    }
+    out = overall_test_rms_by_model(delivery)
+    assert out["m1"] == pytest.approx(float(np.sqrt(np.mean([0.1**2, 0.2**2, 0.2**2]))))
+    assert out["m2"] is None, "全失败的模型必须记 None,记 0 会冒充完美成绩"
+
+
+def overall_test_rms_by_model_rejects_broken_detail_in_chinese():
+    with pytest.raises(ValueError, match="_delivery_detail"):
+        overall_test_rms_by_model({"models": {}})
+    with pytest.raises(ValueError, match="长度对不上"):
+        overall_test_rms_by_model({
+            "_delivery_detail": {
+                "test_model": np.array(["m1"]),
+                "test_image": np.array(["a"]),
+                "test_rms": np.array([0.1, 0.2]),
+            }
+        })

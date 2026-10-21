@@ -267,6 +267,23 @@ evaluate:
   # < 0.1 px,两条同时满足才算"收敛到同一解"
   multistart_rms_tol_px: 0.001
   multistart_param_tol_px: 0.1
+  # ---- 运行档位与 test 选型(2026-10-21 选型重构)----
+  # 运行档位,两档一套流程、只是缩不缩水的差别:
+  #   quick = 日常默认:交付阶段先对全部模型算 test 整体 RMS 定出当选模型,
+  #     之后的交叉验证 / 重采样 / 分组 / 留一只考当选模型,重复次数用下面的
+  #     quick_* 覆盖(考得少一点);
+  #   full = 新数据首轮 + 交付前终跑:全部模型全量重复(用上面的正式档
+  #     重复次数),quick 结论存疑时回 full 复核
+  profile: quick
+  # quick 档的重复次数覆盖:交叉验证 3 折 × 3 轮、重采样 50 次
+  quick_cv_n_folds: 3
+  quick_cv_n_rounds: 3
+  quick_bootstrap_n: 50
+  # test 整体 RMS 选型的升级门槛:复杂度高一档的模型,在独立考题(test 集)
+  # 上的整体 RMS 相对当前模型提升 >= 该比例才升级,否则停驻取更简者。
+  # 0.10 的依据(docs/findings.md 结论 2):本批数据 m3/m4 只比 m2 好
+  # 1.2%–1.9%,不够门槛,选 m2
+  selection_improve_min: 0.10
 
 # ---- 可视化与副本留痕 ----
 visualization:

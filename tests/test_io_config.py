@@ -540,6 +540,10 @@ def test_evaluate_defaults_when_section_missing(tmp_path):
     assert ev.multistart_trans_rel == pytest.approx(0.02)
     assert ev.multistart_rms_tol_px == pytest.approx(0.001)
     assert ev.multistart_param_tol_px == pytest.approx(0.1)
+    # 选型重构(2026-10-21):内置默认 = quick 档 + 3×3×50 缩水 + 10% 门槛
+    assert ev.profile == "quick"
+    assert (ev.quick_cv_n_folds, ev.quick_cv_n_rounds, ev.quick_bootstrap_n) == (3, 3, 50)
+    assert ev.selection_improve_min == pytest.approx(0.10)
 
 
 def test_evaluate_repo_yaml_values():
@@ -551,6 +555,10 @@ def test_evaluate_repo_yaml_values():
     assert ev.slice_enabled is True and ev.lopo_enabled is True
     assert ev.evaluate_max_workers == 12
     assert ev.warm_start_experiments is False
+    # 选型重构(2026-10-21):默认 quick 档 + quick 缩水次数 + 10% 升级门槛
+    assert ev.profile == "quick"
+    assert (ev.quick_cv_n_folds, ev.quick_cv_n_rounds, ev.quick_bootstrap_n) == (3, 3, 50)
+    assert ev.selection_improve_min == pytest.approx(0.10)
     assert ev.tie_band_px == pytest.approx(0.005)
     assert ev.tie_band_rel == pytest.approx(0.02)
     assert ev.bic_enabled is True and ev.bic_n_poses == 80
@@ -723,3 +731,44 @@ def test_make_lineage_fields(tmp_path):
     cfg_file.write_text("board: {changed}", encoding="utf-8")
     assert make_lineage({"board.yaml": cfg_file}, {}, "r")["config_sha256"]["board.yaml"] != \
         lineage["config_sha256"]["board.yaml"]
+
+
+# ---- 选型重构(2026-10-21):profile / quick 覆盖 / 升级门槛 ----
+
+def test_evaluate_profile_full_and_quick_overrides_parse(tmp_path):
+    """profile: full 可读;quick_* 覆盖键各自落位(quick 档缩水次数可调)。"""
+    p = _write_evaluate(tmp_path,
+                        "  profile: full\n"
+                        "  quick_cv_n_folds: 4\n"
+                        "  quick_cv_n_rounds: 2\n"
+                        "  quick_bootstrap_n: 30\n"
+                        "  selection_improve_min: 0.2\n")
+    ev = load_calibration(p).evaluate
+    assert ev.profile == "full"
+    assert (ev.quick_cv_n_folds, ev.quick_cv_n_rounds, ev.quick_bootstrap_n) == (4, 2, 30)
+    assert ev.selection_improve_min == pytest.approx(0.2)
+
+
+def test_evaluate_bad_profile_chinese_error(tmp_path):
+    """profile 拼错(如 quick2):白名单二选一,报错点名 evaluate.profile。"""
+    p = _write_evaluate(tmp_path, "  profile: quick2\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    assert "evaluate.profile" in str(exc_info.value)
+
+
+def test_evaluate_quick_folds_one_rejected(tmp_path):
+    """quick 档折数写 1:与正式档同规则(1 折留不出考题),配置层拦下。"""
+    p = _write_evaluate(tmp_path, "  quick_cv_n_folds: 1\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    assert "evaluate.quick_cv_n_folds" in str(exc_info.value)
+
+
+def test_evaluate_improve_min_out_of_range_rejected(tmp_path):
+    """升级门槛越界(1.0 = 永不升级 / 负数 = 永远升级):都拦下。"""
+    for bad in ("  selection_improve_min: 1.0\n", "  selection_improve_min: -0.1\n"):
+        p = _write_evaluate(tmp_path, bad)
+        with pytest.raises(ValueError) as exc_info:
+            load_calibration(p)
+        assert "evaluate.selection_improve_min" in str(exc_info.value)

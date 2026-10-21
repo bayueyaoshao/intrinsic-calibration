@@ -29,6 +29,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 from scipy.stats import (
     chi2,
@@ -526,6 +528,159 @@ def build_verdict_table(
         "schema": "evaluate-verdict-v1",
         "verdicts": verdicts,
         "thresholds": {"gen_overfit_ratio_max": gen_max, "stability_disp_px_max": stab_max},
+    }
+
+
+def select_by_test_rms(
+    test_rms_by_model: dict[str, float | None],
+    model_order: Sequence[str],
+    improve_min: float = 0.10,
+) -> dict:
+    """test 整体 RMS 贪心选型:从最简模型起步,复杂度每升一档须换 ≥10% 的提升(2026-10-21 定案)。
+
+    白话(用户规则原文):模型按 m1→m4 逐个变复杂;在独立考题(test 集,
+    训练从未碰过的照片)上算每档模型的整体 RMS(全体 test 照片重投影误差
+    的均方根);从最简的模型出发,只有当"更复杂的模型"把整体 RMS 相对
+    当前模型拉低至少 improve_min(默认 10%)才升级,否则停在当前模型
+    ——复杂度只在值得时才买。走查不止看相邻一档:中间某档不行不会埋没
+    后面真正好的档(每一步都与当前模型比,不与上一步比)。依据
+    docs/findings.md 结论 2:本批数据 m3/m4 只比 m2 好 1.2%–1.9%,不够
+    门槛,选 m2。
+
+    输入:test_rms_by_model = {模型: test 整体 RMS(px)或 None};None 表示
+    该模型没有成绩(test 评分全失败等),走查时跳过、不参与升级比较。
+    model_order = 复杂度升序的模型表(取 cfg.evaluate.models,config 侧
+    已锁升序)。improve_min = 升级门槛(0.10 = 提升 ≥10% 才升级;
+    0 <= improve_min < 1,越界中文报错);非有限 RMS 值中文报错(模块体例)。
+
+    返回 {"selected", "test_rms_px", "walk", "improve_min", "rule",
+    "reason"}:selected 为 None 表示全部模型都没有成绩(不硬选);
+    walk 是逐档走查流水 [{from, to, improvement, moved, note}],每一步
+    的比较数字与判定都落账,选型结论可考(T-04-03-03 体例)。
+    """
+    rule = (
+        f"按复杂度升序 {list(model_order)} 逐档走查:从最简模型起步,"
+        f"任何更复杂的模型相对当前模型的 test 整体 RMS 提升 ≥{improve_min:.0%} "
+        f"才升级(每步都与当前模型比,中间档不行不埋没后面的好档),"
+        f"否则停驻——复杂度只在值得时才买;没有成绩的模型跳过不参与升级。"
+    )
+    if not (0.0 <= float(improve_min) < 1.0):
+        raise ValueError(
+            f"升级门槛 improve_min = {improve_min!r} 不合法:必须在 [0, 1) 内"
+            f"(0.10 = 提升 ≥10% 才升级)。"
+        )
+    order = [str(m) for m in model_order]
+    if not order:
+        raise ValueError("model_order 是空表:没有候选模型,无从选型。")
+    missing = [m for m in order if m not in test_rms_by_model]
+    if missing:
+        raise ValueError(
+            f"test 成绩表缺 {len(missing)} 个模型的条目:{missing}(应有全部"
+            f"候选模型的成绩,失败模型请记 None,不要整条缺席)。"
+        )
+    rms: dict[str, float | None] = {}
+    for m in order:
+        v = test_rms_by_model[m]
+        if v is None:
+            rms[m] = None
+            continue
+        fv = float(v)
+        if not np.isfinite(fv):
+            raise ValueError(
+                f"模型 {m} 的 test 整体 RMS = {v!r} 是非有限值(NaN/inf):"
+                f"统计判定拒绝带病输入;失败模型请记 None,不要传 NaN。"
+            )
+        rms[m] = fv
+
+    # 起步 = 复杂度最简且有成绩的模型;全都没成绩则不硬选
+    current: str | None = None
+    for m in order:
+        if rms[m] is not None:
+            current = m
+            break
+    if current is None:
+        return {
+            "selected": None,
+            "test_rms_px": rms,
+            "walk": [],
+            "improve_min": float(improve_min),
+            "rule": rule,
+            "reason": (
+                f"全部候选模型 {order} 都没有 test 整体 RMS 成绩(交付阶段全量重训"
+                f"或 test 评分失败)——无从选型,不硬选;请先检查交付阶段的失败说明。"
+            ),
+        }
+
+    walk: list[dict] = []
+    for m in order[order.index(current) + 1 :]:
+        if rms[m] is None:
+            walk.append(
+                {
+                    "from": current,
+                    "to": m,
+                    "improvement": None,
+                    "moved": False,
+                    "note": f"{m} 没有 test 整体 RMS 成绩,跳过不参与升级比较。",
+                }
+            )
+            continue
+        cur_rms = float(rms[current])
+        new_rms = float(rms[m])
+        improvement = (cur_rms - new_rms) / cur_rms
+        moved = bool(improvement >= float(improve_min))
+        if moved:
+            walk.append(
+                {
+                    "from": current,
+                    "to": m,
+                    "improvement": float(improvement),
+                    "moved": True,
+                    "note": (
+                        f"{m} 把 test 整体 RMS 从 {cur_rms:.4f} px 拉低到 "
+                        f"{new_rms:.4f} px(提升 {improvement:.1%} ≥ 门槛 "
+                        f"{float(improve_min):.0%}),升级到 {m}。"
+                    ),
+                }
+            )
+            current = m
+        else:
+            walk.append(
+                {
+                    "from": current,
+                    "to": m,
+                    "improvement": float(improvement),
+                    "moved": False,
+                    "note": (
+                        f"{m} 只把 test 整体 RMS 拉低 {improvement:.1%}"
+                        f"({cur_rms:.4f} → {new_rms:.4f} px),低于门槛 "
+                        f"{float(improve_min):.0%},不升级——复杂度不值这个价。"
+                    ),
+                }
+            )
+
+    if current == order[0]:
+        reason = (
+            f"{current} 是最简模型且已够用:更复杂各档的提升都不到 "
+            f"{float(improve_min):.0%} 门槛,按'简单优先'直接用它"
+            f"(test 整体 RMS {float(rms[current]):.4f} px)。"
+        )
+    else:
+        better = [w for w in walk if w["moved"]]
+        reason = (
+            f"从最简模型 {order[0]} 起步逐档走查:{current} 是第一处值得升级的档位"
+            f"(每一步的比较数字见 walk 流水),按'提升 ≥{float(improve_min):.0%} 才买"
+            f"复杂度'当选;test 整体 RMS {float(rms[current]):.4f} px。"
+        )
+        if better:
+            last = better[-1]
+            reason += f"最后一级升级:{last['note']}"
+    return {
+        "selected": current,
+        "test_rms_px": rms,
+        "walk": walk,
+        "improve_min": float(improve_min),
+        "rule": rule,
+        "reason": reason,
     }
 
 

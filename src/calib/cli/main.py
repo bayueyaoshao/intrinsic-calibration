@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,12 +35,17 @@ from calib.evaluation.experiments import (
     cv_pose_grouped,
     load_warm_inits,
     lopo,
+    overall_test_rms_by_model,
     pose_sampling_variance,
     run_delivery,
     slices_by_index,
 )
 from calib.evaluation.optimizer import run_multistart, run_optimizer_grid
-from calib.evaluation.selection import build_verdict_table, select_model
+from calib.evaluation.selection import (
+    build_verdict_table,
+    select_by_test_rms,
+    select_model,
+)
 from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
@@ -1236,20 +1242,26 @@ def _lopo_candidate_model(cv: dict | None, selection: dict | None,
 
 @app.command(help="⑥ 防作弊考试:用没见过的新题考试、换着分组复测、逐一抽查,用数据挑出最合适的相机模型")
 def evaluate() -> None:
-    """流水线第⑥步:防作弊考试一条龙(判行表 + 选型结论 + test 并排成绩)。
+    """流水线第⑥步:防作弊考试一条龙(test 选型 + 判行表 + 当选模型实验)。
 
     步骤:读配置 → 上游四轮定位(corners / noise / calibration / fisher
     各找最新一轮,血缘登记防串轮;缺文件当场中文报错)→ 优化器对比先行
     (16 组合网格 + 多起点一致性检验,D-13/D-14/D-15;后面的四类实验与
-    全量重训统一用每模型的推荐优化配置)→ 四类实验并行:按姿态分组交叉
-    验证、bootstrap 重采样、重复张分组、留一姿态(逐实验独立兜底:某实验
-    失败该段记 None 并播报,不中断其余实验)→ 全量重训交付 + test 独立
-    照片全模型并排逐张评分(D-16)→ 来源分离组装(bootstrap 总晃动 −
-    分组纯噪声晃动 = 换姿态本身的贡献,相减的是方差,D-07)→ 三判据判行表
-    + 选型(Fisher 谱退化预警随行标注进 notes,D-11;复杂模型 m3/m4 胜出
-    必须写明它与该发现的关系)→ evaluate.json + experiments/*.npz 明细
-    旁车 + 判行表三图落盘(图失败只播报不拦主产物)→ 中途失败也照常落盘
-    失败契约再退出码 1 → 打印中文汇总与人工核查四要素指引。
+    全量重训统一用每模型的推荐优化配置)→ 全量重训交付先行(2026-10-21
+    选型重构:全部模型重训一遍 + test 独立照片逐张评分,D-16——test 整体
+    RMS 是选型主判据的原料,必须先跑)→ test 整体 RMS 选型(2026-10-21
+    定案:模型按复杂度升序逐档走查,更复杂一档的提升 ≥ selection_improve_min
+    才升级,否则取更简者;依据 docs/findings.md 结论 2)→ 四类实验:
+    按姿态分组交叉验证、bootstrap 重采样、重复张分组、留一姿态——
+    quick 档只考当选模型且重复次数缩水(quick_* 覆盖),full 档全部模型
+    全量重复(逐实验独立兜底:某实验失败该段记 None 并播报,不中断其余
+    实验)→ 来源分离组装(bootstrap 总晃动 − 分组纯噪声晃动 = 换姿态
+    本身的贡献,相减的是方差,D-07)→ 三判据判行表 + 选型第二意见
+    (三判据规则独立复核 test 选型,两处打架当场播报并落账;Fisher 谱
+    退化预警随行标注进 notes,D-11;复杂模型 m3/m4 胜出必须写明它与该
+    发现的关系)→ evaluate.json + experiments/*.npz 明细旁车 + 判行表
+    三图落盘(图失败只播报不拦主产物)→ 中途失败也照常落盘失败契约再
+    退出码 1 → 打印中文汇总与人工核查四要素指引。
 
     硬性规则:命令行零算法参数(一切从 config/calibration.yaml 的
     evaluate 段读,D-12);只写 output/evaluate/run_<时间戳>/,input_data
@@ -1330,13 +1342,22 @@ def evaluate() -> None:
     else:
         warm_inits = None
 
+    profile = eval_cfg.profile
+    if profile == "quick":
+        profile_note = (
+            "quick 档(日常默认):先全模型交付 + test 选型,四类实验只考当选模型,"
+            f"重复缩水为交叉验证 {eval_cfg.quick_cv_n_folds} 折 × "
+            f"{eval_cfg.quick_cv_n_rounds} 轮、bootstrap {eval_cfg.quick_bootstrap_n} 次"
+        )
+    else:
+        profile_note = "full 档(新数据首轮 / 交付前终跑):全部模型、正式档重复次数不缩水"
     typer.echo(f"开始防作弊考试:{len(models)} 个模型 × (优化器 16 组合 + 多起点"
-               f"一致性 + 交叉验证 100 折 + bootstrap {eval_cfg.bootstrap_n} 次 + "
-               f"重复张分组)+ 全量重训 × {len(models)} + 留一姿态(只考一个模型)"
-               f" + test 独立照片逐张评分……")
+               f"一致性 + 全量重训交付 + test 逐张评分)→ test 整体 RMS 选型 → "
+               f"四类实验(交叉验证 / bootstrap / 重复张分组 / 留一姿态)……")
+    typer.echo(f"  档位:{profile_note}")
     typer.echo(f"  上游:corners {corners_run.name} / noise {noise_run.name} / "
                f"calibration {calib_run.name} / fisher {fisher_run.name}"
-               f"(血缘已登记;合计千余次求解,请稍等)")
+               f"(血缘已登记;数百到千余次求解,请稍等)")
 
     def _count_progress(label: str, every: int):
         """按次数播报的进度回调(每 every 条播一行,收尾必播)。"""
@@ -1351,6 +1372,7 @@ def evaluate() -> None:
     cv = boot = slices = lopo_rep = delivery = None
     source_separation: dict | None = None
     selection: dict | None = None
+    experiment_models: tuple[str, ...] = models  # 四类实验实际参试模型(quick = 当选模型)
 
     try:
         # ---- ① 优化器对比先行(D-13/D-14:16 组合网格,共同 OpenCV 初值;
@@ -1388,7 +1410,9 @@ def evaluate() -> None:
         # 避免"选型用默认配置、事后发现更优配置,结论返工")
         optimizer_config = grid["recommended_solver"]
 
-        # ---- ② 四类实验(逐实验独立兜底:失败该段记 None 不中断)----
+        # ---- ② 全量重训交付先行(2026-10-21 选型重构:交付 = 选型的
+        #         原料——全部模型重训一遍 + test 独立照片逐张评分,D-16;
+        #         交付一律全量重训,与实验档位无关——PROJECT.md 算法惯例)----
         def _stage(name: str, run):
             try:
                 return run()
@@ -1397,24 +1421,67 @@ def evaluate() -> None:
                            f"{type(e).__name__}——{e}")
                 return None
 
-        cv = _stage("交叉验证", lambda: cv_pose_grouped(
-            obs_train, board, cfg, optimizer_config,
-            progress=_count_progress("交叉验证", 10), warm_inits=warm_inits))
-        boot = _stage("bootstrap 重采样", lambda: bootstrap_pose(
-            obs_train, board, cfg, optimizer_config,
-            progress=_count_progress("bootstrap 重采样", 50), warm_inits=warm_inits))
-        slices = _stage("重复张分组", lambda: slices_by_index(
-            obs_train, board, cfg, optimizer_config, noise_report,
-            progress=_count_progress("重复张分组", 8)))
-
-        # ---- ③ 全量重训交付 + test 逐张并排评分(D-16;CV 只管选型,
-        #         交付一律全量重训——PROJECT.md 算法惯例)----
         delivery = _stage("全量重训交付", lambda: run_delivery(
             obs_train, obs_test, board, cfg, optimizer_config,
             progress=_count_progress("全量重训交付", 1)))
 
-        # ---- ④ 来源分离 + 判行表 + 选型(只在三判据的实验全到位时组装;
-        #         组装失败记 None,不让几小时的实验数据陪葬)----
+        # ---- ③ test 整体 RMS 选型(2026-10-21 定案:复杂度逐档走查,
+        #         更复杂一档提升 ≥ selection_improve_min 才升级,否则取简;
+        #         依据 docs/findings.md 结论 2)----
+        if delivery is not None:
+            test_rms_by_model = overall_test_rms_by_model(delivery)
+            selection = select_by_test_rms(
+                test_rms_by_model, models, eval_cfg.selection_improve_min)
+            selection["method"] = "test_rms_simplicity"
+            typer.echo(f"  test 整体 RMS 选型(独立考题 {delivery['meta']['n_test_images']} 张,"
+                       f"规则:更复杂一档提升 ≥{eval_cfg.selection_improve_min:.0%} 才升级):")
+            for m in models:
+                v = test_rms_by_model.get(m)
+                mark = "  ← 当选" if selection.get("selected") == m else ""
+                rms_text = "无成绩" if v is None else f"{v:.4f} px"
+                typer.echo(f"    {m}:test 整体 RMS {rms_text}{mark}")
+            for step in selection["walk"]:
+                typer.echo(f"    走查:{step['note']}")
+            typer.echo(f"    当选:{selection['selected'] or '无(全部模型无成绩)'}"
+                       f"——{selection['reason']}")
+        else:
+            typer.echo("  交付阶段未跑成,test 整体 RMS 选型缺席(选型段记 None,"
+                       "四类实验回退全模型)。")
+
+        # ---- ③b 实验档位落地(quick 只考当选模型 + 重复缩水;选型缺席
+        #         或 full 档回退全模型、正式档次数)----
+        if (eval_cfg.profile == "quick" and selection is not None
+                and selection.get("selected")):
+            eff_eval = replace(
+                eval_cfg,
+                cv_n_folds=eval_cfg.quick_cv_n_folds,
+                cv_n_rounds=eval_cfg.quick_cv_n_rounds,
+                bootstrap_n=eval_cfg.quick_bootstrap_n,
+            )
+            eff_cfg = replace(cfg, evaluate=eff_eval)
+            experiment_models = (str(selection["selected"]),)
+            typer.echo(f"  quick 档:四类实验只考当选模型 {experiment_models[0]}"
+                       f"(交叉验证 {eff_eval.cv_n_folds} 折 × {eff_eval.cv_n_rounds} 轮、"
+                       f"bootstrap {eff_eval.bootstrap_n} 次;复核时用 full 档)")
+        else:
+            eff_cfg = cfg
+            experiment_models = models
+
+        # ---- ④ 四类实验(逐实验独立兜底:失败该段记 None 不中断)----
+        cv = _stage("交叉验证", lambda: cv_pose_grouped(
+            obs_train, board, eff_cfg, optimizer_config,
+            progress=_count_progress("交叉验证", 10),
+            warm_inits=warm_inits, models=experiment_models))
+        boot = _stage("bootstrap 重采样", lambda: bootstrap_pose(
+            obs_train, board, eff_cfg, optimizer_config,
+            progress=_count_progress("bootstrap 重采样", 50),
+            warm_inits=warm_inits, models=experiment_models))
+        slices = _stage("重复张分组", lambda: slices_by_index(
+            obs_train, board, eff_cfg, optimizer_config, noise_report,
+            progress=_count_progress("重复张分组", 8), models=experiment_models))
+
+        # ---- ④b 来源分离 + 判行表 + 选型第二意见(只在三判据的实验
+        #         全到位时组装;组装失败记 None,不让几小时的实验数据陪葬)----
         if cv is not None and boot is not None and slices is not None:
             try:
                 # 来源分离(D-07):分组侧经验标准差先平方成方差(独立来源的
@@ -1422,7 +1489,7 @@ def evaluate() -> None:
                 stability_summary: dict[str, dict] = {}
                 crlb_summary: dict[str, dict] = {}
                 source_separation = {}
-                for m in models:
+                for m in experiment_models:
                     emp = slices["models"][m].get("empirical_std")
                     if emp:
                         var_slice = {n: float(v) ** 2 for n, v in emp.items()}
@@ -1475,11 +1542,42 @@ def evaluate() -> None:
                 for row in verdicts["verdicts"]:
                     row["bic"] = ((delivery or {}).get("models", {})
                                   .get(row["model_id"], {}).get("bic"))
-                selection = select_model(verdicts["verdicts"], cv["models"], cfg)
+                # 交付缺席时 selection 还是 None:补一个最小选型壳,让判行表
+                # 照常挂进报告(test 选型缺席的事实写进 reason,不冒充结论)
+                if selection is None:
+                    selection = {
+                        "method": "test_rms_simplicity",
+                        "selected": None,
+                        "test_rms_px": None,
+                        "walk": [],
+                        "improve_min": float(eval_cfg.selection_improve_min),
+                        "rule": "test 整体 RMS 简单优先(规则全文见 selection.rule 的正常落盘)",
+                        "reason": ("交付阶段未跑成,test 整体 RMS 选型缺席;"
+                                   "此处只挂三判据判行表,选型请修复交付后重跑。"),
+                    }
                 # 判行表随选型结论一起落盘(下游与人工核查都按
                 # selection.verdicts 取数——逐行三判据数值 + PASS/FAIL + 判定式)
                 selection["verdicts"] = verdicts["verdicts"]
                 selection["verdict_thresholds"] = verdicts["thresholds"]
+                # 三判据第二意见(2026-10-21 选型重构):旧规则(held-out +
+                # 等价带 + BIC)独立复核 test RMS 选型,两处打架当场播报
+                tc = select_model(verdicts["verdicts"], cv["models"], cfg)
+                selection["three_criteria"] = tc
+                agree = (tc.get("selected") is not None
+                         and tc.get("selected") == selection.get("selected"))
+                selection["agreement"] = {
+                    "consistent": bool(agree),
+                    "note": (
+                        f"两处一致:都选 {selection.get('selected')}"
+                        if agree else
+                        f"两处打架:test 整体 RMS 选型给 {selection.get('selected')},"
+                        f"三判据规则给 {tc.get('selected') or '无'}——主判据以 "
+                        f"test 整体 RMS 为准,但请人工复核判行表与交叉验证折级明细"
+                        f"(test 集参加过选型,当选模型的成绩带轻微乐观偏差)。"
+                    ),
+                }
+                typer.echo(f"  选型第二意见(三判据规则):{tc.get('selected') or '无'}"
+                           f"——{selection['agreement']['note']}")
                 # 复杂模型胜出必须解释它与 Fisher 退化发现的关系(D-11)
                 if selection.get("selected") in ("m3", "m4"):
                     m = selection["selected"]
@@ -1494,22 +1592,21 @@ def evaluate() -> None:
                         f"crlb.json 谱体检记录其条件数 "
                         f"{record.get('condition_number'):.2e}(退化线以上),"
                         f"最软方向落在 {dir_txt}——高阶畸变参数组合在这批数据里"
-                        f"信息量不足。本次仍凭三判据实证当选:泛化(考题误差没有"
+                        f"信息量不足。本次仍凭实证当选:泛化(考题误差没有"
                         f"因高阶项起飞)、稳定(bootstrap 与分组的参数位移当量"
                         f"都在阈值内)、逼近 CRLB(分组实测不低于同口径理论下界,"
                         f"零硬告警)。若稳定判据数值贴近阈值,或当选经过了 BIC "
                         f"平局裁决,建议先人工复核 bootstrap 逐次参数明细"
                         f"(experiments/bootstrap.npz)与判行表 notes 再采信。")
             except Exception as e:  # noqa: BLE001  组装失败不拖垮已算成的实验段
-                typer.echo(f"  判行表与选型未组装成(选型段记 None,实验数据照常"
-                           f"落盘):{type(e).__name__}——{e}")
-                selection = None
+                typer.echo(f"  判行表与选型第二意见未组装成(相应段记 None,实验数据"
+                           f"照常落盘):{type(e).__name__}——{e}")
 
-        # ---- ④b 留一姿态(2026-10-21 提速裁定挪到选型之后:只考一个
+        # ---- ④c 留一姿态(2026-10-21 提速裁定挪到选型之后:只考一个
         #         模型——选型胜出的优先,选型缺席退而求 CV 泛化最优。
         #         lopo 是诊断实验不进判行表,单模型不影响任何结论)----
         lopo_rep = _stage("留一姿态", lambda: lopo(
-            obs_train, board, cfg, optimizer_config,
+            obs_train, board, eff_cfg, optimizer_config,
             progress=_count_progress("留一姿态", 5),
             models=_lopo_candidate_model(cv, selection, models),
             warm_inits=warm_inits))
@@ -1544,6 +1641,9 @@ def evaluate() -> None:
             "fisher_run": fisher_run.name,
             "partial_sections": partial,
             "warm_start_experiments": bool(warm_inits),
+            "profile": eval_cfg.profile,
+            "experiment_models": list(experiment_models),
+            "selection_improve_min": eval_cfg.selection_improve_min,
             "duration_s": round((datetime.now(UTC) - started).total_seconds(), 1),
         },
         "failure_note": None,
@@ -1622,9 +1722,18 @@ def evaluate() -> None:
                 typer.echo(f"    {row['model_id']} FAIL 于:{'、'.join(failed)}"
                            f"(判定式与数值见 evaluate.json 的 selection.verdicts)")
     if selection:
-        typer.echo(f"  选型结论:{selection.get('selected') or '无(没有任何模型三判据全 PASS)'}")
+        tc = selection.get("three_criteria")
+        agree = (selection.get("agreement") or {}).get("consistent")
+        typer.echo(f"  选型结论:{selection.get('selected') or '无'}"
+                   f"(主判据:test 整体 RMS 简单优先,升级门槛 "
+                   f"{float(selection.get('improve_min') or 0):.0%})")
+        for step in selection.get("walk") or []:
+            typer.echo(f"    走查:{step['note']}")
         typer.echo(f"    理由:{selection.get('reason')}")
-        typer.echo(f"    规则:{selection.get('selection_rule')}")
+        if tc:
+            typer.echo(f"    第二意见(三判据:{tc.get('selected') or '无'},"
+                       f"规则见 evaluate.json 的 selection.three_criteria):"
+                       + ("与主判据一致" if agree else "与主判据打架,看 agreement.note"))
         if selection.get("fisher_relation_note"):
             typer.echo(f"    {selection['fisher_relation_note']}")
     if delivery is not None:
@@ -1650,14 +1759,21 @@ def evaluate() -> None:
     typer.echo("  2) 文件作用:evaluate.json 是判行表与选型结论的主契约"
                "(每模型三判据数值、PASS/FAIL、BIC、选型结果);figures/ 是 "
                "CV 误差棒、留一姿态问题点、噪声/位姿抽样来源对比三张证据图。")
-    typer.echo("  3) 具体看哪里:selection.selected(当选模型)与 "
-               "selection.verdicts(逐模型三段数值与 pass 布尔);cv.models "
-               "各模型 mean_heldout_px 并排;slices 段各模型的 crlb_alert"
+    typer.echo("  3) 具体看哪里:selection.selected(当选模型)与 selection.walk"
+               "(test 整体 RMS 的逐档走查流水,每步比较数字与判定);"
+               "selection.three_criteria 与 selection.agreement(三判据规则的"
+               "第二意见、与主判据一致与否);selection.verdicts(逐模型三段"
+               "数值与 pass 布尔,quick 档只有当选模型一行);cv.models "
+               "各模型 mean_heldout_px;slices 段各模型的 crlb_alert"
                "(匹配口径 = 检测器级 σ × 内参块下界推到逐角点重投影位移,"
                "per_param 是中位/95分位/最大三条统计量,看有无 below_hard=true,"
                "逐行底账在 experiments/slices.npz 的 group_uv/group_bound_px);"
                "notes 里的 Fisher 预警文案。")
-    typer.echo("  4) 好坏判据:三判据全 PASS 的模型里 held-out 最小者当选;"
+    typer.echo("  4) 好坏判据:当选模型 = test 整体 RMS 走查的胜者(更复杂一档"
+               "提升 ≥ 门槛才升级,规则与门槛值见 selection.rule 与 meta."
+               "selection_improve_min);三判据规则作第二意见,两处打架时 "
+               "selection.agreement.note 会写明并请人工复核(test 集参加过选型,"
+               "当选成绩带轻微乐观偏差,属已知口径现象);"
                "逼近 CRLB 判定的噪声口径是每角点重复拍摄的检测器级方差,"
                "判定在像素空间(角点重投影位移),任何统计量实测低于同口径 "
                "CRLB 告警线(硬线数值见 slices 段 crlb_alert.lines.hard,"

@@ -439,6 +439,7 @@ def cv_pose_grouped(
     optimizer_config: dict,
     progress=None,
     warm_inits: dict | None = None,
+    models: Sequence[str] | None = None,
 ) -> dict:
     """按姿态分组 K 折交叉验证(D-01/D-02,EVA-01 实验侧)。
 
@@ -454,6 +455,8 @@ def cv_pose_grouped(
     warm_inits(2026-10-21 提速裁定):{模型: 全量精化解},给了就温启动
     (每折从全量解裁剪的初值出发只跑 scipy 精化,冷/温终点等效性已按
     多起点同款容差验证);None = 冷启动(OpenCV 初值,行为不变)。
+    models(2026-10-21 选型重构):只跑指定模型(quick 档只跑当选模型);
+    None = evaluate.models 全部。
 
     返回 {"schema": "cv-v1", "models": {mX: {"fold_heldout", "fold_train",
     "mean_heldout_px", "mean_train_px", "n_failed_folds", "loss_used",
@@ -466,10 +469,20 @@ def cv_pose_grouped(
     cv2.setNumThreads(cfg.cv2_threads)  # D-12:线程数配置化;多线程归约顺序
     # 不定会末位漂移,"同种子重跑逐位一致"的承诺守不住(04-02 教训)
     _check_obs_board(obs, board)
+    if models is None:
+        models = tuple(eval_cfg.models)
+    else:
+        models = tuple(models)
+        unknown = [m for m in models if m not in eval_cfg.models]
+        if not models or unknown:
+            raise ValueError(
+                f"cv_pose_grouped 的 models 参数必须是 evaluate.models="
+                f"{list(eval_cfg.models)} 的非空子集,拿到的是 {list(models)}"
+                f"(不认识的:{unknown})。请检查当选模型的推定逻辑。"
+            )
 
     poses = unique_poses(obs)
     assignment = assign_cv_folds(poses, cfg)
-    models = tuple(eval_cfg.models)
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
     warm_for = {} if warm_inits is None else warm_inits
 
@@ -1005,6 +1018,7 @@ def slices_by_index(
     optimizer_config: dict,
     noise_report: dict,
     progress=None,
+    models: Sequence[str] | None = None,
 ) -> dict:
     """重复张分组实验(D-05/D-06,EVA-03 实验侧):每组每姿态取第 i 张。
 
@@ -1031,7 +1045,8 @@ def slices_by_index(
 
     签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped);
     noise_report 是读回的 noise.json 字典(σ 只从 sigma_detector_corner
-    读,缺键中文报错)。
+    读,缺键中文报错)。models(2026-10-21 选型重构):只跑指定模型
+    (quick 档只跑当选模型);None = evaluate.models 全部。
 
     返回 {"schema": "slices-v1", "models": {mX: {"group_params",
     "empirical_std", "crlb_se_mean", "crlb_caliber_note", "crlb_alert",
@@ -1048,7 +1063,17 @@ def slices_by_index(
     _check_obs_board(obs, board)
     sigma = _sigma_detector_from_noise(noise_report)
     groups = slice_groups_by_index(obs, cfg)  # 开关/组内断言在 splitting 层内置
-    models = tuple(eval_cfg.models)
+    if models is None:
+        models = tuple(eval_cfg.models)
+    else:
+        models = tuple(models)
+        unknown = [m for m in models if m not in eval_cfg.models]
+        if not models or unknown:
+            raise ValueError(
+                f"slices_by_index 的 models 参数必须是 evaluate.models="
+                f"{list(eval_cfg.models)} 的非空子集,拿到的是 {list(models)}"
+                f"(不认识的:{unknown})。请检查当选模型的推定逻辑。"
+            )
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
 
     tasks = [
@@ -1333,6 +1358,7 @@ def bootstrap_pose(
     optimizer_config: dict,
     progress=None,
     warm_inits: dict | None = None,
+    models: Sequence[str] | None = None,
 ) -> dict:
     """bootstrap 重采样实验(D-04,EVA-04 实验侧):按姿态有放回重抽一批
     姿态重新标定,重复 cfg.evaluate.bootstrap_n 次。
@@ -1352,7 +1378,8 @@ def bootstrap_pose(
     cfg.evaluate 的重采样次数/模型/并行上限与 cfg.calibrate.scipy、cfg.seed)。
     warm_inits(2026-10-21 提速裁定):{模型: 全量精化解},给了就温启动
     (每次重采样从全量解裁剪的初值出发只跑 scipy 精化);None = 冷启动
-    (OpenCV 初值,行为不变)。
+    (OpenCV 初值,行为不变)。models(2026-10-21 选型重构):只跑指定
+    模型(quick 档只跑当选模型);None = evaluate.models 全部。
 
     返回 {"schema": "bootstrap-v1", "models": {mX: {"param_std", "param_ci",
     "var_bootstrap", "var_slice", "pose_sampling_var", "var_slice_note",
@@ -1370,7 +1397,17 @@ def bootstrap_pose(
 
     poses = unique_poses(obs)
     assignment = bootstrap_resample(poses, cfg)  # 一批分配,全部模型共用(D-04)
-    models = tuple(eval_cfg.models)
+    if models is None:
+        models = tuple(eval_cfg.models)
+    else:
+        models = tuple(models)
+        unknown = [m for m in models if m not in eval_cfg.models]
+        if not models or unknown:
+            raise ValueError(
+                f"bootstrap_pose 的 models 参数必须是 evaluate.models="
+                f"{list(eval_cfg.models)} 的非空子集,拿到的是 {list(models)}"
+                f"(不认识的:{unknown})。请检查当选模型的推定逻辑。"
+            )
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
     warm_for = {} if warm_inits is None else warm_inits
 
@@ -1716,3 +1753,35 @@ def run_delivery(
             "test_rms": np.array(detail_rms, dtype=np.float64),
         },
     }
+
+
+def overall_test_rms_by_model(delivery: dict) -> dict[str, float | None]:
+    """交付明细 → 每模型 test 整体 RMS(选型主判据的原料,2026-10-21 定案)。
+
+    白话:逐张 RMS 是"每张考卷各自的分数",整体 RMS 是"全班的总评"——
+    全部有成绩的考卷按"分数平方取平均再开方"合成一个数(与 findings.md
+    结论 2 的口径一致);重训失败的模型一张成绩都没有,记 None 而不是 0
+    (0 会冒充"好到完美",None 让选型把它当无成绩跳过)。
+
+    输入是 run_delivery 的返回值(读 _delivery_detail 的三列平行数组);
+    缺明细键当场中文报错。返回 {模型: 整体 RMS(px)或 None}。
+    """
+    detail = delivery.get("_delivery_detail")
+    if not isinstance(detail, dict) or "test_model" not in detail or "test_rms" not in detail:
+        raise ValueError(
+            "run_delivery 返回值缺 _delivery_detail(test_model/test_rms 平行数组)"
+            "——test 整体 RMS 无从合成,请检查交付实验是否完整跑完。"
+        )
+    models_arr = np.asarray(detail["test_model"]).ravel()
+    rms_arr = np.asarray(detail["test_rms"], dtype=np.float64).ravel()
+    if models_arr.size != rms_arr.size:
+        raise ValueError(
+            f"交付明细的两列长度对不上(test_model {models_arr.size} 行 vs "
+            f"test_rms {rms_arr.size} 行)——明细数组损坏,请重跑交付阶段。"
+        )
+    out: dict[str, float | None] = {}
+    for model_id in dict.fromkeys(str(m) for m in models_arr):
+        rows = rms_arr[models_arr == model_id]
+        scored = rows[np.isfinite(rows)]
+        out[model_id] = float(np.sqrt(np.mean(scored**2))) if scored.size else None
+    return out

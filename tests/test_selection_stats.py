@@ -25,6 +25,7 @@ from calib.evaluation.selection import (
     crlb_alert_check,
     mad_outlier_poses,
     paired_comparison,
+    select_by_test_rms,
     select_model,
 )
 from calib.io.config import CalibrationConfig
@@ -426,3 +427,82 @@ class TestSelectModel:
         assert set(out["reasons"]) == {"m3", "m4"}
         assert "稳定" in out["reasons"]["m3"]
         assert "泛化" in out["reasons"]["m4"] and "CRLB" in out["reasons"]["m4"]
+
+
+class TestSelectByTestRms:
+    """test 整体 RMS 贪心选型(2026-10-21 定案,依据 docs/findings.md 结论 2)。"""
+
+    def test_real_data_shape_picks_m2(self):
+        """本批数据的真实形状(m1→m4 递复杂):m2 提升 46.7% 升级,m3/m4
+        只好 1.2%–1.9% 不够 10% 门槛 → 选 m2;走查流水逐步落账。"""
+        out = select_by_test_rms(
+            {"m1": 0.3020, "m2": 0.1598, "m3": 0.1569, "m4": 0.1587},
+            ("m1", "m2", "m3", "m4"),
+            0.10,
+        )
+        assert out["selected"] == "m2"
+        assert out["test_rms_px"] == {"m1": 0.3020, "m2": 0.1598, "m3": 0.1569, "m4": 0.1587}
+        assert [w["moved"] for w in out["walk"]] == [True, False, False]
+        assert out["walk"][0]["improvement"] == pytest.approx((0.3020 - 0.1598) / 0.3020)
+        assert out["walk"][1]["improvement"] == pytest.approx((0.1598 - 0.1569) / 0.1598)
+        assert "m2" in out["reason"]
+
+    def test_not_adjacent_only_bad_middle_does_not_bury_good_later(self):
+        """走查与当前模型比(不与上一步比):中间档 m2 不行不埋没 m3。"""
+        out = select_by_test_rms(
+            {"m1": 0.30, "m2": 0.29, "m3": 0.15}, ("m1", "m2", "m3"), 0.10
+        )
+        assert out["selected"] == "m3"
+        assert [w["moved"] for w in out["walk"]] == [False, True]
+        # m3 的提升按"相对当前模型 m1"算,不是相对 m2
+        assert out["walk"][1]["improvement"] == pytest.approx((0.30 - 0.15) / 0.30)
+
+    def test_stops_when_nothing_beats_current(self):
+        """全部后续档都不够门槛 → 停在最简模型(简单优先)。"""
+        out = select_by_test_rms(
+            {"m1": 0.20, "m2": 0.19, "m3": 0.185}, ("m1", "m2", "m3"), 0.10
+        )
+        assert out["selected"] == "m1"
+        assert all(not w["moved"] for w in out["walk"])
+        assert "最简" in out["reason"]
+
+    def test_none_scores_skipped_and_recorded(self):
+        """无成绩(None)的模型跳过、记进走查流水,不参与升级比较。"""
+        out = select_by_test_rms(
+            {"m1": 0.30, "m2": None, "m3": 0.15}, ("m1", "m2", "m3"), 0.10
+        )
+        assert out["selected"] == "m3"
+        assert out["walk"][0]["improvement"] is None and not out["walk"][0]["moved"]
+        assert "没有" in out["walk"][0]["note"]
+
+    def test_all_fail_no_forced_selection(self):
+        """全部模型无成绩 → 不硬选,给中文理由。"""
+        out = select_by_test_rms(
+            {"m1": None, "m2": None}, ("m1", "m2"), 0.10
+        )
+        assert out["selected"] is None
+        assert out["walk"] == []
+        assert "不硬选" in out["reason"]
+
+    def test_single_model_walk_empty(self):
+        """只有一个候选:直接当选,无走查。"""
+        out = select_by_test_rms({"m1": 0.25}, ("m1",), 0.10)
+        assert out["selected"] == "m1" and out["walk"] == []
+
+    def test_zero_gate_takes_any_improvement(self):
+        """门槛 0 = 任何提升都升级(合法边界)。"""
+        out = select_by_test_rms(
+            {"m1": 0.30, "m2": 0.299}, ("m1", "m2"), 0.0
+        )
+        assert out["selected"] == "m2"
+
+    def test_inputs_validated_in_chinese(self):
+        """缺条目 / 非有限值 / 门槛越界 / 空名单 → 全部中文报错。"""
+        with pytest.raises(ValueError, match="缺"):
+            select_by_test_rms({"m1": 0.2}, ("m1", "m2"), 0.10)
+        with pytest.raises(ValueError, match="非有限"):
+            select_by_test_rms({"m1": float("nan")}, ("m1",), 0.10)
+        with pytest.raises(ValueError, match="improve_min"):
+            select_by_test_rms({"m1": 0.2}, ("m1",), 1.0)
+        with pytest.raises(ValueError, match="空表"):
+            select_by_test_rms({}, (), 0.10)

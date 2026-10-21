@@ -347,6 +347,22 @@ class EvaluateConfig:
     # 中位 0.029 px、最大 0.224 px(按 0.1 px 双容差 6/62 对超线),且耗时
     # 反高于冷启动(中位 404 秒 vs 332 秒)。依据详见 docs/findings.md 结论 3
     warm_start_experiments: bool = False
+    # 运行档位(2026-10-21 选型重构,两档一套流程、只是缩不缩水的差别):
+    # quick = 日常默认——交付阶段先对全部模型算 test 整体 RMS 定出当选模型,
+    #   之后的交叉验证/重采样/分组/留一只考当选模型,重复次数用 quick_* 覆盖;
+    # full = 新数据首轮 + 交付前终跑——全部模型全量重复,quick 结论存疑时
+    #   回 full 复核。
+    profile: str = "quick"
+    # quick 档的重复次数覆盖(只有当选模型参试,考得少一点):交叉验证
+    # 3 折 × 3 轮、重采样 50 次;正式档(full)仍用 cv_n_folds / cv_n_rounds
+    # / bootstrap_n,不缩水
+    quick_cv_n_folds: int = 3
+    quick_cv_n_rounds: int = 3
+    quick_bootstrap_n: int = 50
+    # test 整体 RMS 选型的升级门槛(2026-10-21 定案):复杂度高一档的模型
+    # 相对当前模型的整体 RMS 提升 ≥ 该比例才升级,否则停驻取更简者;依据
+    # docs/findings.md 结论 2(本批数据 m3/m4 只比 m2 好 1.2%–1.9%,选 m2)
+    selection_improve_min: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -913,6 +929,32 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
         if not isinstance(value, bool):
             _fail(f"evaluate.{name}", value, f"必须是 true 或 false({purpose})")
 
+    # 运行档位:白名单二选一(quick / full)
+    profile = section.get("profile", cfg.profile)
+    if profile not in ("quick", "full"):
+        _fail("evaluate.profile", profile,
+              "必须是 'quick'(日常默认,只考当选模型)或 'full'(全模型全量重复)之一")
+
+    # quick 档重复次数覆盖:折数 >= 2、轮数/次数 >= 1(与正式档同规则)
+    quick_cv_n_folds = section.get("quick_cv_n_folds", cfg.quick_cv_n_folds)
+    if (not isinstance(quick_cv_n_folds, int) or isinstance(quick_cv_n_folds, bool)
+            or quick_cv_n_folds < 2):
+        _fail("evaluate.quick_cv_n_folds", quick_cv_n_folds,
+              "必须是 >= 2 的整数(quick 档交叉验证折数;1 折留不出考题)")
+    for name, default in (("quick_cv_n_rounds", cfg.quick_cv_n_rounds),
+                          ("quick_bootstrap_n", cfg.quick_bootstrap_n)):
+        value = section.get(name, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            _fail(f"evaluate.{name}", value,
+                  "必须是 >= 1 的整数(quick 档的重复次数覆盖)")
+
+    # test RMS 选型升级门槛:在 [0, 1) 内(0.10 = 提升 10% 才升级)
+    improve_min = section.get("selection_improve_min", cfg.selection_improve_min)
+    if (not isinstance(improve_min, int | float) or isinstance(improve_min, bool)
+            or not 0 <= improve_min < 1):
+        _fail("evaluate.selection_improve_min", improve_min,
+              "必须是 0 到 1 之间的小数(0.10 = 更复杂模型整体 RMS 提升 ≥10% 才升级)")
+
     return EvaluateConfig(
         models=tuple(models),
         optimizer_losses=tuple(losses),
@@ -943,6 +985,11 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
                                                   cfg.multistart_param_tol_px)),
         warm_start_experiments=section.get("warm_start_experiments",
                                            cfg.warm_start_experiments),
+        profile=profile,
+        quick_cv_n_folds=quick_cv_n_folds,
+        quick_cv_n_rounds=section.get("quick_cv_n_rounds", cfg.quick_cv_n_rounds),
+        quick_bootstrap_n=section.get("quick_bootstrap_n", cfg.quick_bootstrap_n),
+        selection_improve_min=float(improve_min),
     )
 
 
