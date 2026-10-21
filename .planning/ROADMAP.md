@@ -178,7 +178,31 @@ Plans:
   4. 敏感度排序(协方差/特征分解)落盘,并针对最大敏感维度给出可操作建议(补拍位姿/加约束)
   5. 角点合成退化实验(加噪/模糊/低对比栅格,含 winSize 扫描与 SB 候选)产出定位误差曲线,以数据锁定当前条件最优角点配置;同姿态连拍角点 x/y 方向重复性各向异性分析落盘
 
-**Plans:** TBD
+**Plans:** 6 plans
+Plans:
+**Wave 1**
+
+- [ ] 05-01-PLAN.md — 阶段⑦地基:AnalyzeConfig 配置段 + analyze 产物契约层 + ANA-01 误差预算库层(与 evaluate 同一条判定线的复核 + 硬报错 + k1–k3 口径声明)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 05-02-PLAN.md — `calib analyze` 命令骨架(上游六轮定位/血缘/失败契约/四要素播报)+ ANA-01 端到端:真实数据预算表与证据图 + findings 结论 4 对账
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 05-03-PLAN.md — ANA-02 残差方向分解端到端:视图/区域/r 分带 + r⁴ 覆盖足迹(findings 结论 5 产品化)+ 外推区显式披露 + 空间图带足迹
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 05-04-PLAN.md — ANA-03 test 三分量反解(本阶段唯一新建数学,全既有接口)+ ANA-04 敏感度排序、像素当量、补拍建议与解不唯一披露(Fisher what-if 仅 full 档,裁定②)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 05-05-PLAN.md — COR-02 角点合成退化寻优端到端(唯一重计算块:加噪/模糊/低对比 × winSize 阶梯 × SB 候选;双口径并报,裁定①;quick/full 两档)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 05-06-PLAN.md — COR-03 连拍各向异性 + 六块全链真实数据收口 + pipeline.md/findings/需求状态同步 + 人工核查(含 checkpoint)
 
 ### Phase 6: 报告组装 + CLI 全流水线 + 可复用性硬化
 
@@ -204,7 +228,7 @@ Plans:
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete    | 2026-10-18 |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 6/6 | Complete    | 2026-10-19 |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 4/6 | In Progress|  |
-| 5. 误差预算 + 诊断 + 角点提取寻优 | 0/TBD | Not started | - |
+| 5. 误差预算 + 诊断 + 角点提取寻优 | 0/6 | In Progress (planned 2026-10-21) | - |
 | 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/TBD | Not started | - |
 
 ## Phase Closing Checklist (applies to every phase)
