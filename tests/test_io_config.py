@@ -784,3 +784,112 @@ def test_evaluate_improve_min_out_of_range_rejected(tmp_path):
         with pytest.raises(ValueError) as exc_info:
             load_calibration(p)
         assert "evaluate.selection_improve_min" in str(exc_info.value)
+
+
+# ---- 第⑦步误差归因:analyze 段进配置(05-01,CLI 零参数)----
+
+def _write_analyze(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "calibration.yaml"
+    p.write_text(f"analyze:\n{text}", encoding="utf-8")
+    return p
+
+
+def test_analyze_defaults_when_section_missing(tmp_path):
+    """analyze 段整体缺省:16 个键全部走内置默认(契约一次定死)。"""
+    p = tmp_path / "calibration.yaml"
+    p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
+    an = load_calibration(p).analyze
+    assert an.profile == "quick"
+    assert an.analyze_max_workers == 12
+    assert an.radial_bin_edges == (0.0, 0.2, 0.4, 0.6, 0.8)
+    assert an.xyz_cond_max == pytest.approx(1.0e4)
+    assert an.sensitivity_step_sigma == pytest.approx(1.0)
+    assert an.what_if_n_poses == 6
+    assert an.what_if_target_r == pytest.approx(0.75)
+    assert an.corner_opt_seed == 20261021
+    assert (an.quick_corner_opt_frames, an.full_corner_opt_frames) == (36, 60)
+    assert an.corner_opt_n_reps == 1
+    assert an.noise_levels == (0.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
+    assert an.blur_levels == (0.0, 1.0, 2.0, 4.0)
+    assert an.contrast_gains == (1.0, 0.6, 0.35, 0.2)
+    assert an.classic_win_ladder == (3, 5, 7, 9, 11, 13)
+
+
+def test_analyze_repo_yaml_values():
+    """真实 calibration.yaml 端到端:解析出 AnalyzeConfig,各档位元组
+    长度与元素逐键和文件一致(契约锚定)。"""
+    cfg = load_calibration(REAL_CALIB)
+    an = cfg.analyze
+    assert an.profile == "quick"
+    assert an.analyze_max_workers == 12
+    assert an.radial_bin_edges == (0.0, 0.2, 0.4, 0.6, 0.8)
+    assert len(an.radial_bin_edges) == 5
+    assert an.noise_levels[0] == 0.0  # 首元素 = 校准档(不加噪)
+    assert len(an.noise_levels) == 7
+    assert len(an.blur_levels) == 4 and an.blur_levels[0] == 0.0
+    assert len(an.contrast_gains) == 4 and an.contrast_gains[0] == 1.0
+    assert an.classic_win_ladder == (3, 5, 7, 9, 11, 13)
+    assert an.what_if_target_r == pytest.approx(0.75)
+    assert an.corner_opt_seed == 20261021
+
+
+def test_analyze_profile_full_and_bad_value(tmp_path):
+    """profile: full 可读;拼错(如 quick2)触发中文报错点名 analyze.profile。"""
+    p = _write_analyze(tmp_path, "  profile: full\n")
+    assert load_calibration(p).analyze.profile == "full"
+    p_bad = _write_analyze(tmp_path, "  profile: quick2\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p_bad)
+    assert "analyze.profile" in str(exc_info.value)
+    assert "可选" in str(exc_info.value) or "必须" in str(exc_info.value)
+
+
+def test_analyze_radial_bin_edges_non_increasing_rejected(tmp_path):
+    """分带边界非严格递增(0.4 之后又回 0.2):带与带重叠倒序,配置层拦下。"""
+    p = _write_analyze(tmp_path, "  radial_bin_edges: [0.0, 0.4, 0.2, 0.6, 0.8]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "analyze.radial_bin_edges" in message
+    assert "递增" in message
+
+
+def test_analyze_classic_win_ladder_even_rejected(tmp_path):
+    """窗口阶梯混入偶数档(6):亚像素窗口必须奇数(cv2 约定),配置层拦下。"""
+    p = _write_analyze(tmp_path, "  classic_win_ladder: [3, 5, 6, 9]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "analyze.classic_win_ladder" in message
+    assert "奇数" in message
+
+
+def test_analyze_max_workers_rejects_bool_true(tmp_path):
+    """analyze_max_workers 写 true(布尔伪装整数):必须报错并点名该字段。
+
+    Python 里 isinstance(True, int) 成立,极容易把 true/false 误当数值
+    放行;并行上限写成 true 会变成 1(真)或直接算术炸裂,必须显式拒绝。
+    """
+    p = _write_analyze(tmp_path, "  analyze_max_workers: true\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    message = str(exc_info.value)
+    assert "analyze.analyze_max_workers" in message
+    assert "实际读到的值" in message
+
+
+def test_analyze_what_if_target_r_out_of_range_rejected(tmp_path):
+    """补拍预演覆盖目标 r 越界(1.2 出画面 / 0 = 没有目标):都拦下。"""
+    for bad in ("  what_if_target_r: 1.2\n", "  what_if_target_r: 0\n"):
+        p = _write_analyze(tmp_path, bad)
+        with pytest.raises(ValueError) as exc_info:
+            load_calibration(p)
+        assert "analyze.what_if_target_r" in str(exc_info.value)
+
+
+def test_analyze_noise_levels_negative_rejected(tmp_path):
+    """退化栅格混入负数档:退化强度没有负值,配置层拦下。"""
+    p = _write_analyze(tmp_path, "  noise_levels: [0.0, -2.0, 4.0]\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_calibration(p)
+    assert "analyze.noise_levels" in str(exc_info.value)

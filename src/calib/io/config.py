@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 
 import yaml
@@ -370,6 +372,76 @@ class EvaluateConfig:
 
 
 @dataclass(frozen=True)
+class AnalyzeConfig:
+    """第⑦步误差归因分析(calib analyze)的全部参数(CLI 零参数,D-12)。
+
+    白话背景:这一步回答"实际误差到底差在哪、离理论极限还有多远"——
+    把第⑥步评估落盘的实验底账(实测晃动、理论下界 CRLB、重采样方差)
+    对账成一张误差预算表,再把残差按视图/画面区域/径向分带找方向、把
+    test 集误差分解到相机坐标系三个方向、给参数敏感度排序并给应对建议,
+    最后用合成退化实验(把真实照片人为加噪/模糊/降对比,再用候选检测
+    配置重新找角点)给角点提取方法做选型。下面的字段控制这六块分析
+    各自怎么跑、退化网格开多密、并行开多大。
+
+    契约承诺:阶段五(05)的全部计划只读本配置,键集合一次定死,
+    后续计划不改不删——改契约必须回到本文件与 yaml analyze 段同步改。
+    """
+
+    # 运行档位(两档一套流程,只是缩不缩水的差别,体例照 evaluate.profile):
+    # quick = 日常默认——只考选型定案的当选模型,抽样帧 + 单因素退化栅格,
+    #   分钟级小网格;full = 交付前终跑——全模型全帧全网格,小时级
+    profile: str = "quick"
+    # 并行进程上限(COR-02 退化实验按"单帧 × 退化单元"切任务并行跑):
+    # 12 的依据 = 2026-10-21 evaluate_max_workers=12 压测结论(单次求解
+    # 约 0.9 GB 内存,12 个约 11 GB,进程再多吞吐不再涨反而挤爆内存);
+    # 写 1 = 不开子进程串行调试
+    analyze_max_workers: int = 12
+    # 径向分带边界(归一化半径 r:角点到画面中心的距离,以焦距为单位,
+    # 中心 r=0):ANA-02 残差方向分解与 COR-03 连拍各向异性共用同一条
+    # 分带尺(一处实现两处用);分带边界必须严格递增(带与带不重叠不倒序)
+    radial_bin_edges: tuple[float, ...] = (0.0, 0.2, 0.4, 0.6, 0.8)
+    # ANA-03 病态帧判定线:单张照片反解相机坐标三分量时,AᵀA(AᵀA 是
+    # "数据对这个方向有多少约束"的信息矩阵)条件数超过它判病态——该帧
+    # 深度方向的数值被放大得不可解释,单独标注不计入结论(RESEARCH
+    # Pitfall 7:单视角对深度天然看不远)。条件数恒 ≥ 1,阈值必须 > 1
+    xyz_cond_max: float = 1.0e4
+    # ANA-04 敏感度换算的扰动步长:沿特征方向扰动 ±(该倍数 × σ)后用
+    # 投影位移当量上天平;1.0 = 一个标准差,与"晃动"的字面量级对齐
+    sensitivity_step_sigma: float = 1.0
+    # Fisher 补拍预演(what-if)的合成姿态数与覆盖目标:合成"棋盘够到
+    # 画面四角"的虚拟位姿,预算"补几个姿态能再压多少误差"。仅 full 档
+    # 生效(裁定②),合成证据产物里必须声明"假设非实测"。
+    # 数值依据 findings 结论 5 手段 1:目标 r ≥ 0.75(够到四角)、
+    # 每姿态 1–2 张就够,6 个姿态是"不必重拍全部"量级的起点
+    what_if_n_poses: int = 6
+    what_if_target_r: float = 0.75
+    # COR-02 角点退化寻优实验的随机种子基准:帧抽样、加噪副本的种子都
+    # 从它确定性推导(同种子重跑逐位一致,退化图不落盘的正当性来源,
+    # 体例照 noise.injection_seed)
+    corner_opt_seed: int = 20261021
+    # 帧抽样数(角点寻优只考抽样帧,覆盖 r 从小到大):quick 36 帧小网格
+    # 分钟级;full 60 帧加密。数字依据 RESEARCH §Pattern 5 规模估算
+    # (36 帧 × 14 退化单元 × 8 方法 ≈ 4000 次检测,估 15–40 分钟)
+    quick_corner_opt_frames: int = 36
+    full_corner_opt_frames: int = 60
+    # quick 档每退化单元重复次数(加噪是随机的,重复几次压随机性;
+    # full 档代码侧固定用 2,不读本键——键保留是为了 quick/full 两档
+    # 契约对称,full 想改重复次数走代码常量)
+    corner_opt_n_reps: int = 1
+    # COR-02 退化栅格(单因素渐进,0/1.0 = 不动的校准档):
+    # 加噪 σ(灰阶,即像素噪声标准差,对数感网格)/ 高斯模糊 σ_px /
+    # 对比度增益(画面亮度按增益缩放)。全部必须非负(强度没有负值)
+    noise_levels: tuple[float, ...] = (0.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
+    blur_levels: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0)
+    contrast_gains: tuple[float, ...] = (1.0, 0.6, 0.35, 0.2)
+    # classic 亚像素窗口阶梯(COR-02 方法候选):逐档试不同的亚像素
+    # 精化窗口半宽;窗口尺寸必须 >= 1 的奇数(cv2 约定,偶数窗口没有
+    # 中心点)。2w+1 不小于该帧方格像素边长的档,按窗口推导的同一套
+    # 断言过滤掉,超档不进候选不报错(窗口吞邻角是本项目头号陷阱)
+    classic_win_ladder: tuple[int, ...] = (3, 5, 7, 9, 11, 13)
+
+
+@dataclass(frozen=True)
 class MosaicConfig:
     """汇总拼图的布局参数(拼图只是索引,不是逐帧副本的替代)。"""
 
@@ -401,6 +473,7 @@ class CalibrationConfig:
     noise: NoiseConfig = field(default_factory=NoiseConfig)
     fisher: FisherConfig = field(default_factory=FisherConfig)
     evaluate: EvaluateConfig = field(default_factory=EvaluateConfig)
+    analyze: AnalyzeConfig = field(default_factory=AnalyzeConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
 
 
@@ -999,6 +1072,132 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
     )
 
 
+def _parse_analyze(raw: dict) -> AnalyzeConfig:
+    """解析 analyze 段:档位、并行上限、径向分带、退化栅格、what-if 参数。
+
+    校验要点(防手写配置放大成资源浪费或错误实验,体例照 _parse_evaluate):
+    - profile 白名单二选一;并行上限 >= 1 且先拒 bool 伪装(true 也是 int);
+    - 各档位元组逐元素为有限数值;噪声/模糊/对比度逐元素非负(强度没有
+      负值);分带边界严格递增;窗口阶梯逐元素为 >= 1 的奇数;
+    - what_if_target_r 是 (0, 1] 内的有限正数(归一化半径超过 1 已出画面);
+    - 种子为非负整数;各计数键 >= 1。
+    """
+    cfg = AnalyzeConfig()
+    section = _check_is_dict(raw.get("analyze", {}), "analyze")
+
+    profile = section.get("profile", cfg.profile)
+    if profile not in ("quick", "full"):
+        _fail("analyze.profile", profile,
+              "必须是 'quick'(日常默认,分钟级小网格)或 'full'(交付前终跑,"
+              "小时级全网格)之一")
+
+    workers = section.get("analyze_max_workers", cfg.analyze_max_workers)
+    if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
+        _fail("analyze.analyze_max_workers", workers,
+              "必须是 >= 1 的整数(1 = 不开子进程串行调试;并行交给 joblib 调度,"
+              "12 的依据是 2026-10-21 evaluate 压测结论)")
+
+    def _float_tuple(name: str, default: tuple[float, ...], *,
+                     nonneg: bool = False,
+                     increasing: bool = False) -> tuple[float, ...]:
+        """解析一列数值档位:逐元素有限数值,可选非负/严格递增约束。"""
+        value = section.get(name, default)
+        if not isinstance(value, (list, tuple)) or not value:
+            _fail(f"analyze.{name}", value,
+                  "必须是非空的数值名单(如 [0.0, 0.2, 0.4])")
+        for x in value:
+            if (not isinstance(x, int | float) or isinstance(x, bool)
+                    or not math.isfinite(x)):
+                _fail(f"analyze.{name}", x,
+                      "元素必须是有限数值(不许写 nan/inf 或文字)")
+            if nonneg and x < 0:
+                _fail(f"analyze.{name}", x, "元素必须非负(退化强度没有负值)")
+        items = tuple(float(x) for x in value)
+        if increasing and any(b <= a for a, b in pairwise(items)):
+            _fail(f"analyze.{name}", value,
+                  "必须严格递增(径向分带带与带不重叠不倒序,从小到大排)")
+        return items
+
+    radial_bin_edges = _float_tuple("radial_bin_edges", cfg.radial_bin_edges,
+                                    increasing=True)
+    noise_levels = _float_tuple("noise_levels", cfg.noise_levels, nonneg=True)
+    blur_levels = _float_tuple("blur_levels", cfg.blur_levels, nonneg=True)
+    contrast_gains = _float_tuple("contrast_gains", cfg.contrast_gains,
+                                  nonneg=True)
+
+    ladder = section.get("classic_win_ladder", cfg.classic_win_ladder)
+    if not isinstance(ladder, (list, tuple)) or not ladder:
+        _fail("analyze.classic_win_ladder", ladder,
+              "必须是非空的整数名单(如 [3, 5, 7, 9, 11, 13])")
+    for x in ladder:
+        if not isinstance(x, int) or isinstance(x, bool) or x < 1 or x % 2 == 0:
+            _fail("analyze.classic_win_ladder", x,
+                  "必须是 >= 1 的奇数(亚像素窗口尺寸为奇数是 cv2 的约定,"
+                  "偶数窗口没有中心点)")
+
+    cond_max = section.get("xyz_cond_max", cfg.xyz_cond_max)
+    if (not isinstance(cond_max, int | float) or isinstance(cond_max, bool)
+            or not math.isfinite(cond_max) or cond_max <= 1):
+        _fail("analyze.xyz_cond_max", cond_max,
+              "必须是 > 1 的有限数(条件数 = 信息矩阵最软方向与最硬方向之比,"
+              "恒 ≥ 1,阈值 ≤ 1 会把全部帧判成病态)")
+
+    step_sigma = section.get("sensitivity_step_sigma", cfg.sensitivity_step_sigma)
+    if (not isinstance(step_sigma, int | float) or isinstance(step_sigma, bool)
+            or not math.isfinite(step_sigma) or step_sigma <= 0):
+        _fail("analyze.sensitivity_step_sigma", step_sigma,
+              "必须是 > 0 的有限数(沿特征方向的扰动步长,以 σ 的倍数计)")
+
+    n_poses = section.get("what_if_n_poses", cfg.what_if_n_poses)
+    if not isinstance(n_poses, int) or isinstance(n_poses, bool) or n_poses < 1:
+        _fail("analyze.what_if_n_poses", n_poses,
+              "必须是 >= 1 的整数(补拍预演合成姿态数)")
+
+    target_r = section.get("what_if_target_r", cfg.what_if_target_r)
+    if (not isinstance(target_r, int | float) or isinstance(target_r, bool)
+            or not math.isfinite(target_r) or not 0 < target_r <= 1):
+        _fail("analyze.what_if_target_r", target_r,
+              "必须是 (0, 1] 内的有限数(合成姿态的覆盖目标 r 是归一化半径,"
+              "超过 1 已经出了画面)")
+
+    seed = section.get("corner_opt_seed", cfg.corner_opt_seed)
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        _fail("analyze.corner_opt_seed", seed,
+              "必须是 >= 0 的整数(角点寻优实验随机种子,同种子重跑逐位一致)")
+
+    for name, default, purpose in (
+        ("quick_corner_opt_frames", cfg.quick_corner_opt_frames,
+         "quick 档角点寻优的抽样帧数"),
+        ("full_corner_opt_frames", cfg.full_corner_opt_frames,
+         "full 档角点寻优的抽样帧数"),
+        ("corner_opt_n_reps", cfg.corner_opt_n_reps,
+         "quick 档每退化单元重复次数"),
+    ):
+        value = section.get(name, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            _fail(f"analyze.{name}", value, f"必须是 >= 1 的整数({purpose})")
+
+    return AnalyzeConfig(
+        profile=profile,
+        analyze_max_workers=workers,
+        radial_bin_edges=radial_bin_edges,
+        xyz_cond_max=float(cond_max),
+        sensitivity_step_sigma=float(step_sigma),
+        what_if_n_poses=n_poses,
+        what_if_target_r=float(target_r),
+        corner_opt_seed=seed,
+        quick_corner_opt_frames=section.get("quick_corner_opt_frames",
+                                            cfg.quick_corner_opt_frames),
+        full_corner_opt_frames=section.get("full_corner_opt_frames",
+                                           cfg.full_corner_opt_frames),
+        corner_opt_n_reps=section.get("corner_opt_n_reps", cfg.corner_opt_n_reps),
+        noise_levels=noise_levels,
+        blur_levels=blur_levels,
+        contrast_gains=contrast_gains,
+        classic_win_ladder=tuple(int(x) for x in ladder),
+    )
+
+
 def _parse_visualization(raw: dict) -> VisualizationConfig:
     section = _check_is_dict(raw.get("visualization", {}), "visualization")
     quality = section.get("jpeg_quality", VisualizationConfig.jpeg_quality)
@@ -1072,5 +1271,6 @@ def load_calibration(path: Path | str) -> CalibrationConfig:
         noise=_parse_noise(top),
         fisher=_parse_fisher(top),
         evaluate=_parse_evaluate(top),
+        analyze=_parse_analyze(top),
         visualization=_parse_visualization(top),
     )
