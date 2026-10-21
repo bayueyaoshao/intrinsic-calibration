@@ -40,7 +40,9 @@ worker 层 try/except 兜底 + 消费循环宽接双保险(串行回退时 worke
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -117,16 +119,76 @@ def _recommended_kernel(optimizer_config: dict | None, model_id: str) -> tuple[s
     return loss, (float(f_scale) if f_scale is not None else None)
 
 
+def _subset_warm_init(warm: CalibrationResult, train_obs: ObservationSet) -> CalibrationResult:
+    """把全量精化解裁成训练子集的温启动初值(按照片编号对齐行序)。
+
+    行序契约:train_obs 的每个照片编号必须能在全量解里找到(评估实验的
+    训练子集永远来自同一批照片,找不到说明血缘断了),缺一张即中文报错,
+    绝不静默错位精化——位姿行错位的初值等于投毒。
+    """
+    index = {iid: i for i, iid in enumerate(warm.image_ids)}
+    missing = [iid for iid in train_obs.image_ids if iid not in index]
+    if missing:
+        raise ValueError(
+            f"温启动初值对不上训练子集:全量解里找不到照片 {missing[:3]}"
+            f"(共缺 {len(missing)} 张)。温启动要求实验数据与 calib calibrate "
+            f"是同一批照片(同一血缘),请检查 corners 产物是否换过轮次。"
+        )
+    rows = [index[iid] for iid in train_obs.image_ids]
+    return replace(
+        warm,
+        rvecs=warm.rvecs[rows],
+        tvecs=warm.tvecs[rows],
+        image_ids=train_obs.image_ids,
+        n_views=len(rows),
+        init_from=f"warm:{warm.solver}:{warm.model_id}",
+    )
+
+
+def load_warm_inits(calib_run_dir: Path | str, models: Sequence[str]) -> dict:
+    """从 calib calibrate 的产物读回各模型的全量精化解(温启动的起点)。
+
+    读 <模型>__scipy(linear 主线)目录的 result.json + extrinsics.npz,
+    与优化器网格读 __opencv 初值同一套装配函数(_load_init_result,行序
+    契约内置)。缺产物或未收敛即中文报错——温启动是配置明说的决定,
+    缺原料就停下来讲清楚,不悄悄退回冷启动(那会让"开没开温启动"的
+    两轮结果没法对账)。
+    """
+    from calib.solve.matrix import _load_init_result, combo_dir_name
+
+    warm: dict[str, CalibrationResult] = {}
+    for model_id in models:
+        init_dir = Path(calib_run_dir) / combo_dir_name(model_id, "scipy", "linear")
+        init = _load_init_result(init_dir, model_id)
+        if init is None or init.rms_overall is None:
+            raise ValueError(
+                f"温启动要用的全量精化解不可用:{init_dir}"
+                f"(result.json 缺失、未收敛或模型对不上)。"
+                f"请先跑 calib calibrate(solvers 里要有 scipy)拿到 "
+                f"<模型>__scipy 产物,再把 evaluate.warm_start_experiments "
+                f"保持开启重跑;或把它改成 false 回到冷启动。"
+            )
+        warm[model_id] = init
+    return warm
+
+
 def make_calibrate_fn(
-    model: CameraModel, scipy_cfg: ScipyConfig, loss: str, f_scale: float | None = None
+    model: CameraModel,
+    scipy_cfg: ScipyConfig,
+    loss: str,
+    f_scale: float | None = None,
+    warm_init: CalibrationResult | None = None,
 ):
     """统一求解路径工厂:返回 calibrate_fn(train_obs) -> CalibrationResult。
 
     白话:折内/组内/次次重采样的每次训练标定都走同一套两步——
-    1. OpenCV 原生求解拿初值(棋盘角点上的经典解法,几秒钟);
+    1. 拿初值:warm_init 给了就用全量精化解按训练子集裁剪出来的那一份
+       (温启动,2026-10-21 提速裁定——实测 640 视图冷启动 OpenCV 求解
+       157 秒,占单次求解 99%,而温启动后 scipy 精化只需秒级);没给就
+       OpenCV 原生求解拿初值(冷启动,默认行为不变);
     2. scipy 最小二乘精化(把内参和各照片的位姿放在一起慢慢调到最优),
-       用推荐核 loss;鲁棒核必带 rms_linear_ref = 本次训练子集 OpenCV
-       初值的回代 RMS——没有参照,鲁棒核"实用收敛"的判定就失真
+       用推荐核 loss;鲁棒核必带 rms_linear_ref = 本次训练子集初值的
+       回代 RMS——没有参照,鲁棒核"实用收敛"的判定就失真
        (Anti-Pattern 5)。
 
     f_scale(鲁棒核的"大残差从多大开始被压低"的分界尺度)只在推荐配置
@@ -135,16 +197,21 @@ def make_calibrate_fn(
     scipy_cfg_eff = scipy_cfg if f_scale is None else replace(scipy_cfg, f_scale=f_scale)
 
     def calibrate_fn(train_obs: ObservationSet) -> CalibrationResult:
-        init = solve_with_opencv(train_obs, model)
-        if not init.converged or init.rms_overall is None:
-            return init  # OpenCV 初值失败本身已是失败契约,精化无从谈起
+        if warm_init is not None:
+            init = _subset_warm_init(warm_init, train_obs)
+        else:
+            init = solve_with_opencv(train_obs, model)
+            if not init.converged or init.rms_overall is None:
+                return init  # OpenCV 初值失败本身已是失败契约,精化无从谈起
+        params_arr = np.array([init.params[name] for name in model.param_names], dtype=np.float64)
+        rms_ref, _, _ = compute_result_metrics(train_obs, params_arr, init.rvecs, init.tvecs, model)
         return solve_with_scipy(
             train_obs,
             model,
             scipy_cfg_eff,
             init=init,
             loss=loss,
-            rms_linear_ref=float(init.rms_overall),
+            rms_linear_ref=float(rms_ref),
         )
 
     return calibrate_fn
@@ -274,6 +341,7 @@ def _cv_fold_worker(task: tuple) -> dict:
         loss,
         f_scale,
         cv2_threads,
+        warm_init,
     ) = task
     # 线程锁必须在 worker 里再上一次:并行子进程是全新进程,入口处
     # (父进程)的 setNumThreads 管不到它们——子进程多线程归约顺序不定
@@ -283,7 +351,7 @@ def _cv_fold_worker(task: tuple) -> dict:
         model = create_model(model_id)
         train_obs = obs_rows(obs, pose_row_mask(obs, train_poses))
         val_obs = obs_rows(obs, pose_row_mask(obs, val_poses))
-        calibrate_fn = make_calibrate_fn(model, scipy_cfg, loss, f_scale)
+        calibrate_fn = make_calibrate_fn(model, scipy_cfg, loss, f_scale, warm_init=warm_init)
         result = calibrate_fn(train_obs)
         n_train_views = len(train_obs.image_ids)
         n_val_views = len(val_obs.image_ids)
@@ -370,6 +438,7 @@ def cv_pose_grouped(
     cfg: CalibrationConfig,
     optimizer_config: dict,
     progress=None,
+    warm_inits: dict | None = None,
 ) -> dict:
     """按姿态分组 K 折交叉验证(D-01/D-02,EVA-01 实验侧)。
 
@@ -382,6 +451,9 @@ def cv_pose_grouped(
     签名说明:取整个 CalibrationConfig(要 cfg.seed 派生折分配随机性、
     cfg.evaluate 读折数/轮数/模型/并行上限、cfg.calibrate.scipy 读精化
     参数)——照 04-01/04-02 既定体例(要种子的实验函数取全量配置)。
+    warm_inits(2026-10-21 提速裁定):{模型: 全量精化解},给了就温启动
+    (每折从全量解裁剪的初值出发只跑 scipy 精化,冷/温终点等效性已按
+    多起点同款容差验证);None = 冷启动(OpenCV 初值,行为不变)。
 
     返回 {"schema": "cv-v1", "models": {mX: {"fold_heldout", "fold_train",
     "mean_heldout_px", "mean_train_px", "n_failed_folds", "loss_used",
@@ -399,6 +471,7 @@ def cv_pose_grouped(
     assignment = assign_cv_folds(poses, cfg)
     models = tuple(eval_cfg.models)
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
+    warm_for = {} if warm_inits is None else warm_inits
 
     # 任务小元组(姿态集合 + 共享观测集,大数组由并行框架内存映射,Pitfall 7)
     tasks = [
@@ -413,6 +486,7 @@ def cv_pose_grouped(
             kernels[m][0],
             kernels[m][1],
             cfg.cv2_threads,
+            warm_for.get(m),
         )
         for m in models
         for e in assignment
@@ -543,13 +617,13 @@ def _lopo_worker(task: tuple) -> dict:
     唯一考题姿态只估位姿评分(外参不训练)。异常兜底与 CV 折 worker 同体例:
     失败转契约占行,异常到不了生成器。
     """
-    (model_id, val_pose, train_poses, obs, scipy_cfg, loss, f_scale, cv2_threads) = task
+    (model_id, val_pose, train_poses, obs, scipy_cfg, loss, f_scale, cv2_threads, warm_init) = task
     # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
     cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
         train_obs, val_obs = split_by_pose_ids(obs, train_poses)
-        calibrate_fn = make_calibrate_fn(model, scipy_cfg, loss, f_scale)
+        calibrate_fn = make_calibrate_fn(model, scipy_cfg, loss, f_scale, warm_init=warm_init)
         result = calibrate_fn(train_obs)
         n_train_views = len(train_obs.image_ids)
         if not result.converged or result.rms_overall is None:
@@ -593,6 +667,8 @@ def lopo(
     cfg: CalibrationConfig,
     optimizer_config: dict,
     progress=None,
+    models: Sequence[str] | None = None,
+    warm_inits: dict | None = None,
 ) -> dict:
     """留一姿态实验(D-08,EVA-05 实验侧):每次留 1 个姿态当考题。
 
@@ -603,6 +679,10 @@ def lopo(
 
     签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped——要
     cfg.evaluate 的开关/阈值/模型/并行上限与 cfg.calibrate.scipy)。
+    models 参数(2026-10-21 提速裁定):只对指定模型跑(命令行层传
+    "候选模型"——选型选中的,没选出时取交叉验证泛化最优者)。留一姿态
+    是"找问题姿态"的诊断,不参与三判据选型,4 个模型全跑属重复证据;
+    不传则按配置全模型跑(保持旧行为,小样测试用)。
 
     返回 {"schema": "lopo-v1", "models": {mX: {"per_pose", "mean_lopo_px",
     "mad_z", "outlier_poses", "n_failed_poses", "loss_used", "rows"}},
@@ -622,8 +702,19 @@ def lopo(
 
     poses = unique_poses(obs)
     assignment = leave_one_pose_out(poses)
-    models = tuple(eval_cfg.models)
+    if models is None:
+        models = tuple(eval_cfg.models)
+    else:
+        models = tuple(models)
+        unknown = [m for m in models if m not in eval_cfg.models]
+        if not models or unknown:
+            raise ValueError(
+                f"lopo 的 models 参数必须是 evaluate.models={list(eval_cfg.models)} "
+                f"的非空子集,拿到的是 {list(models)}"
+                f"(不认识的:{unknown})。请检查候选模型的推定逻辑。"
+            )
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
+    warm_for = {} if warm_inits is None else warm_inits
 
     tasks = [
         (
@@ -635,6 +726,7 @@ def lopo(
             kernels[m][0],
             kernels[m][1],
             cfg.cv2_threads,
+            warm_for.get(m),
         )
         for m in models
         for e in assignment
@@ -1208,13 +1300,13 @@ def _bootstrap_worker(task: tuple) -> dict:
     初始化 → scipy 精化)。异常兜底同体例:失败转契约占行,异常到不了
     生成器(串行回退不死任务流,体例照 optimizer.py 的既定教训)。
     """
-    (model_id, rep, picked_poses, obs, scipy_cfg, loss, f_scale, cv2_threads) = task
+    (model_id, rep, picked_poses, obs, scipy_cfg, loss, f_scale, cv2_threads, warm_init) = task
     # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
     cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
         train_obs = obs_rows(obs, pose_row_mask(obs, set(picked_poses)))
-        result = make_calibrate_fn(model, scipy_cfg, loss, f_scale)(train_obs)
+        result = make_calibrate_fn(model, scipy_cfg, loss, f_scale, warm_init=warm_init)(train_obs)
         if not result.converged or result.rms_overall is None:
             return _bootstrap_record(model_id, rep, failure_note=result.failure_note)
         params = {name: float(result.params[name]) for name in model.param_names}
@@ -1240,6 +1332,7 @@ def bootstrap_pose(
     cfg: CalibrationConfig,
     optimizer_config: dict,
     progress=None,
+    warm_inits: dict | None = None,
 ) -> dict:
     """bootstrap 重采样实验(D-04,EVA-04 实验侧):按姿态有放回重抽一批
     姿态重新标定,重复 cfg.evaluate.bootstrap_n 次。
@@ -1257,6 +1350,9 @@ def bootstrap_pose(
 
     签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped——要
     cfg.evaluate 的重采样次数/模型/并行上限与 cfg.calibrate.scipy、cfg.seed)。
+    warm_inits(2026-10-21 提速裁定):{模型: 全量精化解},给了就温启动
+    (每次重采样从全量解裁剪的初值出发只跑 scipy 精化);None = 冷启动
+    (OpenCV 初值,行为不变)。
 
     返回 {"schema": "bootstrap-v1", "models": {mX: {"param_std", "param_ci",
     "var_bootstrap", "var_slice", "pose_sampling_var", "var_slice_note",
@@ -1276,6 +1372,7 @@ def bootstrap_pose(
     assignment = bootstrap_resample(poses, cfg)  # 一批分配,全部模型共用(D-04)
     models = tuple(eval_cfg.models)
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
+    warm_for = {} if warm_inits is None else warm_inits
 
     tasks = [
         (
@@ -1287,6 +1384,7 @@ def bootstrap_pose(
             kernels[m][0],
             kernels[m][1],
             cfg.cv2_threads,
+            warm_for.get(m),
         )
         for e in assignment
         for m in models

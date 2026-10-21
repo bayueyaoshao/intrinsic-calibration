@@ -547,9 +547,10 @@ def test_evaluate_repo_yaml_values():
     ev = load_calibration(REAL_CALIB).evaluate
     assert ev.models == ("m1", "m2", "m3", "m4")
     assert ev.optimizer_losses == ("linear", "soft_l1", "huber", "cauchy")
-    assert (ev.cv_n_folds, ev.cv_n_rounds, ev.bootstrap_n) == (5, 5, 200)
+    assert (ev.cv_n_folds, ev.cv_n_rounds, ev.bootstrap_n) == (5, 5, 100)
     assert ev.slice_enabled is True and ev.lopo_enabled is True
-    assert ev.evaluate_max_workers == 8
+    assert ev.evaluate_max_workers == 12
+    assert ev.warm_start_experiments is False
     assert ev.tie_band_px == pytest.approx(0.005)
     assert ev.tie_band_rel == pytest.approx(0.02)
     assert ev.bic_enabled is True and ev.bic_n_poses == 80

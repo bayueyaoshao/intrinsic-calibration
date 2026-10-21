@@ -341,6 +341,12 @@ class EvaluateConfig:
     # 参数漂移糊弄过去)
     multistart_rms_tol_px: float = 0.001
     multistart_param_tol_px: float = 0.1
+    # 温启动开关:交叉验证 / bootstrap / 留一姿态从全量精化解出发只跑
+    # scipy 精化,跳过从零的 OpenCV 求解。默认 false:2026-10-21 真实数据
+    # 验证否决(4 模型 × 16 子集)——RMS 差全部 < 0.001 px,内参位移当量
+    # 中位 0.029 px、最大 0.224 px(按 0.1 px 双容差 6/62 对超线),且耗时
+    # 反高于冷启动(中位 404 秒 vs 332 秒)。依据详见 docs/findings.md 结论 3
+    warm_start_experiments: bool = False
 
 
 @dataclass(frozen=True)
@@ -899,7 +905,9 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
     # 三个布尔键:先判 bool 再拒其余(整数 1/0 是 yaml 手写时最常见的笔误)
     bools = (("slice_enabled", cfg.slice_enabled, "是否做重复张分组实验"),
              ("lopo_enabled", cfg.lopo_enabled, "是否做留一姿态实验"),
-             ("bic_enabled", cfg.bic_enabled, "统计平局时是否用 BIC 裁决"))
+             ("bic_enabled", cfg.bic_enabled, "统计平局时是否用 BIC 裁决"),
+             ("warm_start_experiments", cfg.warm_start_experiments,
+              "四类实验是否从全量精化解温启动"))
     for name, default, purpose in bools:
         value = section.get(name, default)
         if not isinstance(value, bool):
@@ -933,6 +941,8 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
                                                 cfg.multistart_rms_tol_px)),
         multistart_param_tol_px=float(section.get("multistart_param_tol_px",
                                                   cfg.multistart_param_tol_px)),
+        warm_start_experiments=section.get("warm_start_experiments",
+                                           cfg.warm_start_experiments),
     )
 
 

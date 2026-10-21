@@ -21,10 +21,11 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed, parallel_config
 
 
 class TaskFailed:
@@ -57,9 +58,12 @@ def _guarded_worker(worker: Callable[[Any], Any], task: Any) -> Any:
         return TaskFailed(e)
 
 
-def run_parallel(tasks: Iterable[Any], worker: Callable[[Any], Any],
-                 max_workers: int,
-                 progress: Callable[[dict], None] | None = None) -> Iterator[Any]:
+def run_parallel(
+    tasks: Iterable[Any],
+    worker: Callable[[Any], Any],
+    max_workers: int,
+    progress: Callable[[dict], None] | None = None,
+) -> Iterator[Any]:
     """把 tasks 逐个交给 worker 执行,按完成顺序逐个产出结果(生成器)。
 
     参数:
@@ -87,10 +91,19 @@ def run_parallel(tasks: Iterable[Any], worker: Callable[[Any], Any],
         return
 
     # 并行:loky 常驻工作进程 + 生成器逐个消费——结果一到就交出去,
-    # 进度跟着动,不必等整批算完(return_as="generator",joblib >= 1.3)
-    results = Parallel(n_jobs=max_workers, return_as="generator")(
-        delayed(_guarded_worker)(worker, task) for task in task_list)
-    for done, result in enumerate(results, start=1):
-        yield result
-        if progress:
-            progress({"done": done, "total": total})
+    # 进度跟着动,不必等整批算完(return_as="generator",joblib >= 1.3)。
+    # 每个工作进程里的线性代数库线程数 = 核数 ÷ 进程数(至少 1):多进程
+    # 再叠满核线程会互相抢内存带宽,8 路并发的实测吞吐会从 8 倍掉到 2 倍
+    # 出头(2026-10-21 真实数据压测:640 视图求解单进程 157 秒,8 进程
+    # 并发每个拖到 545 秒)。写死这一层,不依赖 joblib 的默认行为;
+    # backend 显式给 loky——inner_max_num_threads 只对显式后端生效,
+    # 而本项目的进程并行本就只用 loky
+    threads_each = max(1, (os.cpu_count() or 1) // max(1, max_workers))
+    with parallel_config(backend="loky", inner_max_num_threads=threads_each):
+        results = Parallel(n_jobs=max_workers, return_as="generator")(
+            delayed(_guarded_worker)(worker, task) for task in task_list
+        )
+        for done, result in enumerate(results, start=1):
+            yield result
+            if progress:
+                progress({"done": done, "total": total})

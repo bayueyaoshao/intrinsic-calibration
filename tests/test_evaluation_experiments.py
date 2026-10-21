@@ -345,6 +345,120 @@ def test_px_dispersion_pixel_equivalence():
 
 
 # ---------------------------------------------------------------------------
+# 温启动(2026-10-21 提速裁定):子集裁剪 / 绕开 OpenCV / 终点等效
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def warm_setup(cv_setup):
+    """温启动地基:全量小样各解一遍拿"全量精化解"当温启动初值。
+
+    每个模型一份(生产里 load_warm_inits 就是按模型各读各的 <模型>__scipy
+    产物;m1 的解喂给 m2 等于拿错模型的参数当起点,不是合法用法)。"""
+    warm = {}
+    for mid in ("m1", "m2"):
+        model = create_model(mid)
+        full = make_calibrate_fn(model, cv_setup["cfg"].calibrate.scipy, "linear")(cv_setup["obs"])
+        assert full.converged, f"合成全量解应收敛({mid}):{full.failure_note}"
+        warm[mid] = full
+    return {**cv_setup, "warm": warm["m1"], "warm_all": warm, "model": create_model("m1")}
+
+
+def test_subset_warm_init_aligns_rows_and_rejects_strangers(warm_setup):
+    """子集裁剪:行序按照片编号一一对应;对不上血缘的照片当场中文报错。"""
+    s = warm_setup
+    train_obs = obs_rows(s["obs"], pose_row_mask(s["obs"], ["pose_00", "pose_01"]))
+    sub = experiments_mod._subset_warm_init(s["warm"], train_obs)
+    assert sub.image_ids == train_obs.image_ids
+    assert sub.n_views == len(train_obs.image_ids)
+    assert sub.init_from.startswith("warm:")
+    # 行序核对:子集第 k 行 = 全量解里同名照片那一行(逐位一致)
+    index = {iid: i for i, iid in enumerate(s["warm"].image_ids)}
+    for k, iid in enumerate(train_obs.image_ids):
+        assert np.array_equal(sub.rvecs[k], s["warm"].rvecs[index[iid]])
+        assert np.array_equal(sub.tvecs[k], s["warm"].tvecs[index[iid]])
+    # 血缘外照片:中文报错点名,绝不静默错位
+    stranger = replace(train_obs, image_ids=("ghost_99", *train_obs.image_ids[1:]))
+    with pytest.raises(ValueError) as exc_info:
+        experiments_mod._subset_warm_init(s["warm"], stranger)
+    assert "温启动" in str(exc_info.value)
+
+
+def test_make_calibrate_fn_warm_skips_opencv_and_matches_cold(warm_setup, monkeypatch):
+    """温启动路径:不碰 OpenCV(碰了就说明没绕开 157 秒的大头),终点与
+    冷启动一致(同一目标函数收敛到同一最优,合成小样上应到 1e-6 px 级)。"""
+    s = warm_setup
+    train_obs = obs_rows(s["obs"], pose_row_mask(s["obs"], ["pose_00", "pose_01", "pose_02"]))
+    monkeypatch.setattr(
+        experiments_mod,
+        "solve_with_opencv",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("温启动路径不应调用 OpenCV")),
+    )
+    warm_fn = make_calibrate_fn(s["model"], s["cfg"].calibrate.scipy, "linear", warm_init=s["warm"])
+    hot = warm_fn(train_obs)
+    monkeypatch.undo()  # 冷启动对照组本来就要走 OpenCV,补丁只管温启动这一次
+    assert hot.converged, f"温启动应收敛:{hot.failure_note}"
+    cold = make_calibrate_fn(s["model"], s["cfg"].calibrate.scipy, "linear")(train_obs)
+    assert cold.converged
+    disp = _px_dispersion(
+        [
+            np.array([cold.params[n] for n in s["model"].param_names]),
+            np.array([hot.params[n] for n in s["model"].param_names]),
+        ],
+        s["model"],
+        train_obs.object_points,
+        cold.rvecs[0],
+        cold.tvecs[0],
+    )
+    assert disp < 1e-6, f"温/冷终点内参位移当量 {disp:.3e} px,超出合成小样预期"
+    assert abs(hot.rms_overall - cold.rms_overall) < 1e-9
+
+
+def test_cv_pose_grouped_warm_inits_end_to_end(warm_setup):
+    """cv 消费温启动:结构契约不变、结果有限值、同配置重跑逐位一致。"""
+    s = warm_setup
+    warm_inits = s["warm_all"]
+    rep1 = experiments_mod.cv_pose_grouped(
+        s["obs"], _board_of(s), s["cfg"], s["optimizer_config"], warm_inits=warm_inits
+    )
+    rep2 = experiments_mod.cv_pose_grouped(
+        s["obs"], _board_of(s), s["cfg"], s["optimizer_config"], warm_inits=warm_inits
+    )
+    _assert_reports_equal(rep1, rep2)
+    for m in ("m1", "m2"):
+        assert rep1["models"][m]["mean_heldout_px"] is not None
+        assert np.isfinite(rep1["models"][m]["mean_heldout_px"])
+
+
+def _board_of(s):
+    return BoardSpec(cols=11, rows=8, square_size_mm=20.0)
+
+
+def test_lopo_models_subset_and_validation(warm_setup):
+    """lopo 的 models 参数:只跑指定模型(提速裁定);名单外模型中文报错。"""
+    s = warm_setup
+    rep = experiments_mod.lopo(
+        s["obs"], _board_of(s), s["cfg"], s["optimizer_config"], models=["m1"]
+    )
+    assert list(rep["models"].keys()) == ["m1"]
+    assert rep["meta"]["n_models"] == 1
+    assert rep["meta"]["n_solves"] == 6  # 6 姿态 × 1 模型
+    with pytest.raises(ValueError) as exc_info:
+        experiments_mod.lopo(s["obs"], _board_of(s), s["cfg"], s["optimizer_config"], models=["m9"])
+    assert "evaluate.models" in str(exc_info.value)
+
+
+def test_load_warm_inits_missing_product_chinese_error(tmp_path):
+    """加载器:__scipy 产物缺失当场中文报错(不悄悄退回冷启动)。"""
+    from calib.evaluation.experiments import load_warm_inits
+
+    with pytest.raises(ValueError) as exc_info:
+        load_warm_inits(tmp_path, ["m1"])
+    message = str(exc_info.value)
+    assert "温启动" in message and "calib calibrate" in message
+
+
+# ---------------------------------------------------------------------------
 # Task 2:lopo(行为 1–2)+ slices_by_index(行为 3–5)
 # ---------------------------------------------------------------------------
 

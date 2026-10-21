@@ -32,6 +32,7 @@ from calib.evaluation.artifacts import (
 from calib.evaluation.experiments import (
     bootstrap_pose,
     cv_pose_grouped,
+    load_warm_inits,
     lopo,
     pose_sampling_variance,
     run_delivery,
@@ -1217,6 +1218,22 @@ def _evaluate_json_section(section: dict | None) -> dict | None:
     return {k: v for k, v in section.items() if k not in excluded}
 
 
+def _lopo_candidate_model(cv: dict | None, selection: dict | None,
+                          models: tuple[str, ...]) -> list[str]:
+    """留一姿态只考一个模型(2026-10-21 提速裁定,80 求解 → 20 求解):
+    优先选型结论里胜出的;选型段缺席时退而求 CV 泛化误差最小的;再不行
+    用模型名单第一个。lopo 是诊断实验,不进判行表,单模型不影响选型。"""
+    if selection and selection.get("selected"):
+        return [str(selection["selected"])]
+    if cv and cv.get("models"):
+        scored = [(float(block["mean_heldout_px"]), m)
+                  for m, block in cv["models"].items()
+                  if isinstance(block, dict) and block.get("mean_heldout_px") is not None]
+        if scored:
+            return [min(scored)[1]]
+    return [models[0]]
+
+
 @app.command(help="⑥ 防作弊考试:用没见过的新题考试、换着分组复测、逐一抽查,用数据挑出最合适的相机模型")
 def evaluate() -> None:
     """流水线第⑥步:防作弊考试一条龙(判行表 + 选型结论 + test 并排成绩)。
@@ -1302,13 +1319,24 @@ def evaluate() -> None:
         round_id=round_id,
     )
 
+    # 温启动原料(2026-10-21 提速裁定):交叉验证 / bootstrap / 留一姿态
+    # 的每次训练标定不再从零跑 OpenCV(640 视图实测 157 秒,占单次求解
+    # 99%),改从本轮标定的 <模型>__scipy 全量精化解出发只做 scipy 精化
+    # (秒级);配置关掉开关则一律冷启动(开关与依据见 calibration.yaml)
+    if eval_cfg.warm_start_experiments:
+        warm_inits = load_warm_inits(calib_run, models)
+        typer.echo(f"  温启动:四类实验的训练标定从 {calib_run.name} 的全量精化解出发"
+                   f"(跳过逐次的 OpenCV 从零求解)")
+    else:
+        warm_inits = None
+
     typer.echo(f"开始防作弊考试:{len(models)} 个模型 × (优化器 16 组合 + 多起点"
                f"一致性 + 交叉验证 100 折 + bootstrap {eval_cfg.bootstrap_n} 次 + "
-               f"重复张分组 + 留一姿态 80 题)+ 全量重训 × {len(models)} + "
-               f"test 独立照片逐张评分……")
+               f"重复张分组)+ 全量重训 × {len(models)} + 留一姿态(只考一个模型)"
+               f" + test 独立照片逐张评分……")
     typer.echo(f"  上游:corners {corners_run.name} / noise {noise_run.name} / "
                f"calibration {calib_run.name} / fisher {fisher_run.name}"
-               f"(血缘已登记;合计千余次完整求解,小时级,请稍等)")
+               f"(血缘已登记;合计千余次求解,请稍等)")
 
     def _count_progress(label: str, every: int):
         """按次数播报的进度回调(每 every 条播一行,收尾必播)。"""
@@ -1371,16 +1399,13 @@ def evaluate() -> None:
 
         cv = _stage("交叉验证", lambda: cv_pose_grouped(
             obs_train, board, cfg, optimizer_config,
-            progress=_count_progress("交叉验证", 10)))
+            progress=_count_progress("交叉验证", 10), warm_inits=warm_inits))
         boot = _stage("bootstrap 重采样", lambda: bootstrap_pose(
             obs_train, board, cfg, optimizer_config,
-            progress=_count_progress("bootstrap 重采样", 50)))
+            progress=_count_progress("bootstrap 重采样", 50), warm_inits=warm_inits))
         slices = _stage("重复张分组", lambda: slices_by_index(
             obs_train, board, cfg, optimizer_config, noise_report,
             progress=_count_progress("重复张分组", 8)))
-        lopo_rep = _stage("留一姿态", lambda: lopo(
-            obs_train, board, cfg, optimizer_config,
-            progress=_count_progress("留一姿态", 20)))
 
         # ---- ③ 全量重训交付 + test 逐张并排评分(D-16;CV 只管选型,
         #         交付一律全量重训——PROJECT.md 算法惯例)----
@@ -1479,6 +1504,15 @@ def evaluate() -> None:
                 typer.echo(f"  判行表与选型未组装成(选型段记 None,实验数据照常"
                            f"落盘):{type(e).__name__}——{e}")
                 selection = None
+
+        # ---- ④b 留一姿态(2026-10-21 提速裁定挪到选型之后:只考一个
+        #         模型——选型胜出的优先,选型缺席退而求 CV 泛化最优。
+        #         lopo 是诊断实验不进判行表,单模型不影响任何结论)----
+        lopo_rep = _stage("留一姿态", lambda: lopo(
+            obs_train, board, cfg, optimizer_config,
+            progress=_count_progress("留一姿态", 5),
+            models=_lopo_candidate_model(cv, selection, models),
+            warm_inits=warm_inits))
     except Exception as e:  # 故意宽接:失败契约(T-04-06-04),失败也落盘
         note = f"评估阶段中途失败:{type(e).__name__}——{e}"
         save_evaluate_report(out_dir, make_failure_evaluate(lineage, note), lineage)
@@ -1509,6 +1543,7 @@ def evaluate() -> None:
             "calibration_run": calib_run.name,
             "fisher_run": fisher_run.name,
             "partial_sections": partial,
+            "warm_start_experiments": bool(warm_inits),
             "duration_s": round((datetime.now(UTC) - started).total_seconds(), 1),
         },
         "failure_note": None,
