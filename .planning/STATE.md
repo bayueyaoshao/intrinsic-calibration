@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-19T13:45:00Z"
+last_updated: "2026-10-21T09:30:00Z"
 progress:
   total_phases: 6
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 23
-  completed_plans: 22
-  percent: 96
+  completed_plans: 23
+  percent: 100
 ---
 
 # STATE: intrinsic-calibration
@@ -17,18 +17,18 @@ progress:
 ## Project Reference
 
 - **Core Value:** 对给定的一批标定图像,产出可论证为当前数据下最优的内参(held-out 泛化误差最小 + 参数稳定 + 误差逼近 CRLB),并量化"距离数据极限还有多远"
-- **Current Focus:** Phase 04 — evaluation-model-selection
+- **Current Focus:** Phase 4 收官完成,待启动 Phase 5(误差预算 + 诊断 + 角点寻优)
 - **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md
 
 ## Current Position
 
-Phase: 04 (evaluation-model-selection) — EXECUTING
-Plan: 6 of 6
+Phase: 04 (evaluation-model-selection) — COMPLETE(2026-10-21)
+Plan: 6 of 6 全部完成
 
 - **Phase:** 4
 - **Plan:** 6 of 6
-- **Status:** Ready to execute
-- **Progress:** [█████████▓] 96%
+- **Status:** Phase complete
+- **Progress:** [██████████] 100%(全项目 23 计划;Phase 5/6 待规划)
 - **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
   产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
 
@@ -36,8 +36,8 @@ Plan: 6 of 6
 
 | Metric | Value |
 |--------|-------|
-| Phases complete | 1/6 |
-| Requirements shipped | 5/32 |
+| Phases complete | 4/6 |
+| Requirements shipped | 17/32 |
 | Plans this phase | 6(planned) |
 | Blocked items | 0 |
 | Phase 04 P01 | 12min | 2 tasks | 9 files |
@@ -45,6 +45,7 @@ Plan: 6 of 6
 | Phase 4 P02 | 3h43min | 4 tasks | 4 files |
 | Phase 4 P03 | 18min | 2 tasks | 2 files |
 | Phase 4 P05 | 29min | 3 tasks | 5 files |
+| Phase 4 P06 | 跨 2 日 | CLI 闭环+集成对账+提速重构+选型重构 | 3 files(+docs) |
 
 ## Accumulated Context
 
@@ -81,7 +82,16 @@ Plan: 6 of 6
 
 ## Session Continuity
 
-- **Last action:** 04-05 执行完成(2026-10-19,29min,d3b3844/6a2048f/
+- **Last action:** 04-06 执行完成 + 阶段四收口(2026-10-21)——`calib evaluate`
+  命令闭环(5ac256f/05fc97f)+ 真实数据全链对账集成测试(d47dcf2)+ 执行期
+  三轮提速与重构:并行修复与砍冗余(cd5a066)、温启动真实数据否决(默认关
+  闭)、test 整体 RMS 简单优先选型 + quick/full 两档(74935b8)+ findings
+  结论 1/2/5 落账(2c1d4b5/8428d83);六条需求 Shipped,累计 17/32。
+  选型定案 m2(test 0.1598 px,hold-out 0.0904 px 稳定,三判据第二意见
+  不翻案)。遗留一项会话外对账:匹配口径 CRLB 重跑(findings 结论 4 待办,
+  quick 重跑落地后销账)
+
+- **Previous action:** 04-05 执行完成(2026-10-19,29min,d3b3844/6a2048f/
   3097e41/914939b/42a5fca)— 交付与契约层:run_delivery 全量重训 × 全部
   参选模型(统一推荐配置 D-13)+ test 独立照片全模型并排逐张评分
   (solve_pose_only 零新数学,逐张逐模型行全存 D-16)+ BIC 在编排内算好
@@ -95,10 +105,9 @@ Plan: 6 of 6
   同种子重跑逐位一致断言;14 例新测试,全套 460 passed;EVA-02/SOL-02
   标记完成
 
-- **Next action:** 阶段四收官(Plan 6:04-06 `calib evaluate` 命令闭环 +
-  真实数据全链对账(成功标准 1–5)+ 人工核查判行表 + 需求状态收口;
-  Wave 5,含 checkpoint——按全链冒烟的调用序列接取数与中文播报,逐图
-  独立 try/except)
+- **Next action:** ① quick 档 evaluate 重跑落地后对账(核 selection.method/
+  walk/agreement 新架构 + slices CRLB 匹配口径栏 → findings 结论 4 销账、
+  结论 1 精确倍数补账 + 集成测试跑一轮);② /gsd-plan-phase 5 启动阶段五
 
 - **Notes for next session:** 决策在 04-CONTEXT.md(D-01~D-16);训练/交付
   一律全 640 视图(聚合策略裁决定案);上游取数 = sb 角点 npz + noise.json
@@ -121,4 +130,12 @@ Plan: 6 of 6
 - [Phase 04]: 多起点一致性实测——m1 判 inconsistent(RMS 极差 2.8e-07 px 而参数位移 0.205 px 超容差,可辨识性发现),m2/m3/m4 consistent;run_multistart 取 CalibrationConfig(要 cfg.seed),worker 层异常兜底转 make_failure 防生成器断流
 - [Phase 4]: 选型统计判定核心落地——paired_comparison 三分支(置信区间对等价带,不看 p 值)/bic_full_fit(n=80 锁姿态口径)/crlb_alert_check(卡方双线 df 自适应,硬告警不静默)/build_verdict_table(schema evaluate-verdict-v1 接口先行)/select_model(全 PASS 才当选、等价取简、平局 BIC 裁决、无 BIC 退回取简不静默) — D-09/D-10/D-11/D-12 + EVA-02/EVA-05 判定核心闭环;04-04~04-06 按判行表输入形状供给数据
 - [Phase 4]: 四类实验编排落地——experiments.py 四函数统一签名 fn(obs, board, cfg, optimizer_config)(全量配置体例,要 seed),同一条"OpenCV 初始化 → scipy 精化(推荐配置)"路径,验证侧一律只估位姿评分;确定性红线进程级补全:loky 并行子进程是全新进程,cv2 线程锁须随任务元组进 worker 再上一次,否则并行与串行 1e-9 级末位漂移;分组实验 CRLB 每组新算(组自身收敛解为线性化点 + temporal σ),poses80 聚合口径在 experiments.py 源码级禁入 — D-01/D-02/D-04/D-05/D-06/D-07/D-08/D-13 + EVA-01/03/04/05 实验侧闭环
+- [Phase 4 收口期]: 温启动被真实数据否决(62/64 对 RMS 差 <0.001 px 但位移超容差 6 对、
+  温启动反而慢 404s vs 332s;根因 = 数据在 Fisher 退化方向解不唯一),默认
+  warm_start_experiments: false——"秒级精化"只在合成小样成立
+- [Phase 4 收口期]: 选型规则重构——test 整体 RMS 简单优先(select_by_test_rms,
+  复杂度逐档走查提升 ≥ selection_improve_min=0.10 才升级)升为主判据,旧三判据
+  降为第二意见(agreement 打架当场播报);test 集参与选型带轻微乐观偏差,由
+  hold-out 第二意见对冲;quick(默认,四实验只考当选模型,cv 3×3、bootstrap 50)
+  /full(全模型全量)两档,交付一律全模型
 - [Phase 4]: 交付与契约层落地——run_delivery 同签名体例(obs_train, obs_test, board, cfg, optimizer_config),全量重训 + test 逐张并排评分,D-16;BIC 在编排内用 bic_full_fit 算好(RSS 取自全量解,k = 内参数 + 6 × 视图数,n = bic_n_poses),select_model 只消费行内现成值不写第二份数学(D-10);evaluate.json 13 键契约 + 明细 npz 旁车(嵌套明细拍平成 模型__数组名,标量成 0 维数组),json 段只留汇总与 detail_npz 引用(汇总只是索引,D-13);组装顺序防线:明细键带数组但对应段非字典当场中文报错;判行表三图库函数只管画图,图失败不拦主产物;全链冒烟即 04-06 CLI 的调用序列样板 — EVA-02/SOL-02 收口

@@ -33,15 +33,15 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 求解 (SOL)
 
 - [x] **SOL-01**: 求解器统一接口 + 双后端(OpenCV 初始化 → scipy least_squares 精化,含鲁棒核),后端可互换、结果同构(CalibrationResult)
-- [x] **SOL-02**: 多优化器/鲁棒核/初始化策略对比实验,验证是否按预期提升精度
+- [x] **SOL-02**: 多优化器/鲁棒核/初始化策略对比实验,验证是否按预期提升精度(04-02 16 组合网格 + 推荐配置 + 多起点双容差一致性;04-06 判行表旁证,真实数据定案四模型均 linear 核)
 
 ### 评估 (EVAL)
 
-- [x] **EVA-01**: 按姿态切分训练/验证(同一姿态的所有照片只进同一边,结构性防数据泄漏)+ K 折交叉验证
-- [x] **EVA-02**: 模型选择只看 held-out 泛化误差(辅以 BIC、参数可辨识性);选定后全量数据重训出最终内参
-- [ ] **EVA-03**: 重复张分组实验——每姿态各取第 i 张连拍组成一组(组数取全体姿态的最少重复张数),各组独立完整标定后对比内参差异,得到纯噪声传播的经验参数不确定度,并用于 CRLB 理论预测的实证校验
-- [ ] **EVA-04**: bootstrap ×N 参数稳定性(与重复张分组实验对比,分离"噪声"与"位姿抽样"两种因素)
-- [x] **EVA-05**: 留一姿态 ×N——问题姿态定位与解的脆弱性检查
+- [x] **EVA-01**: 按姿态切分训练/验证(同一姿态的所有照片只进同一边,结构性防数据泄漏)+ K 折交叉验证(04-01 切分纯函数 + 零重叠硬门禁 + 折分配表可落盘复查;04-04 cv_pose_grouped 多轮多折编排)
+- [x] **EVA-02**: 模型选择只看 held-out 泛化误差(辅以 BIC、参数可辨识性);选定后全量数据重训出最终内参(04-03 三判据判行表与选型统计;04-05 run_delivery 全量重训交付 + test 逐张评分;04-06 `calib evaluate` 命令闭环 + test 整体 RMS 简单优先选型(复杂度提升 ≥10% 才升级)为主判据、三判据降为第二意见)
+- [x] **EVA-03**: 重复张分组实验——每姿态各取第 i 张连拍组成一组(组数取全体姿态的最少重复张数),各组独立完整标定后对比内参差异,得到纯噪声传播的经验参数不确定度,并用于 CRLB 理论预测的实证校验(04-04 slices_by_index 分组实验 + 同口径 CRLB 硬告警;04-06 真实数据 8 组对账落账 findings 结论 1/5)
+- [x] **EVA-04**: bootstrap ×N 参数稳定性(与重复张分组实验对比,分离"噪声"与"位姿抽样"两种因素)(04-04 bootstrap_pose 重采样 + 来源分离;04-05 pose_sampling_variance 组装回填与离散对比图)
+- [x] **EVA-05**: 留一姿态 ×N——问题姿态定位与解的脆弱性检查(04-03 MAD 离群判据;04-04 lopo 逐姿态表 + 红三角点名图)
 
 ### 分析 (ANA)
 
@@ -118,12 +118,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | NOI-01 | Phase 3 | Shipped (Phase 3)(03-03 temporal_noise 时域实测 + 单帧退化 + 抖动分离;真实数据 80/80 姿态来源标注,noise.json + 全保真明细落盘) |
 | NOI-02 | Phase 3 | Shipped (Phase 3)(03-01 受控注入实验 + 经验传递曲线;03-03 calib noise 命令闭环与真实数据首轮落盘) |
 | NOI-03 | Phase 3 | Shipped (Phase 3)(03-02 FIM/Schur/CRLB 数学核心;03-04 stdDev 交叉验证协议;03-05 16 份 CRLB 编排与 calib fisher 闭环;03-06 全链冒烟 + 人工核查收口) |
-| EVA-01 | Phase 4 | Complete |
-| EVA-02 | Phase 4 | Complete |
-| EVA-03 | Phase 4 | Pending |
-| EVA-04 | Phase 4 | Pending |
-| EVA-05 | Phase 4 | Complete |
-| SOL-02 | Phase 4 | Complete |
+| EVA-01 | Phase 4 | Shipped (Phase 4)(04-01 姿态级切分纯函数 + 零重叠硬门禁;04-04 cv_pose_grouped 多轮多折) |
+| EVA-02 | Phase 4 | Shipped (Phase 4)(04-03 判行表与选型统计;04-05 run_delivery 全量重训交付;04-06 calib evaluate 命令闭环 + test RMS 简单优先选型) |
+| EVA-03 | Phase 4 | Shipped (Phase 4)(04-04 slices_by_index 分组实验 + 同口径 CRLB 硬告警;04-06 真实数据 8 组对账) |
+| EVA-04 | Phase 4 | Shipped (Phase 4)(04-04 bootstrap_pose + 来源分离;04-05 pose_sampling_variance 组装与离散对比图) |
+| EVA-05 | Phase 4 | Shipped (Phase 4)(04-03 MAD 离群判据;04-04 lopo 逐姿态表 + 点名图) |
+| SOL-02 | Phase 4 | Shipped (Phase 4)(04-02 16 组合网格 + 推荐配置 + 多起点一致性;真实数据定案四模型均 linear 核) |
 | ANA-01 | Phase 5 | Pending |
 | ANA-02 | Phase 5 | Pending |
 | ANA-03 | Phase 5 | Pending |
@@ -148,4 +148,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-16*
-*Last updated: 2026-10-18 after Phase 3 execution complete (NOI-01~03 shipped,累计 11/32)*
+*Last updated: 2026-10-21 after Phase 4 execution complete (EVA-01~05 + SOL-02 shipped,累计 17/32)*
