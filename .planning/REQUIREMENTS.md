@@ -46,7 +46,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 分析 (ANA)
 
 - [x] **ANA-01**: 误差预算——实际误差 vs CRLB(数据利用率);实测低于理论下界硬报错
-- [ ] **ANA-02**: 误差方向分解——按视图/图像区域/径向模式;畸变外推(角点覆盖范围之外)风险显式披露
+- [x] **ANA-02**: 误差方向分解——按视图/图像区域/径向模式;畸变外推(角点覆盖范围之外)风险显式披露
 - [ ] **ANA-03**: 验证集(test)误差在相机坐标系 X/Y/Z 三方向分量对比,哪个分量大,由投影雅可比/FIM 可观测性给出理论解释
 - [ ] **ANA-04**: 内参数敏感度排序(协方差/特征分解)+ 针对最大敏感维度的应对建议(补拍位姿/加约束等)
 
@@ -125,7 +125,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EVA-05 | Phase 4 | Shipped (Phase 4)(04-03 MAD 离群判据;04-04 lopo 逐姿态表 + 点名图) |
 | SOL-02 | Phase 4 | Shipped (Phase 4)(04-02 16 组合网格 + 推荐配置 + 多起点一致性;真实数据定案四模型均 linear 核) |
 | ANA-01 | Phase 5 | Shipped (Phase 5)(05-01 run_budget 库层:独立重算复核 + 逐参数预算行 + 实测低于下界硬报错 + k1–k3 口径声明;05-02 接 calib analyze 端到端真实数据) |
-| ANA-02 | Phase 5 | Pending |
+| ANA-02 | Phase 5 | Complete |
 | ANA-03 | Phase 5 | Pending |
 | ANA-04 | Phase 5 | Pending |
 | COR-02 | Phase 5 | Pending |
