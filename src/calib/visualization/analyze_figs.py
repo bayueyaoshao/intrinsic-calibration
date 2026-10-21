@@ -330,7 +330,7 @@ def plot_coverage_footprint(residual_section: dict | None,
         y_hi = max(float(height - 1), float(np.nanmax(pts[:, 1]))) + 0.05 * height
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_hi, y_lo)  # 图像坐标 v 朝下,倒轴照片方向才对
-        ax.set_aspect("equal", adjustable="datalim")
+        ax.set_aspect("equal", adjustable="box")  # 像素等比,不动数据范围
 
     ax.set_xlabel("u(px)")
     ax.set_ylabel("v(px)")
