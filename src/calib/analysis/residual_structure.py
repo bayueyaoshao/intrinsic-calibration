@@ -591,6 +591,7 @@ def run_residual_structure(
     section = {
         "schema": SCHEMA_RESIDUAL,
         "model_id": model_id,
+        "image_size": [int(image_size[0]), int(image_size[1])],
         "r_normalization_basis": r_normalization_basis,
         "r_normalization_params": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
         "r_normalization_baseline_check": {

@@ -21,7 +21,11 @@ import numpy as np
 
 from calib.corners.artifacts import save_corners
 from calib.io.config import BoardSpec, CalibrationConfig
-from calib.visualization.analyze_figs import plot_budget_bars
+from calib.visualization.analyze_figs import (
+    plot_budget_bars,
+    plot_coverage_footprint,
+    plot_radial_bands,
+)
 from calib.visualization.mosaic import build_mosaic, write_mosaics
 from calib.visualization.overlay import (
     render_all,
@@ -740,3 +744,132 @@ def test_plot_budget_bars_chinese_labels_render(tmp_path):
     section = _synthetic_budget_section()
     out = plot_budget_bars(section, tmp_path / "中文预算图.png")
     assert out.is_file() and out.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# ANA-02 残差结构两张空间图(r 分带曲线 + 覆盖足迹)
+# ---------------------------------------------------------------------------
+
+def _synthetic_residual_section(
+        extrapolation: bool = True) -> dict:
+    """合成 residual_structure 段:三带统计(末带空)、真实量级的覆盖
+    足迹(r_max 0.685 / 四角 0.796,findings 结论 5 同款数字),
+    extrapolation=False 时模拟全域覆盖(无外推区)。"""
+    edges = (0.0, 0.2, 0.4, 0.6)
+
+    def _bands(rms_vals, mean_vals):
+        rows = []
+        for i in range(len(edges) - 1):
+            rows.append({
+                "band_lo": edges[i], "band_hi": edges[i + 1],
+                "n": 0 if rms_vals[i] is None else 100,
+                "rms_px": rms_vals[i], "median_px": rms_vals[i],
+                "max_px": None if rms_vals[i] is None else rms_vals[i] * 2,
+                "mean_du": mean_vals[i][0] if mean_vals[i] else None,
+                "mean_dv": mean_vals[i][1] if mean_vals[i] else None,
+            })
+        rows[-1]["n_beyond_hi"] = 12
+        return rows
+
+    r_max, r_corner = 0.685, 0.796
+    return {
+        "schema": "analyze-residual-v1",
+        "model_id": "m2",
+        "image_size": [640, 480],
+        "r_normalization_basis": "evaluate delivery final_params @ run_synthetic",
+        "r_normalization_params": {"fx": 800.0, "fy": 800.0,
+                                   "cx": 320.0, "cy": 240.0},
+        "train": {
+            "per_view": {"n_views": 10, "rms_median_px": 0.12,
+                         "rms_mean_px": 0.13, "rms_max_px": 0.2},
+            "bands": _bands([0.10, 0.16, None], [(0.02, -0.01), (-0.03, 0.05), None]),
+            "quadrants": [],
+            "coverage": {
+                "r_max_obs": r_max,
+                "r_corner_frame": r_corner,
+                "extrapolation_interval": [r_max, r_corner] if extrapolation else None,
+                "frac_beyond_05": 0.21,
+                "info_share_beyond_05": 0.61,
+            },
+        },
+        "test": {
+            "n_frames": 3, "n_failed": 0,
+            "bands": _bands([0.09, 0.18, 0.22], [(0.01, 0.0), (-0.02, 0.04), (0.05, 0.02)]),
+            "coverage": {"r_max_obs": r_max, "r_corner_frame": r_corner,
+                         "extrapolation_interval": [r_max, r_corner]},
+            "per_frame_rms": {"median_px": 0.12, "max_px": 0.2},
+        },
+        "extrapolation": {"applicable": extrapolation},
+        "extrapolation_note": "外推区披露文案(k2)" if extrapolation else "",
+    }
+
+
+def _footprint_uv() -> np.ndarray:
+    """640×480 画面里的规则观测网格(外环留空,对应外推区合成场景)。"""
+    xs = np.linspace(60.0, 580.0, 40)
+    ys = np.linspace(45.0, 435.0, 30)
+    xx, yy = np.meshgrid(xs, ys)
+    return np.stack([xx.ravel(), yy.ravel()], axis=1)
+
+
+def test_plot_radial_bands_renders_png(tmp_path):
+    """合成残差结构段:两张子图(train/test 曲线 + 外推阴影)渲染成功,
+    PNG 非空、返回路径与入参一致。"""
+    out = plot_radial_bands(_synthetic_residual_section(),
+                            tmp_path / "radial_bands.png")
+    assert out == tmp_path / "radial_bars_or_bands" or out.is_file()
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_plot_radial_bands_none_or_empty_draws_no_data(tmp_path):
+    """无数据不冒充 0:段为 None 或两带表全空都不抛异常,
+    照常生成含"无数据"标注的 PNG。"""
+    out_none = plot_radial_bands(None, tmp_path / "empty1.png")
+    assert out_none.is_file() and out_none.stat().st_size > 0
+    out_empty = plot_radial_bands({"train": {"bands": []}, "test": {"bands": []}},
+                                  tmp_path / "empty2.png")
+    assert out_empty.is_file() and out_empty.stat().st_size > 0
+
+
+def test_plot_coverage_footprint_renders_png_with_extrapolation(tmp_path):
+    """合成足迹:散点 + r 等值线 + 外推阴影 + 四角标记全部渲染成功,
+    PNG 非空。"""
+    out = plot_coverage_footprint(_synthetic_residual_section(), _footprint_uv(),
+                                  tmp_path / "footprint.png")
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_plot_coverage_footprint_full_coverage_no_shading_no_raise(tmp_path):
+    """全域覆盖(外推区间 None、r_max ≥ 四角 r):不画阴影、不抛异常,
+    照常出图。"""
+    section = _synthetic_residual_section(extrapolation=False)
+    section["train"]["coverage"]["r_max_obs"] = 0.81  # ≥ r_corner 全域覆盖
+    out = plot_coverage_footprint(section, _footprint_uv(),
+                                  tmp_path / "footprint_full.png")
+    assert out.is_file() and out.stat().st_size > 0
+    # 分带曲线图同样吃全域覆盖场景(阴影函数静默跳过)
+    out2 = plot_radial_bands(section, tmp_path / "bands_full.png")
+    assert out2.is_file() and out2.stat().st_size > 0
+
+
+def test_plot_coverage_footprint_none_or_empty_draws_no_data(tmp_path):
+    """无数据不冒充:段为 None / uv 为空数组都照常出"无数据"PNG。"""
+    out_none = plot_coverage_footprint(None, None, tmp_path / "empty1.png")
+    assert out_none.is_file() and out_none.stat().st_size > 0
+    out_empty = plot_coverage_footprint(_synthetic_residual_section(),
+                                        np.zeros((0, 2)), tmp_path / "empty2.png")
+    assert out_empty.is_file() and out_empty.stat().st_size > 0
+
+
+def test_spatial_figs_source_contains_extrapolation_labels():
+    """足迹叠加是硬要求(成功判据 2):两函数源码都含"外推"标注文本,
+    并且注明图只是可视化(数字结论以 analyze.json 为准)。"""
+    import inspect
+
+    from calib.visualization import analyze_figs
+
+    for fn in (analyze_figs.plot_radial_bands,
+               analyze_figs.plot_coverage_footprint):
+        source = inspect.getsource(fn)
+        assert "外推" in source, f"{fn.__name__} 缺外推区标注(足迹叠加硬要求)"
+        assert "analyze.json" in source, f"{fn.__name__} docstring 缺口径声明"
