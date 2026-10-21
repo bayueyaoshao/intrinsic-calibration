@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-21T09:30:00Z"
+last_updated: "2026-10-21T16:06:45.533Z"
 progress:
   total_phases: 6
   completed_phases: 4
-  total_plans: 23
+  total_plans: 29
   completed_plans: 23
-  percent: 100
+  percent: 67
 ---
 
 # STATE: intrinsic-calibration
@@ -27,7 +27,7 @@ Plan: 6 of 6 全部完成
 
 - **Phase:** 4
 - **Plan:** 6 of 6
-- **Status:** Phase complete
+- **Status:** Ready to execute
 - **Progress:** [██████████] 100%(全项目 23 计划;Phase 5/6 待规划)
 - **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
   产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
@@ -133,9 +133,11 @@ Plan: 6 of 6 全部完成
 - [Phase 4 收口期]: 温启动被真实数据否决(62/64 对 RMS 差 <0.001 px 但位移超容差 6 对、
   温启动反而慢 404s vs 332s;根因 = 数据在 Fisher 退化方向解不唯一),默认
   warm_start_experiments: false——"秒级精化"只在合成小样成立
+
 - [Phase 4 收口期]: 选型规则重构——test 整体 RMS 简单优先(select_by_test_rms,
   复杂度逐档走查提升 ≥ selection_improve_min=0.10 才升级)升为主判据,旧三判据
   降为第二意见(agreement 打架当场播报);test 集参与选型带轻微乐观偏差,由
   hold-out 第二意见对冲;quick(默认,四实验只考当选模型,cv 3×3、bootstrap 50)
   /full(全模型全量)两档,交付一律全模型
+
 - [Phase 4]: 交付与契约层落地——run_delivery 同签名体例(obs_train, obs_test, board, cfg, optimizer_config),全量重训 + test 逐张并排评分,D-16;BIC 在编排内用 bic_full_fit 算好(RSS 取自全量解,k = 内参数 + 6 × 视图数,n = bic_n_poses),select_model 只消费行内现成值不写第二份数学(D-10);evaluate.json 13 键契约 + 明细 npz 旁车(嵌套明细拍平成 模型__数组名,标量成 0 维数组),json 段只留汇总与 detail_npz 引用(汇总只是索引,D-13);组装顺序防线:明细键带数组但对应段非字典当场中文报错;判行表三图库函数只管画图,图失败不拦主产物;全链冒烟即 04-06 CLI 的调用序列样板 — EVA-02/SOL-02 收口
