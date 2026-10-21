@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-21T16:06:45.533Z"
+last_updated: "2026-10-21T16:35:40Z"
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 29
-  completed_plans: 23
-  percent: 67
+  completed_plans: 24
+  percent: 83
 ---
 
 # STATE: intrinsic-calibration
@@ -17,29 +17,31 @@ progress:
 ## Project Reference
 
 - **Core Value:** 对给定的一批标定图像,产出可论证为当前数据下最优的内参(held-out 泛化误差最小 + 参数稳定 + 误差逼近 CRLB),并量化"距离数据极限还有多远"
-- **Current Focus:** Phase 4 收官完成,待启动 Phase 5(误差预算 + 诊断 + 角点寻优)
+- **Current Focus:** Phase 5 — 误差预算 + 诊断 + 角点提取寻优
 - **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md
 
 ## Current Position
 
-Phase: 04 (evaluation-model-selection) — COMPLETE(2026-10-21)
-Plan: 6 of 6 全部完成
+Phase: 5 (误差预算 + 诊断 + 角点提取寻优) — EXECUTING
+Plan: 2 of 6
 
-- **Phase:** 4
-- **Plan:** 6 of 6
-- **Status:** Ready to execute
-- **Progress:** [██████████] 100%(全项目 23 计划;Phase 5/6 待规划)
-- **备注:** Phase 3 检查点发现并修复条件数单位伪影(0a9b247),修正后谱
-  产物 output/fisher/run_20261019_025859;m1/m2 正常,m3/m4 退化为真信号
+- **Phase:** 5
+- **Plan:** 1 of 6 完成(05-01 阶段⑦地基)
+- **Status:** 执行中(下一计划 05-02:calib analyze 命令骨架 + ANA-01 端到端)
+- **Progress:** [████████░░] 83%
+- **备注:** 05-01 落地三层——AnalyzeConfig(analyze 段 16 键)+ analyze
+  产物契约(11 键 + 六段 npz 旁车 + 失败契约)+ run_budget 预算库(复核/
+  预算行/铁律硬报错);ANA-01 标记 Shipped,全套 515 passed
 
 ## Performance Metrics
 
 | Metric | Value |
 |--------|-------|
 | Phases complete | 4/6 |
-| Requirements shipped | 17/32 |
-| Plans this phase | 6(planned) |
+| Requirements shipped | 18/32 |
+| Plans this phase | 1/6 |
 | Blocked items | 0 |
+| Phase 05 P01 | 20min | 3 tasks | 7 files |
 | Phase 04 P01 | 12min | 2 tasks | 9 files |
 | Phase 4 P04 | 58min | 3 tasks | 2 files |
 | Phase 4 P02 | 3h43min | 4 tasks | 4 files |
@@ -82,48 +84,41 @@ Plan: 6 of 6 全部完成
 
 ## Session Continuity
 
-- **Last action:** 04-06 执行完成 + 阶段四收口(2026-10-21)——`calib evaluate`
+- **Last action:** 05-01 执行完成(2026-10-22 凌晨,20min,63f1815/a215641/
+  7cf3004)— 配置/契约/库三层:AnalyzeConfig(analyze 段 16 键中文校验)+
+  analyze 产物契约层(11 键 + make_failure_analyze 失败契约 + 六段
+  analysis/*.npz 旁车,读回 allow_pickle=False)+ run_budget 误差预算库
+  (三统计量独立重算 vs evaluate 落账 isclose 1e-9 复核、逐参数预算行 +
+  像素当量、逐行实测低于下界或比值跌破硬线当场中文硬报错);k1–k3/p1p2
+  利用率置 None + crlb_caliber_note 随表。26 例新测试,全套 515 passed;
+  ANA-01 标记 Shipped(累计 18/32)
+
+- **Previous action:** 04-06 执行完成 + 阶段四收口(2026-10-21)——`calib evaluate`
   命令闭环(5ac256f/05fc97f)+ 真实数据全链对账集成测试(d47dcf2)+ 执行期
   三轮提速与重构:并行修复与砍冗余(cd5a066)、温启动真实数据否决(默认关
   闭)、test 整体 RMS 简单优先选型 + quick/full 两档(74935b8)+ findings
-  结论 1/2/5 落账(2c1d4b5/8428d83);六条需求 Shipped,累计 17/32。
-  选型定案 m2(test 0.1598 px,hold-out 0.0904 px 稳定,三判据第二意见
-  不翻案)。遗留一项会话外对账:匹配口径 CRLB 重跑(findings 结论 4 待办,
-  quick 重跑落地后销账)
+  结论 1/2/5 落账(2c1d4b5/8428d83)。选型定案 m2(test 0.1598 px,
+  hold-out 0.0904 px 稳定,三判据第二意见不翻案)
 
-- **Previous action:** 04-05 执行完成(2026-10-19,29min,d3b3844/6a2048f/
-  3097e41/914939b/42a5fca)— 交付与契约层:run_delivery 全量重训 × 全部
-  参选模型(统一推荐配置 D-13)+ test 独立照片全模型并排逐张评分
-  (solve_pose_only 零新数学,逐张逐模型行全存 D-16)+ BIC 在编排内算好
-  (rss 取自全量解,k = 内参数 + 6 × 视图数,n = bic_n_poses,D-10 先重训
-  后选型);evaluate.json 13 键主契约(EVALUATE_KEYS 写盘前校验 + 失败契约
-  make_failure_evaluate)+ 五份明细转 experiments/<段名>.npz 旁车(血缘
-  meta 必带,json 只留 detail_npz 引用,读回 allow_pickle=False);判行表
-  三图 evaluate_figs.py(CV 误差棒 / LOPO 散点红三角点名 + MAD 判据线 /
-  离散对比并排条形,Agg 离线出 PNG);合成数据全链冒烟(网格 → 四实验 →
-  交付 → 来源分离组装 → 判行表与选型 → 契约落盘 → 三图,32 秒跑通)+
-  同种子重跑逐位一致断言;14 例新测试,全套 460 passed;EVA-02/SOL-02
-  标记完成
+- **Next action:** 05-02 接线 `calib analyze` 命令骨架(上游六轮定位/血缘/
+  失败契约/四要素播报)+ ANA-01 端到端:真实数据预算表与证据图 +
+  findings 结论 4 对账;阶段四遗留的 quick 档 evaluate 重跑对账仍在会话外
+  待办(与 05-02 真实数据跑批可同批进行)
 
-- **Next action:** ① quick 档 evaluate 重跑落地后对账(核 selection.method/
-  walk/agreement 新架构 + slices CRLB 匹配口径栏 → findings 结论 4 销账、
-  结论 1 精确倍数补账 + 集成测试跑一轮);② /gsd-plan-phase 5 启动阶段五
-
-- **Notes for next session:** 决策在 04-CONTEXT.md(D-01~D-16);训练/交付
-  一律全 640 视图(聚合策略裁决定案);上游取数 = sb 角点 npz + noise.json
-  双口径 + m{X}__scipy linear 收敛解 + crlb.json + optimizer.json(推荐配置
-  从 recommended_solver 读,四模型均 linear);04-04 四实验返回值统一
-  {"schema","models","meta","_X_detail"},04-05 已把它们装配成落盘契约:
-  json 段只留汇总(行级大表 per_pose_rows/group_records/rows/test_rows 与
-  私有明细键不进 json),组装顺序 = 明细键必须挂在字典段下否则中文报错;
-  var_slice/pose_sampling_var 组装侧填充已实证(冒烟第 ④ 步:分组
-  empirical_std 平方 → pose_sampling_variance 相减 → 回填,CRLB 对照缺席
-  用 {'n_below_hard': 0, ...} 兜底不冒充);真实数据实验量 ≈ CV 100 +
-  bootstrap 800 + 分组 32 + LOPO 320 ≈ 1300 次求解(8 并行单次 1.5-3
-  分钟)+ 交付轮全量重训 × 4,先跑 CV 校准耗时再放大批量
+- **Notes for next session:** run_budget 入参取数来源已实测对齐——
+  evaluate_report 需 slices/delivery/bootstrap/source_separation/optimizer/
+  lineage 六段(source_separation 直接按模型名取键,无 models 中间层);
+  slices.npz 键 = {model_id}__group_uv/group_bound_px/group_params/
+  param_names(quick 档只含当选模型);σ 从 noise.json 顶层键
+  sigma_detector_corner 读入后传参,run_budget 不自己读文件;复核要求
+  evaluate.json 与 slices.npz 同一轮产物,串轮即「口径漂移」报错;analyze
+  命令体组装时六段明细键必须挂在字典段下(体例照 evaluation/artifacts.py)
 
 ## Decisions
 
+- [Phase 05]: 预算判定与 evaluate 同一条判定线——三统计量比值从 slices.npz 独立重算与 crlb_alert.per_param 落账 isclose(1e-9) 对账,漂移即中文报错,不重写第二套判据;σ 只认调用方传入的 noise.json:sigma_detector_corner,坏值进任何取数前拒绝
+- [Phase 05]: k1–k3 与 p1/p2 利用率比值置 None(单独下界被参数间补偿空间撑大),CRLB_CALIBER_NOTE 照抄 experiments.py 现成文案不重写第二份;正式判定在像素空间(逐角点重投影位移)
+- [Phase 05]: analysis 产物契约整文件照 evaluation/artifacts.py 体例、不跨模块借私有件;测试用「自洽合成底账」(底账与落账比值同源使复核必过,8 组等差构造标准差可手算),真实数据端到端留给 05-02
 - [Phase 04]: 阶段四切分函数取整个 CalibrationConfig(读 cfg.seed + cfg.evaluate.*),照 run_injection_experiment 体例;evaluate 核名白名单独立建表(含 cauchy,D-14)
 - [Phase 04]: 零重叠硬门禁双保险:split_by_pose_ids 函数体断言 + 16 例测试对 80 姿态×25 折显式断言姿态级与行级零交集(成功标准 1 执行位);切分分配表纯 str/int 可 json 落盘复查
 - [Phase 04]: 优化器对比真实数据定案——四模型推荐均 linear 核(千分之一并列线内无鲁棒核优势);m1 的 soft_l1/cauchy status=0 未过实用收敛,与历史轮 run_20261018_163713 对账一致,写进 SOL-02 结论材料
