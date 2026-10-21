@@ -66,9 +66,10 @@ from calib.io.config import (
 )
 from calib.models import create_model
 from calib.models.base import CameraModel, transform_to_camera
-from calib.noise.fisher import crlb_se, marginalized_fisher
+from calib.noise.fisher import crlb_se
 from calib.solve.observation import ObservationSet
 from calib.solve.opencv import solve_with_opencv
+from calib.solve.residuals import make_jacobian_fn, pack_theta
 from calib.solve.result import CalibrationResult, compute_result_metrics
 from calib.solve.scipy_solver import solve_with_scipy
 from calib.solve.scoring import score_views, solve_pose_only
@@ -718,35 +719,84 @@ def lopo(
 # ---------------------------------------------------------------------------
 
 
-def _sigma_temporal_from_noise(noise_report: dict) -> float:
-    """从 noise.json 报告读时域口径 σ(白话:同一姿态的连拍互相之间量出来
-    的噪声水平,分组实验的对照基准用它)。
+def _sigma_detector_from_noise(noise_report: dict) -> float:
+    """从 noise.json 报告读检测器口径 σ(白话:同一个角点重复拍 8 次,
+    只看检测器自己有多大定位抖动的噪声水平)。
 
-    只认时域口径一个键——分组实验每组是"每姿态单张",对照的 σ 必须是
-    同口径的单张噪声;拿错口径(比如检测器口径,或连拍取均值后按
-    根号张数折减过的聚合口径)会让对照失真,造成假告警或漏告警
-    (T-04-04-01,Pitfall 2 的执行位)。缺键/失败轮/非正有限值当场中文
-    报错(读取体例照 noise/fisher.py 的 _sigma_scalars_from_noise)。
+    为什么分组实验的 CRLB 对照必须用这个口径(2026-10-20 定案,取代
+    T-04-04-01 的时域口径决定):CRLB 回答的问题是"只考虑每个角点重复
+    拍摄的方差时,标定最好能有多好"。时域口径 σ(≈0.30px)量的是连拍
+    之间的整帧共模偏移——那部分会被逐帧位姿吸收,是共享系统偏差,不是
+    逐点独立噪声;塞进独立同分布的 CRLB 假设会把下界虚高约 35 倍,让
+    "实测低于理论下界"的假告警满天飞。铁律:CRLB 绝不允许大于实测——
+    任何口径算出来"实测好于理论下界",一律当场修口径,不得作为结论交付。
+
+    缺键/失败轮/非正有限值当场中文报错(读取体例照 noise/fisher.py 的
+    _sigma_scalars_from_noise)。
     """
     if noise_report.get("failure_note"):
         raise AssertionError(
             f"上游 noise.json 是失败轮(failure_note 非空:"
             f"{noise_report['failure_note']}),没有可用的 σ。请先重跑 calib noise。"
         )
-    if "sigma_temporal_corner" not in noise_report:
+    if "sigma_detector_corner" not in noise_report:
         raise AssertionError(
-            "上游 noise.json 缺键 sigma_temporal_corner(时域口径 σ 的契约键)。"
-            "分组实验的 CRLB 对照必须用同口径的单张噪声,缺键多半是 noise.json"
-            "与当前代码版本不是同一套契约,请重跑 calib noise 后再跑分组实验。"
+            "上游 noise.json 缺键 sigma_detector_corner(检测器口径 σ 的契约键)。"
+            "分组实验的 CRLB 对照必须用每角点重复拍摄的检测器级方差,缺键多半是"
+            "noise.json 与当前代码版本不是同一套契约,请重跑 calib noise 后再跑"
+            "分组实验。"
         )
-    value = noise_report["sigma_temporal_corner"]
+    value = noise_report["sigma_detector_corner"]
     if value is None or not np.isfinite(float(value)) or float(value) <= 0:
         raise AssertionError(
-            f"上游 noise.json 的 sigma_temporal_corner(时域口径 σ)不是正的"
+            f"上游 noise.json 的 sigma_detector_corner(检测器口径 σ)不是正的"
             f"有限数:{value!r}。σ 是 CRLB 对照的乘数,坏值会污染全部组的结果,"
             f"请重跑 calib noise。"
         )
     return float(value)
+
+
+def _group_crlb_block(
+    model: CameraModel,
+    obs: ObservationSet,
+    params_vec: np.ndarray,
+    rvecs: np.ndarray,
+    tvecs: np.ndarray,
+    sigma: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """单组的匹配口径 CRLB:参数空间逐参数下界 + 像素空间逐行位移下界。
+
+    白话(口径定案,2026-10-20):把外参位姿当理想已知,只用内参信息块
+    (雅可比的内参列自乘,JᵀJ 的左上 K×K 块)算下界——这正是"只考虑
+    每个角点重复拍摄方差时,标定最好能有多好"的字面数学:位姿不吃噪声、
+    只剩检测器抖动。不做外参边际化(联合矩阵舒尔消元):有理模型 12 个
+    参数强相关,边际化在外参方向消元后 k 参数方向接近奇异(2026-10 实测
+    条件数 5.7e11),数值上不可信;内参块则良态。
+
+    两份产出:
+    - se (K,):逐参数 CRLB 标准差(参数空间)。对 fx/fy/cx/cy 这类数据
+      定得住的参数是有效的对照;k1..k6 这类强相关参数的单独下界没有
+      比较意义(下界由参数间的补偿空间撑大,不是噪声大),所以判行表的
+      "逼近 CRLB"判定不看它,看下面这份。
+    - bound (2·视图数·角点数,):逐残差行的像素位移下界——把内参的
+      不确定度经雅可比推到每个角点的重投影上:σ·sqrt(diag(J·inv(F)·Jᵀ))。
+      像素空间对全部参数联合有效,软方向挪不动重投影,下界自然贴住实测
+      (2026-10-20 真实数据验证:8 组实测重投影散布中位 0.0193px vs
+      下界中位 0.0001px,逐行实测 ≥ 下界,铁律全过)。行序与残差一致
+      (视图 → 角点 → u/v 交错)。
+    """
+    n_int = len(model.param_names)
+    theta = pack_theta(model, params_vec, rvecs, tvecs)
+    J = make_jacobian_fn(model, obs)(theta)  # D-10:J 只从工厂来
+    J_int = J[:, :n_int]
+    f_block = (J_int.T @ J_int).toarray()  # 内参信息块(位姿理想已知)
+    se = crlb_se(f_block, sigma)
+    j_dense = np.asarray(J_int.todense(), dtype=np.float64)
+    cov = np.linalg.inv(f_block)
+    weighted = j_dense @ cov
+    var_rows = np.einsum("ij,ij->i", weighted, j_dense) * float(sigma) ** 2
+    bound = np.sqrt(np.maximum(var_rows, 0.0))
+    return se, bound
 
 
 def _slice_group_record(
@@ -758,42 +808,50 @@ def _slice_group_record(
     se: dict | None = None,
     ref_rvec=None,
     ref_tvec=None,
+    uv_pred=None,
+    bound_px=None,
     failure_note: str | None = None,
     crlb_note: str | None = None,
 ) -> dict:
-    """一组的记录(键一个不少):参数向量 + 同口径 CRLB 对照 + 口径标识。
+    """一组的记录(键一个不少):参数向量 + 匹配口径 CRLB 对照 + 口径标识。
 
     observation_set 标识语义 = "每姿态单张"(小样按组内实际姿态数如实
     记,正式口径 80 个姿态时即为 views80_single_frame);sigma_source
-    锁死 "temporal"——口径标识随记录落盘,下游不可能拿错口径对账
-    (T-04-04-01)。
+    锁死 "detector"(检测器口径,2026-10-20 定案)——口径标识随记录
+    落盘,下游不可能拿错口径对账。uv_pred(各组解对自家观测的重投影
+    (V,P,2))与 bound_px(逐行像素位移下界)是组级私有明细,由编排层
+    汇总成像素空间对照,随明细旁车落盘(组记录不进 json,D-13)。
     """
     return {
         "model_id": model_id,
         "group": int(group_idx),
         "n_poses": int(n_poses),
         "observation_set": f"views{int(n_poses)}_single_frame",
-        "sigma_source": "temporal",
+        "sigma_source": "detector",
         "converged": params is not None,
         "params": params if params is not None else {},
         "rms_overall": rms_overall,
         "se": se,
         "ref_rvec": (None if ref_rvec is None else [float(v) for v in ref_rvec]),
         "ref_tvec": (None if ref_tvec is None else [float(v) for v in ref_tvec]),
+        "uv_pred": uv_pred,
+        "bound_px": bound_px,
         "failure_note": failure_note,
         "crlb_note": crlb_note,
     }
 
 
 def _slice_group_worker(task: tuple) -> dict:
-    """单组单模型求解 + 组内同口径 CRLB(worker,顶层函数可序列化)。
+    """单组单模型求解 + 组内匹配口径 CRLB(worker,顶层函数可序列化)。
 
     每组独立完整标定(与 CV 同一条求解路径);CRLB 对照**每组新算**:
     线性化点 = 该组该模型自己的收敛解(白话:算理论下界时,把"当前
     解附近误差怎么变"展开的基准点就用这次解本身),σ = noise.json 的
-    时域口径,Fisher 数学原样复用 marginalized_fisher / crlb_se(唯一
-    数学源约束)。Fisher 算不成不拖垮参数记录(参数照常留账,对照记
-    crlb_note 缺席说明)。
+    检测器口径(每角点重复拍摄方差,2026-10-20 定案),数学走
+    _group_crlb_block(J 只从 make_jacobian_fn 来的唯一数学源约束)。
+    另备各组解对自家观测的重投影(uv_pred)——编排层把 8 组叠一起算
+    组间散布,就是像素空间对照的"实测"侧。Fisher 算不成不拖垮参数
+    记录(参数照常留账,对照记 crlb_note 缺席说明)。
     """
     (model_id, group_idx, row_indices, obs, scipy_cfg, loss, f_scale, sigma, cv2_threads) = task
     # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
@@ -812,6 +870,14 @@ def _slice_group_worker(task: tuple) -> dict:
                 failure_note=result.failure_note,
             )
         params_vec = np.array([result.params[name] for name in model.param_names], dtype=np.float64)
+        uv_pred = np.empty(
+            (len(group_obs.image_ids), group_obs.object_points.shape[0], 2), dtype=np.float64
+        )
+        for i in range(len(group_obs.image_ids)):
+            pts_cam, _ = transform_to_camera(
+                group_obs.object_points, result.rvecs[i], result.tvecs[i]
+            )
+            uv_pred[i] = model.project(pts_cam, params_vec)
         record = _slice_group_record(
             model_id,
             group_idx,
@@ -820,13 +886,14 @@ def _slice_group_worker(task: tuple) -> dict:
             rms_overall=float(result.rms_overall),
             ref_rvec=result.rvecs[0],
             ref_tvec=result.tvecs[0],
+            uv_pred=uv_pred,
         )
         try:
-            f_marg, _f_full, _diag = marginalized_fisher(
-                model, group_obs, params_vec, result.rvecs, result.tvecs
+            se, bound = _group_crlb_block(
+                model, group_obs, params_vec, result.rvecs, result.tvecs, sigma
             )
-            se = crlb_se(f_marg, sigma)
             record["se"] = {name: float(v) for name, v in zip(model.param_names, se)}
+            record["bound_px"] = bound
         except (ValueError, ArithmeticError, RuntimeError) as exc:
             record["crlb_note"] = f"第 {group_idx} 组的 CRLB 对照未算成:{type(exc).__name__}——{exc}"
         return record
@@ -852,27 +919,42 @@ def slices_by_index(
     白话:同一姿态拍了多张连拍——第 1 组全取"每姿态的第 1 张"、第 2 组
     全取"第 2 张"……每组独立完整标定一遍。组与组之间姿态集合一样、
     只有噪声不同,所以组间参数的抖动就是"纯噪声"对参数的影响;每组再
-    新算一份同口径 CRLB(克拉美-罗下界,白话:"这批数据理论上能把参数
-    定到多准"的下界)作对照——经验抖动若显著低于理论下界,物理上不可能,
-    说明对照口径错了,触发 D-06 硬告警(经 crlb_alert_check,双档显著性
-    从 cfg.evaluate 读,判 FAIL 的说明带参数名不静默)。
+    新算一份匹配口径 CRLB 作对照——经验抖动若显著低于理论下界,物理上
+    不可能,说明对照口径错了,触发 D-06 硬告警(经 crlb_alert_check,
+    双档显著性从 cfg.evaluate 读,判 FAIL 的说明带统计量名不静默)。
+
+    CRLB 对照口径(2026-10-20 定案,取代 T-04-04-01 的时域口径):
+    - σ = 检测器口径(每角点重复拍摄的方差,σ≈0.0087px)——CRLB 要回答
+      "只考虑每角点重复方差时,标定最好能有多好";时域口径(≈0.30px)
+      是连拍整帧共模偏差,会被逐帧位姿吸收,塞进独立同分布假设只会把
+      下界虚高约 35 倍(铁律:CRLB 绝不允许大于实测,2026-10-20)。
+    - Fisher = 内参信息块(位姿理想已知);不做外参边际化——12 参数强
+      相关时边际化在 k 方向接近奇异(条件数 5.7e11),数值不可信。
+    - 判定在**像素空间**:参数空间逐参数下界(k1..k6 的下界被参数间
+      补偿空间撑大,单独比较无意义,仅作参考表随 crlb_se_mean 留账);
+      正式对照 = 把各组解的内参不确定度经雅可比推到每个角点的重投影
+      位移(下界)vs 8 组解重投影同一物理点的组间散布(实测),取
+      中位 / 95 分位 / 最大三条统计量过 crlb_alert_check。真实数据
+      验证(2026-10-20):逐行实测 ≥ 下界,中位倍数约 270。
 
     签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped);
-    noise_report 是读回的 noise.json 字典(σ 只从 sigma_temporal_corner
-    读,缺键中文报错——T-04-04-01)。
+    noise_report 是读回的 noise.json 字典(σ 只从 sigma_detector_corner
+    读,缺键中文报错)。
 
     返回 {"schema": "slices-v1", "models": {mX: {"group_params",
-    "empirical_std", "crlb_se_mean", "crlb_alert", "slice_max_disp_px",
-    "n_failed_groups", "n_groups", "sigma_used", "loss_used",
-    "group_records"}}, "meta", "_slice_detail"}——slice_max_disp_px 键名
-    对齐 04-03 判行表 stability_summary 消费面;各组原始 SE 全在明细数组
-    (8 份原始全落盘由 04-05 产物层执行,Open Q2)。
+    "empirical_std", "crlb_se_mean", "crlb_caliber_note", "crlb_alert",
+    "slice_max_disp_px", "n_failed_groups", "n_groups", "sigma_used",
+    "loss_used", "group_records"}}, "meta", "_slice_detail"}——
+    slice_max_disp_px 键名对齐 04-03 判行表 stability_summary 消费面;
+    crlb_alert 键面与旧版逐参数契约同形(n_below_hard/lines/verdict…),
+    内容换成像素空间三条统计量;各组原始 SE、重投影与下界全在明细数组
+    (8 份原始全落盘由 04-05 产物层执行,产物保真)。
     """
     eval_cfg = cfg.evaluate
     scipy_cfg = cfg.calibrate.scipy
     cv2.setNumThreads(cfg.cv2_threads)  # 线程锁 = 求解逐位确定(04-02 教训)
     _check_obs_board(obs, board)
-    sigma = _sigma_temporal_from_noise(noise_report)
+    sigma = _sigma_detector_from_noise(noise_report)
     groups = slice_groups_by_index(obs, cfg)  # 开关/组内断言在 splitting 层内置
     models = tuple(eval_cfg.models)
     kernels = {m: _recommended_kernel(optimizer_config, m) for m in models}
@@ -951,18 +1033,66 @@ def slices_by_index(
         if with_se:
             se_arr = np.array([[r["se"][n] for n in names] for r in with_se], dtype=np.float64)
             crlb_se_mean = {n: float(np.mean(se_arr[:, i])) for i, n in enumerate(names)}
-            if empirical_std is not None and len(with_se) >= 2:
-                crlb_alert = crlb_alert_check(
-                    empirical_std,
-                    crlb_se_mean,
-                    n_groups=len(with_se),
-                    alpha_hard=eval_cfg.crlb_alert_alpha_hard,
-                    alpha_soft=eval_cfg.crlb_alert_alpha_soft,
+
+        # 像素空间对照(正式判定口径):实测 = 各组解重投影同一物理点的
+        # 组间散布;下界 = 各组匹配口径逐行位移下界的均值。三条统计量
+        # (中位 / 95 分位 / 最大)过同一套卡方双档告警线——键面与逐参数
+        # 契约同形,判行表按 n_below_hard 判定不需要任何改动。
+        uv_stack = [r["uv_pred"] for r in converged if r["uv_pred"] is not None]
+        bd_stack = [r["bound_px"] for r in converged if r["bound_px"] is not None]
+        if uv_stack is not None and len(uv_stack) >= 2 and len(bd_stack) >= 2:
+            meas_rows = np.std(np.stack(uv_stack), axis=0, ddof=1).ravel()
+            bound_rows = np.mean(np.stack(bd_stack), axis=0).ravel()
+            stat_fns = (
+                ("重投影位移中位", np.median),
+                ("重投影位移95分位", lambda a: np.percentile(a, 95)),
+                ("重投影位移最大", np.max),
+            )
+            meas_stats = {name: float(fn(meas_rows)) for name, fn in stat_fns}
+            bound_stats = {name: float(fn(bound_rows)) for name, fn in stat_fns}
+            crlb_alert = crlb_alert_check(
+                meas_stats,
+                bound_stats,
+                n_groups=len(uv_stack),
+                alpha_hard=eval_cfg.crlb_alert_alpha_hard,
+                alpha_soft=eval_cfg.crlb_alert_alpha_soft,
+            )
+            # 逐行铁律核查(像素空间的全量底账,三条统计量只是它的摘要):
+            # 实测 < 下界的行数必须为 0,出现即说明对照口径仍有错配
+            ratios = meas_rows / np.maximum(bound_rows, 1e-12)
+            n_violations = int((meas_rows < bound_rows).sum())
+            crlb_alert["caliber"] = "pixel_reproj_detector"
+            crlb_alert["n_values_checked"] = int(meas_rows.size)
+            crlb_alert["n_pointwise_violations"] = n_violations
+            crlb_alert["min_ratio_pointwise"] = float(ratios.min())
+            crlb_alert["measured_stats_px"] = meas_stats
+            crlb_alert["bound_stats_px"] = bound_stats
+            if n_violations == 0:
+                pointwise_txt = (
+                    f"逐行核查 {crlb_alert['n_values_checked']} 个(视图,角点)"
+                    f"实测全部不低于下界(最小倍数 "
+                    f"{crlb_alert['min_ratio_pointwise']:.1f}),零违例。"
                 )
-            elif empirical_std is None:
-                alert_note = "收敛组不足 2 组,经验抖动无从谈起,CRLB 对照告警跳过(不静默)"
-        else:
+            else:
+                pointwise_txt = (
+                    f"逐行核查发现 {n_violations}/{crlb_alert['n_values_checked']} "
+                    f"个(视图,角点)实测低于下界(最小倍数 "
+                    f"{crlb_alert['min_ratio_pointwise']:.2f})——实测好于理论极限"
+                    f"物理上不可能,对照口径必有错配,按 D-06 硬告警处理。"
+                )
+            crlb_alert["verdict_note"] = (
+                f"像素空间匹配口径(σ=检测器级 {sigma:.4f}px,内参块下界经"
+                f"雅可比推到逐角点重投影位移):三条统计量(中位/95分位/最大)"
+                f"实测 vs 下界 = "
+                + ", ".join(f"{meas_stats[k]:.4f}/{bound_stats[k]:.4f}px" for k in meas_stats)
+                + ";"
+                + pointwise_txt
+                + crlb_alert["verdict_note"]
+            )
+        elif not with_se:
             alert_note = "没有任何一组的 CRLB 对照算成,告警检查跳过(不静默)"
+        elif len(uv_stack) < 2 or len(bd_stack) < 2:
+            alert_note = "像素空间对照的有效组数不足 2(组间散布无从谈起),告警检查跳过(不静默)"
         if crlb_alert is None and alert_note is None and len(with_se) < 2:
             alert_note = "CRLB 对照的有效组数不足 2(卡方自由度 = 组数 − 1),告警检查跳过"
 
@@ -970,6 +1100,13 @@ def slices_by_index(
             "group_params": group_params,
             "empirical_std": empirical_std,
             "crlb_se_mean": crlb_se_mean,
+            "crlb_caliber_note": (
+                "crlb_se_mean 是参数空间参考表(σ=检测器级,内参块下界,"
+                "位姿理想已知):fx/fy/cx/cy 等数据定得住的参数对照有效;"
+                "k1..k6 等强相关参数的单独下界被参数间补偿空间撑大,不是"
+                "噪声大,单独比较无意义。正式的「逼近 CRLB」判定在像素空间,"
+                "见 crlb_alert(逐角点重投影位移,2026-10-20 定案)。"
+            ),
             "crlb_alert": crlb_alert,
             "crlb_note": alert_note,
             "slice_max_disp_px": slice_max_disp_px,
@@ -979,6 +1116,14 @@ def slices_by_index(
             "loss_used": loss,
             "group_records": records,
         }
+        n_points = obs.object_points.shape[0]
+        uv_arr = np.full((len(records), len(groups[0]["pose_rows"]), n_points, 2), np.nan)
+        bd_arr = np.full((len(records), 2 * len(groups[0]["pose_rows"]) * n_points), np.nan)
+        for k, r in enumerate(records):
+            if r["uv_pred"] is not None:
+                uv_arr[k] = r["uv_pred"]
+            if r["bound_px"] is not None:
+                bd_arr[k] = r["bound_px"]
         detail[m] = {
             "group_index": np.array([r["group"] for r in records], dtype=np.int64),
             # 每组口径标识随明细旁车落盘(组记录本身不进 json,D-13):
@@ -996,6 +1141,10 @@ def slices_by_index(
                 [[np.nan if r["se"] is None else r["se"][n] for n in names] for r in records],
                 dtype=np.float64,
             ),
+            # 像素空间对照的全量底账(逐组重投影与逐行下界,产物保真:
+            # 三条统计量只是摘要,逐行倍数可从这里复查)
+            "group_uv": uv_arr,
+            "group_bound_px": bd_arr,
             "sigma_used": sigma,
             "param_names": np.array(names),
         }
@@ -1008,7 +1157,8 @@ def slices_by_index(
             "n_groups": len(groups),
             "n_solves": len(tasks),
             "n_failed_total": int(sum(m["n_failed_groups"] for m in models_out.values())),
-            "sigma_source": "temporal",
+            "sigma_source": "detector",
+            "crlb_caliber": "pixel_reproj_detector(σ=检测器级;内参块下界推到逐角点重投影位移,2026-10-20 定案)",
             "alpha_hard": float(eval_cfg.crlb_alert_alpha_hard),
             "alpha_soft": float(eval_cfg.crlb_alert_alpha_soft),
             "seed": int(cfg.seed),
@@ -1391,9 +1541,7 @@ def run_delivery(
             result = make_calibrate_fn(model, scipy_cfg, loss, f_scale)(obs_train)
             if not result.converged or result.rms_overall is None:
                 raise RuntimeError(result.failure_note or "全量重训未收敛(无失败说明)")
-            params_vec = np.array(
-                [result.params[name] for name in names], dtype=np.float64
-            )
+            params_vec = np.array([result.params[name] for name in names], dtype=np.float64)
             _rms_chk, _per_view, residuals = compute_result_metrics(
                 obs_train, params_vec, result.rvecs, result.tvecs, model
             )
@@ -1417,9 +1565,7 @@ def run_delivery(
                 n_intrinsic_params=len(names),
                 n_views=n_views,
                 loss_used=loss,
-                failure_note=(
-                    f"{model_id} 全量重训未跑成:{type(exc).__name__}——{exc}"
-                ),
+                failure_note=(f"{model_id} 全量重训未跑成:{type(exc).__name__}——{exc}"),
             )
             failure_note = entry["failure_note"]
         models_out[model_id] = entry

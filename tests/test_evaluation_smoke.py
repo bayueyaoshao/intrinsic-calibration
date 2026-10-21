@@ -402,7 +402,7 @@ def test_full_chain_smoke_optimizer_to_contract(smoke_setup):
         s["board"],
         s["cfg"],
         optimizer_config,
-        {"sigma_temporal_corner": 0.30},
+        {"sigma_detector_corner": 0.30},
     )
     lopo_rep = lopo(obs_train, s["board"], s["cfg"], optimizer_config)
     for m in models:

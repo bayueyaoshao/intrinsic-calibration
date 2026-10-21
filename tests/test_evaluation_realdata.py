@@ -17,10 +17,10 @@ fisher 上游产物,日常开发用 `uv run pytest -m "not integration"` 自动�
    每行三判据(泛化/稳定/逼近 CRLB)各带数值、PASS/FAIL 与判定式;
    选型结论与选型规则可读;判行表逐行带 BIC 数值(平局裁决要用它,
    数值先于裁决落盘)。
-3. 标准 3:重复张分组每组口径标识(views80_single_frame + temporal)
-   随明细旁车落盘(下游不可能拿错口径对账);CRLB 硬告警线用记录的
-   显著性 alpha 与自由度反推核验(不写死;df=7 时硬线约 0.42);低于
-   硬线的参数计数、判定与说明相互一致。
+3. 标准 3:重复张分组每组口径标识(views80_single_frame + detector,
+   匹配口径 2026-10-20 定案)随明细旁车落盘(下游不可能拿错口径对账);
+   CRLB 硬告警线用记录的显著性 alpha 与自由度反推核验(不写死;df=7 时
+   硬线约 0.42);低于硬线的统计量计数、判定与说明相互一致。
 4. 标准 4:bootstrap 逐次参数明细 npz(200 次 × 4 模型)可读;来源
    分离段数值可读(方差相减、钳 0 生效、位姿占比在 0–1);留一姿态
    逐姿态表 + 问题姿态点名名单可读。
@@ -310,13 +310,13 @@ def test_criterion_2_verdict_rows_carry_bic(evaluate_tree: dict):
 
 
 def test_criterion_3_slices_markers_and_alert_lines(evaluate_tree: dict):
-    """标准 3:每组口径标识(views80_single_frame + temporal)随明细
-    旁车落盘;硬告警线用记录的 alpha 与自由度反推(df=7 时约 0.42);
-    低于硬线的计数、判定与说明相互一致,不静默。"""
+    """标准 3:每组口径标识(views80_single_frame + detector,匹配口径
+    2026-10-20 定案)随明细旁车落盘;硬告警线用记录的 alpha 与自由度反推
+    (df=7 时约 0.42);低于硬线的计数、判定与说明相互一致,不静默。"""
     report = evaluate_tree["report"]
     slices = report["slices"]
     eval_cfg = evaluate_tree["eval_cfg"]
-    assert slices["meta"]["sigma_source"] == "temporal", "分组实验 σ 口径标识不对"
+    assert slices["meta"]["sigma_source"] == "detector", "分组实验 σ 口径标识不对"
     alpha_hard = float(slices["meta"]["alpha_hard"])
     alpha_soft = float(slices["meta"]["alpha_soft"])
     assert alpha_hard == pytest.approx(float(eval_cfg.crlb_alert_alpha_hard))
@@ -332,7 +332,7 @@ def test_criterion_3_slices_markers_and_alert_lines(evaluate_tree: dict):
         markers = detail[f"{model_id}__observation_set"]
         assert {str(v) for v in markers} == {"views80_single_frame"}, \
             f"{model_id} 每组口径标识异常:{sorted(set(map(str, markers)))}"
-        assert {str(v) for v in detail[f"{model_id}__sigma_source"]} == {"temporal"}, \
+        assert {str(v) for v in detail[f"{model_id}__sigma_source"]} == {"detector"}, \
             f"{model_id} 每组 σ 来源标识异常"
 
         alert = block["crlb_alert"]
@@ -341,6 +341,13 @@ def test_criterion_3_slices_markers_and_alert_lines(evaluate_tree: dict):
                 f"{model_id} CRLB 对照缺席却没写原因(静默跳过等于撒谎)"
             print(f"\n[标准 3] {model_id}:CRLB 对照缺席({block['crlb_note'][:60]})")
             continue
+        # 匹配口径标识(2026-10-20 定案):像素空间 + 检测器级 σ;
+        # 逐行铁律:实测低于下界的行数必须为 0(出现即口径错配 bug)
+        assert alert.get("caliber") == "pixel_reproj_detector", \
+            f"{model_id} CRLB 对照口径标识缺失或不对:{alert.get('caliber')!r}"
+        assert alert.get("n_pointwise_violations") == 0, \
+            f"{model_id} 逐行铁律核查违例 {alert.get('n_pointwise_violations')} 行" \
+            "(实测低于理论下界,物理上不可能,口径必有错配)"
         # 告警线反推核验:s = sqrt(chi2.ppf(alpha, df)/df),df 自适应不写死
         df = int(alert["df"])
         expected_hard = float(np.sqrt(chi2.ppf(alpha_hard, df) / df))

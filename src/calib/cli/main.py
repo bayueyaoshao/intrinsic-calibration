@@ -1618,13 +1618,18 @@ def evaluate() -> None:
     typer.echo("  3) 具体看哪里:selection.selected(当选模型)与 "
                "selection.verdicts(逐模型三段数值与 pass 布尔);cv.models "
                "各模型 mean_heldout_px 并排;slices 段各模型的 crlb_alert"
-               ".per_param(有无 below_hard=true);notes 里的 Fisher 预警文案。")
+               "(匹配口径 = 检测器级 σ × 内参块下界推到逐角点重投影位移,"
+               "per_param 是中位/95分位/最大三条统计量,看有无 below_hard=true,"
+               "逐行底账在 experiments/slices.npz 的 group_uv/group_bound_px);"
+               "notes 里的 Fisher 预警文案。")
     typer.echo("  4) 好坏判据:三判据全 PASS 的模型里 held-out 最小者当选;"
-               "任何参数实测低于同口径 CRLB 告警线(硬线数值见 slices 段 "
-               "crlb_alert.lines.hard,本数据约 0.42 px 量级)都应有 FAIL + "
-               "告警说明而非静默;当选的是 m3/m4 时,应能读到它与 Fisher "
-               "退化发现的关系说明;test 并排成绩应与 CV held-out 排序大体一致"
-               "(明显倒挂要提问)。")
+               "逼近 CRLB 判定的噪声口径是每角点重复拍摄的检测器级方差,"
+               "判定在像素空间(角点重投影位移),任何统计量实测低于同口径 "
+               "CRLB 告警线(硬线数值见 slices 段 crlb_alert.lines.hard,"
+               "本数据约 0.42 量级)或逐行核查出现违例"
+               "(n_pointwise_violations > 0)都应有 FAIL + 告警说明而非静默;"
+               "当选的是 m3/m4 时,应能读到它与 Fisher 退化发现的关系说明;"
+               "test 并排成绩应与 CV held-out 排序大体一致(明显倒挂要提问)。")
     typer.echo(f"  评估产物:{out_dir}")
     typer.echo(f"  汇总报告:{paths['evaluate_json']}(明细旁车 "
                f"{len(paths['detail_npz'])} 份:experiments/)")

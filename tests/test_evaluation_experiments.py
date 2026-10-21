@@ -25,7 +25,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from scipy.sparse import csr_matrix
 
 from calib.evaluation import experiments as experiments_mod
 from calib.evaluation.experiments import (
@@ -352,7 +351,7 @@ def test_px_dispersion_pixel_equivalence():
 
 @pytest.fixture
 def slice_setup(make_true_views):
-    """重复张分组地基:3 姿态 × 2 张(组数 = 最少重复张数 = 2)+ 时域 σ。"""
+    """重复张分组地基:3 姿态 × 2 张(组数 = 最少重复张数 = 2)+ 检测器口径 σ。"""
     views, _k = make_true_views(n_views=6)
     board = BoardSpec(cols=11, rows=8, square_size_mm=20.0)
     obs = ObservationSet(
@@ -365,7 +364,7 @@ def slice_setup(make_true_views):
     )
     base = CalibrationConfig()
     cfg = replace(base, evaluate=replace(base.evaluate, models=("m1",), evaluate_max_workers=1))
-    return {"obs": obs, "board": board, "cfg": cfg, "noise_report": {"sigma_temporal_corner": 0.30}}
+    return {"obs": obs, "board": board, "cfg": cfg, "noise_report": {"sigma_detector_corner": 0.30}}
 
 
 def test_lopo_covers_all_poses_and_deterministic(cv_setup):
@@ -459,8 +458,9 @@ def test_slices_group_count_and_params(slice_setup):
 
 def test_slices_same_caliber_crlb_metadata(slice_setup):
     """行为 4:每组记录带口径标识 observation_set(小样按组内姿态数如实记,
-    语义 = 每姿态单张)+ sigma_source="temporal";经验 std(组间逐参数
-    ddof=1)与各组 SE 均值都与明细数组对账。"""
+    语义 = 每姿态单张)+ sigma_source="detector"(匹配口径,2026-10-20
+    定案);经验 std(组间逐参数 ddof=1)与各组 SE 均值都与明细数组对账;
+    像素空间对照的逐行底账(重投影 / 下界)随明细旁车落盘。"""
     s = slice_setup
     report = slices_by_index(
         s["obs"], s["board"], s["cfg"], {"m1": {"loss": "linear"}}, s["noise_report"]
@@ -468,8 +468,9 @@ def test_slices_same_caliber_crlb_metadata(slice_setup):
     m = report["models"]["m1"]
     for rec in m["group_records"]:
         assert rec["observation_set"] == "views3_single_frame"
-        assert rec["sigma_source"] == "temporal"
+        assert rec["sigma_source"] == "detector"
     assert m["sigma_used"] == pytest.approx(0.30)
+    assert "像素空间" in m["crlb_caliber_note"]
 
     detail = report["_slice_detail"]["m1"]
     names = [str(x) for x in detail["param_names"]]
@@ -482,38 +483,65 @@ def test_slices_same_caliber_crlb_metadata(slice_setup):
     for name, v in m["crlb_se_mean"].items():
         assert v == pytest.approx(se_mean[name], rel=1e-12)
 
+    # 像素空间底账:每组重投影 (组, 视图, 角点, 2) 与逐行下界 (组, 2·视图·角点)
+    n_pts = s["obs"].object_points.shape[0]
+    assert detail["group_uv"].shape == (2, 3, n_pts, 2)
+    assert detail["group_bound_px"].shape == (2, 2 * 3 * n_pts)
+    assert np.isfinite(detail["group_uv"]).all()
+    assert np.isfinite(detail["group_bound_px"]).all()
+    assert (detail["group_bound_px"] >= 0).all()
+
+    # 像素空间对照与底账对账:实测统计量 = 组间散布(与逐行底账同源)
+    alert = m["crlb_alert"]
+    assert alert is not None, "干净合成数据上像素空间对照应照常产出"
+    assert alert["caliber"] == "pixel_reproj_detector"
+    meas_rows = np.std(detail["group_uv"], axis=0, ddof=1).ravel()
+    bound_rows = detail["group_bound_px"].mean(axis=0)
+    assert alert["measured_stats_px"]["重投影位移中位"] == pytest.approx(
+        float(np.median(meas_rows)), rel=1e-12
+    )
+    assert alert["bound_stats_px"]["重投影位移中位"] == pytest.approx(
+        float(np.median(bound_rows)), rel=1e-12
+    )
+    assert alert["n_values_checked"] == meas_rows.size
+    assert alert["n_pointwise_violations"] == int((meas_rows < bound_rows).sum())
+
 
 def test_slices_forbid_poses80_aggregated_reference():
-    """行为 4(对照口径禁令):分组对照必须每组新算同口径 CRLB,绝不读取
+    """行为 4(对照口径禁令):分组对照必须每组新算匹配口径 CRLB,绝不读取
     poses80 聚合记录——连拍均值口径的 σ/√8 折减冒充单张口径会造成假告警
-    或漏告警(Pitfall 2,T-04-04-01)。源码级扫描锁死。"""
+    或漏告警(Pitfall 2)。源码级扫描锁死。"""
     source = Path(experiments_mod.__file__).read_text(encoding="utf-8")
     assert "poses80" not in source, (
         "experiments.py 里出现了 poses80 聚合口径的引用:分组实验的 CRLB "
-        "对照必须每组新算(marginalized_fisher + crlb_se),不许读聚合记录"
+        "对照必须每组新算(_group_crlb_block),不许读聚合记录"
     )
 
 
 def test_slices_hard_alert_fires_through_wiring(slice_setup, monkeypatch):
-    """行为 5(D-06 不静默):经验 std 显著低于同口径 CRLB 的合成场景
-    (Fisher 信息调到极小 → σ_CRLB 巨大)→ crlb_alert 判 fail、告警说明
-    带参数名;组数与双档 alpha 从配置正确传入(df = 组数 − 1)。"""
+    """行为 5(D-06 不静默):实测显著低于同口径 CRLB 的合成场景
+    (下界人为抬到极大)→ crlb_alert 判 fail、告警说明带统计量名;
+    组数与双档 alpha 从配置正确传入(df = 组数 − 1)。"""
     s = slice_setup
 
-    def tiny_fisher(model, obs, params, rvecs, tvecs):
-        f = np.eye(len(model.param_names)) * 1e-8  # 信息量极小 → 下界极高
-        return f, csr_matrix(f), {"n_views": len(obs.image_ids)}
+    def huge_bound(model, obs, params_vec, rvecs, tvecs, sigma):
+        se = np.full(len(model.param_names), 1e6)  # 参数空间下界抬到极大
+        bound = np.full(2 * len(obs.image_ids) * obs.object_points.shape[0], 1e6)
+        return se, bound
 
-    monkeypatch.setattr(experiments_mod, "marginalized_fisher", tiny_fisher)
+    monkeypatch.setattr(experiments_mod, "_group_crlb_block", huge_bound)
     report = slices_by_index(
         s["obs"], s["board"], s["cfg"], {"m1": {"loss": "linear"}}, s["noise_report"]
     )
     alert = report["models"]["m1"]["crlb_alert"]
-    assert alert is not None, "经验 std 远低于理论下界的场景必须触发对照检查"
+    assert alert is not None, "实测远低于理论下界的场景必须触发对照检查"
     assert alert["verdict"] == "fail"
     assert alert["df"] == 1, "自由度 = 组数 − 1(2 组 → df=1)"
     assert alert["verdict_note"], "告警说明必须非空(D-06 硬告警不静默)"
-    assert "fx" in alert["verdict_note"], f"告警说明要带参数名:{alert['verdict_note']}"
+    assert "重投影位移" in alert["verdict_note"], (
+        f"告警说明要带像素空间统计量名:{alert['verdict_note']}"
+    )
+    assert alert["n_pointwise_violations"] > 0, "下界抬到极大时逐行铁律核查必须报违例"
     assert alert["lines"]["hard"] > 0 and alert["lines"]["soft"] > alert["lines"]["hard"]
 
 
