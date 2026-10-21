@@ -501,24 +501,28 @@ def radius_footprint(uv: np.ndarray, fx: float, fy: float, cx: float, cy: float)
 | A5 | Fisher 补拍预演(what-if)的合成位姿能代表真实"够到四角"的拍摄(几何上由投影约束反推位姿,但未拍过) | Pattern 4 可选 | 预演数字仅作参考预期;已按结论 5 手段 2 的声明纪律要求产物注明"假设非实测"。若用户不接受任何合成证据,砍掉此可选项,ANA-04 仍达标 |
 | A6 | analyze 输出目录命名 `output/analyze/run_<ts>/`(pipeline.md 第⑦行写的是 "analysis/*.json",本方案以 analyze.json 主契约 + analysis/ 明细子目录落地并在阶段收尾同步 pipeline.md——收尾清单本来就要求同步) | Artifact Contract | 纯命名层;阶段收尾同步文档后无歧义 |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **COR-02 的参照口径(定位误差相对谁?)**
    - What we know: 无绝对真值;注入实验用"各方法自己的干净检出"当基线。若 COR-02 沿用,则衡量的是"退化敏感度"而非"绝对精度";若统一用生产 SB 干净检出,则对 SB 本家有零点偏好。
    - What's unclear: 用户更认可哪种口径作为"最优"的判据。
    - Recommendation: 双参照并行落盘(方案已在 Pattern 5 定型):方法自参照画敏感度曲线(主曲线),相对生产 SB 的偏移表作旁证(跨方法绝对偏移)。判读文案分开表述。此问题留 discuss-phase 或计划 checkpoint 一句话确认即可,不阻塞规划。
+   - **RESOLVED(2026-10-21,裁定①):** 双口径并报(方法自参照 `_self` 主曲线 + 生产 SB 参照 `_prod_sb` 旁证),按 Recommendation 落地 → 05-05。
 
 2. **Fisher 补拍预演(what-if)做不做**
    - What we know: 成本极低(FIM 秒级)、与 findings 结论 5"动手前先查 CRLB"直接呼应;但属合成证据。
    - Recommendation: 做,但作为 ANA-04 的附加产物并带"假设非实测"声明(见 A5);用户若不要,砍除不影响任何成功判据。
+   - **RESOLVED(2026-10-21,裁定②):** 做,仅 full 档,产物强制带"合成假设非实测"声明 → 05-04。
 
 3. **COR-02 是否需要"标定级端到端"验证(用退化角点重标定看内参变化)**
    - What we know: 端到端证据最强,但每格一次完整标定(秒级~百秒级)× 网格 = 小时级;角点级误差曲线 + 既有"窗口偏差不可见于重投影"知识已覆盖主要风险。
    - Recommendation: 不进默认范围;可在 full 档留一个可选开关(对最优/最劣两档配置各做一次小样重标定对比)。deferred 到 discuss。
+   - **RESOLVED(2026-10-21,裁定③):** 不进 Phase 5 默认范围;分析结论只给"建议回环"提示,实际回环动作归 Phase 6。
 
 4. **analyze 是否接管"run-all 接线"**
    - What we know: run-all 现停在阶段⑤(crlb.json 为止);REP-03(Phase 6)才要求全流水线一条命令。
    - Recommendation: Phase 5 不动 run-all;analyze 作为独立命令交付,接线归 Phase 6。
+   - **RESOLVED(2026-10-21,裁定④):** Phase 5 不动 run-all,接线归 Phase 6(REP-03)。
 
 ## Environment Availability
 
