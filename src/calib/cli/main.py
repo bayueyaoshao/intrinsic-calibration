@@ -28,6 +28,7 @@ from calib.analysis.artifacts import (
     save_analyze_report,
 )
 from calib.analysis.budget import run_budget
+from calib.analysis.residual_structure import run_residual_structure
 from calib.corners.artifacts import CANONICAL_RULE_VERSION, save_corners
 from calib.corners.canonical import burst_consistency
 from calib.corners.detect import detect_classic, detect_sb
@@ -80,7 +81,11 @@ from calib.solve.matrix import run_calibration_matrix
 from calib.solve.observation import excluded_image_ids, load_observation_set
 from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
-from calib.visualization.analyze_figs import plot_budget_bars
+from calib.visualization.analyze_figs import (
+    plot_budget_bars,
+    plot_coverage_footprint,
+    plot_radial_bands,
+)
 from calib.visualization.evaluate_figs import (
     plot_cv_errorbars,
     plot_dispersion_compare,
@@ -1804,7 +1809,7 @@ def evaluate() -> None:
 
 @app.command(help="⑦ 误差归因:实际误差 vs 理论极限,差在哪个方向、哪一环、还有没有优化空间")
 def analyze() -> None:
-    """流水线第⑦步:误差归因一条龙(误差预算先行,诊断五块逐计划接入)。
+    """流水线第⑦步:误差归因一条龙(误差预算先行,诊断块逐计划接入)。
 
     步骤:读配置 → 上游六轮定位(corners / noise / calibration / fisher /
     evaluate 各找最新一轮,数据清单沿角点血缘取同轮那份;缺文件或失败轮
@@ -1812,8 +1817,9 @@ def analyze() -> None:
     (quick 档实验明细只有当选模型,一切明细键按它拼)→ 血缘登记:全部
     上游产物一次登记进指纹,防串轮 → 六块执行区:块 1 误差预算直调
     (刻意不套逐块兜底——实测低于理论下界的铁律硬报错必须冒泡到外层,
-    失败契约落盘后退出码 1);块 2–6 现阶段留位(由 05-03~05-06 计划逐块
-    接入)→ analyze.json + analysis/*.npz 明细旁车 + 预算证据图落盘
+    失败契约落盘后退出码 1);块 2 残差方向分解(单块失败该段记 None,
+    不中断其余分析块);块 3–6 留位(由 05-04~05-06 计划逐块接入)→
+    analyze.json + analysis/*.npz 明细旁车 + 证据图落盘
     (图失败只播报不拦主产物)→ 中途失败也照常落盘失败契约再退出码 1 →
     打印中文汇总与人工核查四要素指引。
 
@@ -1937,8 +1943,8 @@ def analyze() -> None:
         ref_rvec = np.asarray(data["rvecs"][0], dtype=np.float64)
         ref_tvec = np.asarray(data["tvecs"][0], dtype=np.float64)
 
-    typer.echo(f"开始误差归因:目标模型 {model_id}(误差预算先行,诊断五块"
-               f"由后续计划逐块接入)……")
+    typer.echo(f"开始误差归因:目标模型 {model_id}(误差预算先行,"
+               f"残差方向分解随行,其余诊断块逐计划接入)……")
     typer.echo(f"  档位:{profile_note}")
     typer.echo(f"  上游:corners {corners_run.name} / noise {noise_run.name} / "
                f"calibration {calib_run.name} / fisher {fisher_run.name} / "
@@ -1946,10 +1952,46 @@ def analyze() -> None:
 
     # ---- 六块执行区:块 1 误差预算直调(刻意不套逐块兜底——实测低于
     # 理论下界的铁律硬报错必须冒泡到外层失败契约,退出码 1,不静默);
-    # 块 2–6 现阶段显式置 None 留位 ----
+    # 块 2 起用 _stage 逐块兜底(照 evaluate 体例:单块失败该段记 None,
+    # 不中断其余分析块);块 3–6 显式置 None 留位 ----
+    def _stage(name: str, run):
+        try:
+            return run()
+        except Exception as e:  # noqa: BLE001  故意宽接:单块失败转缺席段
+            typer.echo(f"  {name}未跑成(该段记 None,不中断其余分析块):"
+                       f"{type(e).__name__}——{e}")
+            return None
+
     budget_section: dict | None = None
     budget_detail: dict | None = None
-    residual_structure = None   # 块 2 残差方向分解(由 05-03 计划接入)
+
+    def _block_residual():
+        """块 2 取数 + 分解(取数也在块内:上游角点装不下只垮这一块)。
+
+        train 侧观测集沿用 evaluate 的排除名单体例(cfg.exclude_images),
+        test 侧无排除;uv_all 把 train/test 全部角点拼一起,给覆盖足迹图。
+        """
+        obs_train = load_observation_set(
+            corners_run / "corners_train_sb.npz", manifest_path, board,
+            split="train", exclude_images=tuple(cfg.exclude_images))
+        obs_test = load_observation_set(
+            corners_run / "corners_test_sb.npz", manifest_path, board,
+            split="test")
+        section, detail = run_residual_structure(
+            model_id, evaluate_report, calib_run, obs_train, obs_test,
+            board, cfg)
+        uv_all = np.concatenate([
+            np.asarray(detail["uv_train"], dtype=np.float64).reshape(-1, 2),
+            np.asarray(obs_test.image_points, dtype=np.float64).reshape(-1, 2),
+        ])
+        return section, detail, uv_all
+
+    residual_structure: dict | None = None
+    residual_detail: dict | None = None
+    residual_uv_all: np.ndarray | None = None
+    block2 = _stage("残差方向分解", _block_residual)
+    if block2 is not None:
+        residual_structure, residual_detail, residual_uv_all = block2
     test_xyz = None             # 块 3 test 三分量分解(由 05-04 计划接入)
     sensitivity = None          # 块 4 参数敏感度排序(由 05-04 计划接入)
     corner_opt = None           # 块 5 角点寻优实验(由 05-05 计划接入)
@@ -1994,6 +2036,9 @@ def analyze() -> None:
                 "evaluate": evaluate_run.name,
             },
             "missing_sections": partial,
+            **({"r_normalization_basis":
+                residual_structure["r_normalization_basis"]}
+               if residual_structure is not None else {}),
             "sigma_detector_corner": float(sigma_detector),
             "ref_pose": (
                 f"选定模型 {model_id} 全量精化解第 0 视图"
@@ -2005,9 +2050,11 @@ def analyze() -> None:
     }
     if budget_section is not None:
         report["_budget_detail"] = budget_detail
+    if residual_structure is not None:
+        report["_residual_detail"] = residual_detail
     paths = save_analyze_report(out_dir, report, lineage)
 
-    # ---- 预算证据图(附加产物:单张失败只播报,不拦主产物)----
+    # ---- 证据图(附加产物:单张失败只播报,不拦主产物)----
     figures_dir = out_dir / "figures"
     n_figs = 0
     if budget_section is not None:
@@ -2016,6 +2063,20 @@ def analyze() -> None:
             n_figs += 1
         except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
             typer.echo(f"  预算图未生成(不影响数据产物):{type(e).__name__}——{e}")
+    if residual_structure is not None:
+        for fig_name, plot_it in (
+            ("残差分带曲线图", lambda: plot_radial_bands(
+                residual_structure, figures_dir / "radial_bands.png")),
+            ("覆盖足迹图", lambda: plot_coverage_footprint(
+                residual_structure, residual_uv_all,
+                figures_dir / "coverage_footprint.png")),
+        ):
+            try:
+                plot_it()
+                n_figs += 1
+            except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
+                typer.echo(f"  {fig_name}未生成(不影响数据产物):"
+                           f"{type(e).__name__}——{e}")
 
     # ---- 中文汇总 + 人工核查四要素指引 ----
     typer.echo("误差归因完成,analyze.json 与预算证据已写盘。")
@@ -2028,6 +2089,13 @@ def analyze() -> None:
             f"三统计量实测是同口径下界的 "
             f"{ratios['重投影位移中位']:.0f} / {ratios['重投影位移95分位']:.0f} / "
             f"{ratios['重投影位移最大']:.0f} 倍")
+    if residual_structure is not None:
+        cov = residual_structure["train"]["coverage"]
+        typer.echo(
+            f"  残差方向分解:最远观测 r={cov['r_max_obs']:.3f},画面四角 "
+            f"r={cov['r_corner_frame']:.3f},r>0.5 的观测占 "
+            f"{cov['frac_beyond_05']:.1%} 却承载 k2 信息的 "
+            f"{cov['info_share_beyond_05']:.1%}(覆盖判据见 findings 结论 5)")
     if partial:
         typer.echo(f"  待接入的分析段({len(partial)} 个,报告记 None):"
                    f"{'、'.join(partial)}——由 05-03~05-06 计划逐块接入")
@@ -2040,11 +2108,18 @@ def analyze() -> None:
                "(CRLB,只考虑角点检测噪声时的最好水平)还有多远;"
                "analysis/budget.npz 是逐行底账(全部(视图,角点)的实测散布、"
                "同口径理论下界与比值,供逐行复核)。")
-    typer.echo("  3) 具体看哪里:budget.rows 逐参数各列(经验标准差、像素当量、"
-               "bootstrap / 位姿抽样 / 多起点三列晃动来源、CRLB 参考列、利用率"
-               "比值——只有 fx/fy/cx/cy 有值,k1–k3/p1/p2 的单独对照无意义,"
-               "见 crlb_caliber_note);budget.recheck(独立重算与 evaluate 落账"
-               "逐位对账是否一致);budget.lines.hard(硬告警线,本数据约 0.42)。")
+    where_to_look = ("budget.rows 逐参数各列(经验标准差、像素当量、"
+                     "bootstrap / 位姿抽样 / 多起点三列晃动来源、CRLB 参考列、"
+                     "利用率比值——只有 fx/fy/cx/cy 有值,k1–k3/p1/p2 的单独对照"
+                     "无意义,见 crlb_caliber_note);budget.recheck(独立重算与 "
+                     "evaluate 落账逐位对账是否一致);budget.lines.hard(硬告警线,"
+                     "本数据约 0.42)")
+    if residual_structure is not None:
+        where_to_look += (";residual_structure 段(train/test 的 bands 逐带散布与"
+                          "系统偏移表、coverage 覆盖足迹、extrapolation_note 外推"
+                          "披露——最远观测 r 到画面四角之间没有照片,k2/k3 在那里"
+                          "纯靠外推)")
+    typer.echo(f"  3) 具体看哪里:{where_to_look}。")
     typer.echo("  4) 好坏判据:零违例(n_pointwise_violations = 0)且三个统计量"
                "比值全部不低于硬告警线(约 0.42)才算 pass;本数据的基准是实测"
                "为同口径下界的约 102 / 1108 / 1444 倍——远高于线说明精度瓶颈"

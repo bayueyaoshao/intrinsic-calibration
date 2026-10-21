@@ -133,22 +133,128 @@ def analyze_tree() -> dict:
 
 
 def test_analyze_sections_shape_and_selected_model(analyze_tree: dict):
-    """契约形状:budget 段有值,其余五段显式缺位(None)并进
-    meta.missing_sections;目标模型与 evaluate 选型结论一致(m2)。"""
+    """契约形状:budget 与 residual_structure 段有值,其余四段显式缺位
+    (None)并进 meta.missing_sections;目标模型与 evaluate 选型结论一致
+    (m2)。"""
     report = analyze_tree["report"]
     budget = report["budget"]
     assert isinstance(budget, dict) and budget, "budget 段缺席(误差归因没跑成)"
-    for key in ("residual_structure", "test_xyz", "sensitivity",
-                "corner_opt", "anisotropy"):
+    residual = report["residual_structure"]
+    assert isinstance(residual, dict) and residual, \
+        "residual_structure 段缺席(残差方向分解没跑成)"
+    for key in ("test_xyz", "sensitivity", "corner_opt", "anisotropy"):
         assert report[key] is None, \
             f"{key} 段应由后续计划接入,当前必须显式为 None"
     assert set(report["meta"]["missing_sections"]) == {
-        "residual_structure", "test_xyz", "sensitivity", "corner_opt", "anisotropy"}
+        "test_xyz", "sensitivity", "corner_opt", "anisotropy"}
     assert report["meta"]["selected_model"] == "m2", \
         f"目标模型应与 evaluate 选型结论一致,实际 {report['meta']['selected_model']!r}"
     assert budget["schema"] == "analyze-budget-v1"
     assert budget["sigma_detector_corner"] == pytest.approx(0.008708, abs=1e-4), \
         "噪声口径必须是检测器级 σ(CRLB 口径铁律,时域口径会虚高约 35 倍)"
+    assert residual["schema"] == "analyze-residual-v1"
+    assert "delivery" in report["meta"]["r_normalization_basis"], \
+        "r 归一化基准必须随 meta 透传(跨轮比较先对齐口径)"
+    assert residual["r_normalization_baseline_check"]["status"] == "consistent", \
+        "r 归一化基准应与 findings 结论 5 所用标定基准一致(delivery 与 " \
+        "标定轮 fx/fy/cx/cy 逐位同源)"
+
+
+def test_analyze_residual_footprint_matches_findings_5(analyze_tree: dict):
+    """findings 结论 5 对账:最远观测 r ≈ 0.685、画面四角 r ≈ 0.796
+    (各 ±2%);r>0.5 观测约两成(21.1%)却承载 k2 信息约 61.4%(±10%);
+    外推区间恰为 [r_max_obs, r_corner_frame],披露文案点出"外推"与"k2"。"""
+    residual = analyze_tree["report"]["residual_structure"]
+    cov = residual["train"]["coverage"]
+    assert cov["r_max_obs"] == pytest.approx(0.685, rel=0.02), \
+        f"最远观测 r {cov['r_max_obs']:.4f} 偏离结论 5 基准 0.685 超过 2%"
+    assert cov["r_corner_frame"] == pytest.approx(0.796, rel=0.02), \
+        f"画面四角 r {cov['r_corner_frame']:.4f} 偏离结论 5 基准 0.796 超过 2%"
+    assert cov["extrapolation_interval"] == pytest.approx(
+        [cov["r_max_obs"], cov["r_corner_frame"]]), \
+        "外推区间必须恰为 [最远观测 r, 画面四角 r]"
+    assert cov["frac_beyond_05"] == pytest.approx(0.211, rel=0.10), \
+        f"r>0.5 观测占比 {cov['frac_beyond_05']:.3f} 偏离结论 5 基准 0.211"
+    assert cov["info_share_beyond_05"] == pytest.approx(0.614, rel=0.10), \
+        f"k2 信息份额 {cov['info_share_beyond_05']:.3f} 偏离结论 5 基准 0.614"
+    note = residual["extrapolation_note"]
+    assert "外推" in note and "k2" in note, \
+        "外推披露文案必须点名「外推」与「k2」(畸变外推风险显式披露)"
+    ext = residual["extrapolation"]
+    assert ext["applicable"] is True
+    assert ext["r_max_obs"] == pytest.approx(cov["r_max_obs"])
+    assert ext["k2_wobble_at_corner_frame"] > ext["k2_wobble_at_r_05"] \
+        > ext["k2_wobble_at_r_04"], "k2 晃动必须随 r 递增(r⁴ 律)"
+    assert len(ext["criteria_table"]) == 3, "判据表应三行(中区/外环/外推区)"
+    print(f"\n[结论 5] r_max_obs={cov['r_max_obs']:.3f},四角 "
+          f"r={cov['r_corner_frame']:.3f},r>0.5 占 "
+          f"{cov['frac_beyond_05']:.1%} 承载 k2 信息 "
+          f"{cov['info_share_beyond_05']:.1%}")
+
+
+def test_analyze_residual_bands_and_test_side(analyze_tree: dict):
+    """分带与 test 侧:test 65 张全评分(n_failed 有数值键留痕);两侧
+    bands 行数与分带边界一致(默认 0/0.2/0.4/0.6/0.8);实测最远观测
+    r≈0.685 没超出最外边界 0.8,train 超界计数应为 0(与最外带
+    n_beyond_hi 同源同值)。"""
+    residual = analyze_tree["report"]["residual_structure"]
+    edges = residual["band_edges"]
+    assert edges == pytest.approx([0.0, 0.2, 0.4, 0.6, 0.8]), \
+        f"分带边界应读配置默认值,实际 {edges}"
+    n_bands = len(edges) - 1
+    test_blk = residual["test"]
+    assert test_blk["n_frames"] == 65, \
+        f"test 侧应逐帧评分 65 张,实际 {test_blk['n_frames']}"
+    assert isinstance(test_blk["n_failed"], int) and test_blk["n_failed"] >= 0, \
+        "失败帧计数键必须在盘(失败留痕,不冒充)"
+    assert test_blk["per_frame_rms"]["median_px"] is not None, \
+        "test 逐帧 RMS 中位必须有值(内参当尺子的独立考题成绩)"
+    for side in ("train", "test"):
+        bands = residual[side]["bands"]
+        assert len(bands) == n_bands, f"{side} bands 应 {n_bands} 行"
+        assert bands[-1]["n_beyond_hi"] >= 0
+    assert residual["train"]["n_beyond_last_edge"] == \
+        residual["train"]["bands"][-1]["n_beyond_hi"], \
+        "train 超界计数与最外带 n_beyond_hi 必须同源同值"
+    # 实测最远 r 0.685 < 边界 0.8:超界应为 0(有观测越界才非零)
+    assert residual["train"]["bands"][-1]["n_beyond_hi"] == 0, \
+        "实测最远 r≈0.685 未超出边界 0.8,超界计数应为 0"
+    print("\n[分带] train 每带 RMS:"
+          + ", ".join(
+              f"[{b['band_lo']:g},{b['band_hi']:g})={b['rms_px']}"
+              for b in residual["train"]["bands"])
+          + f";test {test_blk['n_frames']} 张失败 {test_blk['n_failed']} 张")
+
+
+def test_analyze_residual_sidecars_and_figures(analyze_tree: dict):
+    """产物保真:residual_structure.npz 旁车(r_train 640×88 逐角点半径)
+    与两张空间图(r 分带曲线 + 覆盖足迹)都在盘。"""
+    run_dir = analyze_tree["run_dir"]
+    detail = analyze_tree["details"]["residual_structure"]
+    assert detail["r_train"].shape == (640, 88), \
+        f"r_train 应 (640, 88)(640 视图 × 88 角点),实际 {detail['r_train'].shape}"
+    assert (run_dir / "analysis" / "residual_structure.npz").is_file()
+    assert (run_dir / "figures" / "radial_bands.png").is_file()
+    assert (run_dir / "figures" / "coverage_footprint.png").is_file()
+    print(f"\n[产物] residual_structure.npz(r_train {detail['r_train'].shape})"
+          "+ radial_bands.png + coverage_footprint.png 在盘")
+
+
+def test_analyze_block2_uses_stage_and_budget_stays_direct():
+    """源码断言(接线体例):块 2 残差方向分解包在 _stage 里(单块失败
+    记 None 照常出报告),块 1 预算依旧直调不套兜底(铁律违例必须退出
+    码 1)——两种失败语义不许混。"""
+    import inspect
+
+    import calib.cli.main as cli_main
+
+    source = inspect.getsource(cli_main.analyze)
+    assert '_stage("残差方向分解"' in source, "块 2 必须走 _stage 逐块兜底"
+    assert "run_residual_structure" in source and "run_budget(" in source
+    # budget 直调:run_budget 的调用行不许出现在 _stage 调用行上
+    for line in source.splitlines():
+        if "run_budget(" in line:
+            assert "_stage" not in line, "budget 必须直调,不许套 _stage"
 
 
 def test_analyze_budget_recheck_consistent_and_zero_violations(analyze_tree: dict):
