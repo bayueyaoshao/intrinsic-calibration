@@ -22,11 +22,18 @@ import cv2
 import numpy as np
 import typer
 
+from calib.analysis.artifacts import (
+    SCHEMA_VERSION_ANALYZE,
+    make_failure_analyze,
+    save_analyze_report,
+)
+from calib.analysis.budget import run_budget
 from calib.corners.artifacts import CANONICAL_RULE_VERSION, save_corners
 from calib.corners.canonical import burst_consistency
 from calib.corners.detect import detect_classic, detect_sb
 from calib.evaluation.artifacts import (
     SCHEMA_VERSION_EVALUATE,
+    load_evaluate_report,
     make_failure_evaluate,
     save_evaluate_report,
 )
@@ -50,6 +57,7 @@ from calib.io.config import load_board, load_calibration
 from calib.io.dataset import imread_checked, scan_dataset_dirs, verify_consistent_resolution
 from calib.io.manifest import latest_run_dir, write_manifest, write_round_diff
 from calib.io.precheck import compute_metrics, judge_suspects
+from calib.models import create_model
 from calib.noise.artifacts import (
     load_crlb_report,
     load_noise_report,
@@ -67,10 +75,12 @@ from calib.noise.transfer import (
     fit_interp,
     save_transfer_curve,
 )
+from calib.solve.baseline import build_object_points
 from calib.solve.matrix import run_calibration_matrix
 from calib.solve.observation import excluded_image_ids, load_observation_set
 from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
+from calib.visualization.analyze_figs import plot_budget_bars
 from calib.visualization.evaluate_figs import (
     plot_cv_errorbars,
     plot_dispersion_compare,
@@ -1794,7 +1804,256 @@ def evaluate() -> None:
 
 @app.command(help="⑦ 误差归因:实际误差 vs 理论极限,差在哪个方向、哪一环、还有没有优化空间")
 def analyze() -> None:
-    _not_implemented(7, "误差归因")
+    """流水线第⑦步:误差归因一条龙(误差预算先行,诊断五块逐计划接入)。
+
+    步骤:读配置 → 上游六轮定位(corners / noise / calibration / fisher /
+    evaluate 各找最新一轮,数据清单沿角点血缘取同轮那份;缺文件或失败轮
+    当场中文报错,不静默)→ 目标模型取 evaluate.json 的 selection.selected
+    (quick 档实验明细只有当选模型,一切明细键按它拼)→ 血缘登记:全部
+    上游产物一次登记进指纹,防串轮 → 六块执行区:块 1 误差预算直调
+    (刻意不套逐块兜底——实测低于理论下界的铁律硬报错必须冒泡到外层,
+    失败契约落盘后退出码 1);块 2–6 现阶段留位(由 05-03~05-06 计划逐块
+    接入)→ analyze.json + analysis/*.npz 明细旁车 + 预算证据图落盘
+    (图失败只播报不拦主产物)→ 中途失败也照常落盘失败契约再退出码 1 →
+    打印中文汇总与人工核查四要素指引。
+
+    硬性规则:命令行零算法参数(一切从 config/calibration.yaml 的
+    analyze 段读,D-12);只写 output/analyze/run_<时间戳>/,input_data
+    与上游产物只读不动;噪声口径铁律只认检测器级 σ(noise.json 顶层键
+    sigma_detector_corner,实测约 0.0087 px;时域口径会把下界虚高约
+    35 倍,绝不允许混用)。
+    """
+    started = datetime.now(UTC)
+    board = load_board(BOARD_PATH)
+    cfg = load_calibration(CALIBRATION_PATH)
+    profile = cfg.analyze.profile
+    if profile == "quick":
+        profile_note = (
+            "quick 档(日常默认):只分析选型定案的当选模型,角点寻优只考"
+            "抽样帧 + 单因素退化栅格(分钟级)"
+        )
+    else:
+        profile_note = "full 档(交付前终跑):全模型全帧全网格 + 补拍预演(小时级)"
+
+    # ---- 上游六轮定位(照 evaluate 体例:各阶段独立跑,各找最新)----
+    corners_run = latest_run_dir(OUTPUT_ROOT, "corners")
+    manifest_path = _manifest_path_for(corners_run, "sb")
+    noise_run = latest_run_dir(OUTPUT_ROOT, "noise")
+    calib_run = latest_run_dir(OUTPUT_ROOT, "calibration")
+    fisher_run = latest_run_dir(OUTPUT_ROOT, "fisher")
+    evaluate_run = latest_run_dir(OUTPUT_ROOT, "evaluate")
+    # 缺文件当场中文报错(串轮/缺文件会让误差归因在错误输入上做对账)
+    for path, how in (
+        (evaluate_run / "evaluate.json", "calib evaluate"),
+        (evaluate_run / "experiments" / "slices.npz", "calib evaluate"),
+        (evaluate_run / "experiments" / "bootstrap.npz", "calib evaluate"),
+        (corners_run / "corners_train_sb.npz", "calib corners(训练侧 sb 路线)"),
+        (corners_run / "corners_test_sb.npz", "calib corners(考试侧 sb 路线)"),
+        (noise_run / "noise.json", "calib noise"),
+        (noise_run / "temporal_sigma_per_corner.npz", "calib noise"),
+        (fisher_run / "crlb.json", "calib fisher"),
+        (manifest_path, "calib ingest"),
+    ):
+        if not path.is_file():
+            raise ValueError(
+                f"上游产物缺失:{path}。误差归因要从它取数,"
+                f"请先运行 {how} 再来。")
+    # 上游质量检查:失败轮的数值字段是 null,拿它当输入等于在空数据上对账
+    evaluate_report = load_evaluate_report(evaluate_run)["report"]
+    if evaluate_report.get("failure_note"):
+        raise ValueError(
+            f"上游 evaluate.json 是失败轮({evaluate_run / 'evaluate.json'}):"
+            f"{evaluate_report['failure_note']}。误差归因消费的是评估实验"
+            f"底账,请先排查 calib evaluate 再重跑分析。")
+    noise_report = load_noise_report(noise_run)["report"]
+    if noise_report.get("failure_note"):
+        raise ValueError(
+            f"上游 noise.json 是失败轮({noise_run / 'noise.json'}):"
+            f"{noise_report['failure_note']}。误差预算的噪声口径以它为准,"
+            f"请先排查 calib noise 再重跑分析。")
+    crlb_report = load_crlb_report(fisher_run)["report"]
+    if crlb_report.get("failure_note"):
+        raise ValueError(
+            f"上游 crlb.json 是失败轮({fisher_run / 'crlb.json'}):"
+            f"{crlb_report['failure_note']}。理论下界与敏感度分析都要从它"
+            f"取数,请先排查 calib fisher 再重跑分析。")
+
+    # ---- 目标模型(quick 档实验明细只有当选模型,一切明细键按它拼)----
+    selected = (evaluate_report.get("selection") or {}).get("selected")
+    if not selected:
+        raise ValueError(
+            f"evaluate.json 的 selection.selected 为空"
+            f"({evaluate_run / 'evaluate.json'}),误差归因没有可分析的"
+            f"目标模型。请先排查 calib evaluate 的选型结论再来。")
+    model_id = str(selected)
+    # 选定模型的分析原料必须齐(Fisher 明细 + 标定三件套)
+    for rel, how in (
+        (f"fisher_{model_id}.npz", "calib fisher"),
+        (f"{model_id}__scipy/result.json", "calib calibrate"),
+        (f"{model_id}__scipy/extrinsics.npz", "calib calibrate"),
+        (f"{model_id}__scipy/residuals.npz", "calib calibrate"),
+    ):
+        base_dir = fisher_run if rel.startswith("fisher_") else calib_run
+        if not (base_dir / rel).is_file():
+            raise ValueError(
+                f"上游产物缺失:{base_dir / rel}。选定模型 {model_id} 的"
+                f"误差归因要用它,请先运行 {how} 再来。")
+
+    round_id = f"run_{started.strftime('%Y%m%d_%H%M%S')}"
+    out_dir = OUTPUT_ROOT / "analyze" / round_id
+
+    # 血缘指纹:全部上游一次登记防串轮(evaluate 轮的 json 与实验底账、
+    # 角点双 npz、数据清单、噪声双件、Fisher 双件、选定模型标定三件套)
+    upstream: dict = {
+        "evaluate.json": evaluate_run / "evaluate.json",
+        "experiments/slices.npz": evaluate_run / "experiments" / "slices.npz",
+        "experiments/bootstrap.npz": evaluate_run / "experiments" / "bootstrap.npz",
+        "corners_train_sb.npz": corners_run / "corners_train_sb.npz",
+        "corners_test_sb.npz": corners_run / "corners_test_sb.npz",
+        "manifest.json": manifest_path,
+        "noise.json": noise_run / "noise.json",
+        "temporal_sigma_per_corner.npz": noise_run / "temporal_sigma_per_corner.npz",
+        "crlb.json": fisher_run / "crlb.json",
+        f"fisher_{model_id}.npz": fisher_run / f"fisher_{model_id}.npz",
+        f"{model_id}__scipy/result.json": calib_run / f"{model_id}__scipy" / "result.json",
+        f"{model_id}__scipy/extrinsics.npz": calib_run / f"{model_id}__scipy" / "extrinsics.npz",
+        f"{model_id}__scipy/residuals.npz": calib_run / f"{model_id}__scipy" / "residuals.npz",
+    }
+    lineage = make_lineage(
+        config_files={"board.yaml": BOARD_PATH, "calibration.yaml": CALIBRATION_PATH},
+        upstream=upstream,
+        round_id=round_id,
+    )
+
+    # 检测器级 σ(口径铁律唯一入口:noise.json 顶层键,预算判定的乘数;
+    # 坏值由 run_budget 在进任何取数前拒绝)
+    sigma_detector = noise_report.get("sigma_detector_corner")
+    model = create_model(model_id)
+    object_points = build_object_points(board)
+    # 参考位姿 = 选定模型全量精化解的第 0 视图(findings 结论 1 惯例:
+    # 像素当量换算的投影基准,随产物 meta 声明)
+    with np.load(upstream[f"{model_id}__scipy/extrinsics.npz"],
+                 allow_pickle=False) as data:
+        ref_rvec = np.asarray(data["rvecs"][0], dtype=np.float64)
+        ref_tvec = np.asarray(data["tvecs"][0], dtype=np.float64)
+
+    typer.echo(f"开始误差归因:目标模型 {model_id}(误差预算先行,诊断五块"
+               f"由后续计划逐块接入)……")
+    typer.echo(f"  档位:{profile_note}")
+    typer.echo(f"  上游:corners {corners_run.name} / noise {noise_run.name} / "
+               f"calibration {calib_run.name} / fisher {fisher_run.name} / "
+               f"evaluate {evaluate_run.name}(血缘已登记)")
+
+    # ---- 六块执行区:块 1 误差预算直调(刻意不套逐块兜底——实测低于
+    # 理论下界的铁律硬报错必须冒泡到外层失败契约,退出码 1,不静默);
+    # 块 2–6 现阶段显式置 None 留位 ----
+    budget_section: dict | None = None
+    budget_detail: dict | None = None
+    residual_structure = None   # 块 2 残差方向分解(由 05-03 计划接入)
+    test_xyz = None             # 块 3 test 三分量分解(由 05-04 计划接入)
+    sensitivity = None          # 块 4 参数敏感度排序(由 05-04 计划接入)
+    corner_opt = None           # 块 5 角点寻优实验(由 05-05 计划接入)
+    anisotropy = None           # 块 6 连拍各向异性(由 05-06 计划接入)
+    try:
+        budget_section, budget_detail = run_budget(
+            model_id, evaluate_report,
+            evaluate_run / "experiments" / "slices.npz",
+            sigma_detector, model, object_points, ref_rvec, ref_tvec)
+    except Exception as e:  # 故意宽接:失败契约(T-05-07),失败也落盘
+        note = f"误差归因中途失败:{type(e).__name__}——{e}"
+        save_analyze_report(out_dir, make_failure_analyze(lineage, note), lineage)
+        typer.echo(f"误差归因失败(失败报告已照常落盘,各分析段为 null):{note}")
+        typer.echo(f"  失败报告:{out_dir / 'analyze.json'}")
+        raise typer.Exit(code=1) from e
+
+    # ---- 组装落盘:缺席段进 meta.missing_sections,明细键按段有无挂载 ----
+    partial = [name for name, sec in (
+        ("budget", budget_section), ("residual_structure", residual_structure),
+        ("test_xyz", test_xyz), ("sensitivity", sensitivity),
+        ("corner_opt", corner_opt), ("anisotropy", anisotropy)) if sec is None]
+    report = {
+        "schema_version": SCHEMA_VERSION_ANALYZE,
+        "created": lineage["created"],
+        "lineage": {},  # save_analyze_report 统一填(失败报告同样带全血缘)
+        "budget": budget_section,
+        "residual_structure": residual_structure,
+        "test_xyz": test_xyz,
+        "sensitivity": sensitivity,
+        "corner_opt": corner_opt,
+        "anisotropy": anisotropy,
+        "meta": {
+            "round_id": round_id,
+            "selected_model": model_id,
+            "profile": profile,
+            "profile_note": profile_note,
+            "upstream_rounds": {
+                "corners": corners_run.name,
+                "noise": noise_run.name,
+                "calibration": calib_run.name,
+                "fisher": fisher_run.name,
+                "evaluate": evaluate_run.name,
+            },
+            "missing_sections": partial,
+            "sigma_detector_corner": float(sigma_detector),
+            "ref_pose": (
+                f"选定模型 {model_id} 全量精化解第 0 视图"
+                "(extrinsics.npz 的 rvecs[0]/tvecs[0],像素当量换算基准)"
+            ),
+            "duration_s": round((datetime.now(UTC) - started).total_seconds(), 1),
+        },
+        "failure_note": None,
+    }
+    if budget_section is not None:
+        report["_budget_detail"] = budget_detail
+    paths = save_analyze_report(out_dir, report, lineage)
+
+    # ---- 预算证据图(附加产物:单张失败只播报,不拦主产物)----
+    figures_dir = out_dir / "figures"
+    n_figs = 0
+    if budget_section is not None:
+        try:
+            plot_budget_bars(budget_section, figures_dir / "budget_bars.png")
+            n_figs += 1
+        except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
+            typer.echo(f"  预算图未生成(不影响数据产物):{type(e).__name__}——{e}")
+
+    # ---- 中文汇总 + 人工核查四要素指引 ----
+    typer.echo("误差归因完成,analyze.json 与预算证据已写盘。")
+    if budget_section is not None:
+        ratios = budget_section["recheck"]["ratios"]
+        typer.echo(
+            f"  误差预算(模型 {model_id}):判定 {budget_section['verdict']};"
+            f"逐行核查违例 {budget_section['n_pointwise_violations']} 个,"
+            f"逐行最小实测/下界比 {budget_section['min_ratio_pointwise']:.1f};"
+            f"三统计量实测是同口径下界的 "
+            f"{ratios['重投影位移中位']:.0f} / {ratios['重投影位移95分位']:.0f} / "
+            f"{ratios['重投影位移最大']:.0f} 倍")
+    if partial:
+        typer.echo(f"  待接入的分析段({len(partial)} 个,报告记 None):"
+                   f"{'、'.join(partial)}——由 05-03~05-06 计划逐块接入")
+    typer.echo("  人工核查四要素指引:")
+    typer.echo(f"  1) 看哪个文件:{paths['analyze_json']}(主契约)与 "
+               f"{out_dir / 'analysis' / 'budget.npz'}(逐行底账)与 "
+               f"{figures_dir} 下 {n_figs} 张 PNG(图只是可视化,数字以 json 为准)。")
+    typer.echo("  2) 文件作用:analyze.json 的 budget 段是误差预算表——"
+               "每个内参实际晃动多大、距离这批数据天生能定到多准的理论下界"
+               "(CRLB,只考虑角点检测噪声时的最好水平)还有多远;"
+               "analysis/budget.npz 是逐行底账(全部(视图,角点)的实测散布、"
+               "同口径理论下界与比值,供逐行复核)。")
+    typer.echo("  3) 具体看哪里:budget.rows 逐参数各列(经验标准差、像素当量、"
+               "bootstrap / 位姿抽样 / 多起点三列晃动来源、CRLB 参考列、利用率"
+               "比值——只有 fx/fy/cx/cy 有值,k1–k3/p1/p2 的单独对照无意义,"
+               "见 crlb_caliber_note);budget.recheck(独立重算与 evaluate 落账"
+               "逐位对账是否一致);budget.lines.hard(硬告警线,本数据约 0.42)。")
+    typer.echo("  4) 好坏判据:零违例(n_pointwise_violations = 0)且三个统计量"
+               "比值全部不低于硬告警线(约 0.42)才算 pass;本数据的基准是实测"
+               "为同口径下界的约 102 / 1108 / 1444 倍——远高于线说明精度瓶颈"
+               "不在检测噪声,而在系统性误差(docs/findings.md 结论 4);"
+               "哪天比值跌破线或出现违例,就是口径错配或数据被污染的信号,"
+               "命令会当场硬报错而不是静默出表。")
+    typer.echo(f"  分析产物:{out_dir}")
+    typer.echo(f"  汇总报告:{paths['analyze_json']}(明细旁车 "
+               f"{len(paths['detail_npz'])} 份:analysis/)")
 
 
 @app.command(help="⑧ 汇总证据出报告:每一步的结论、图表、数据全部留痕可追溯")
