@@ -272,3 +272,30 @@ def leave_one_pose_out(pose_ids: Sequence[str]) -> list[dict]:
     poses = _checked_unique(pose_ids, "留一姿态")
     return [{"val_pose": p, "train_poses": [q for q in poses if q != p]}
             for p in poses]
+
+
+def sample_pose_ids(pose_ids: Sequence[str], n: int, cfg: CalibrationConfig,
+                    purpose: str = "lopo") -> list[str]:
+    """从姿态名单里按种子抽 n 个(留一姿态抽查用,2026-10-21 裁定)。
+
+    白话:全查 n 个姿态一个不落,抽查只考其中 n 个——抽哪几个由种子
+    决定(体例同交叉验证分折:cfg.seed + 用途标签确定性派生,同配置
+    重跑抽到同一批),不是"只看前 n 个"(那样排在后面的姿态永远没人查)。
+    n >= 姿态数时等于全查,原样返回;抽样只决定"谁被单独考试",
+    不改变训练侧用全体其余姿态的事实。
+
+    返回保持原名单顺序的抽样子集(纯 str,可 json 落盘复查)。
+    """
+    poses = _checked_unique(pose_ids, f"{purpose}抽查")
+    if n < 1:
+        raise ValueError(
+            f"{purpose} 抽查数 {n} 不合法:必须 >= 1。"
+            f"请检查 evaluate.quick_lopo_n(不想抽查就把该档位数改成"
+            f"姿态总数,或用 full 档全查)。")
+    if n >= len(poses):
+        return list(poses)
+    rng = np.random.default_rng(_seed_for(f"{purpose}|sample{n}|{len(poses)}",
+                                          cfg.seed))
+    idx = np.sort(rng.choice(len(poses), size=n, replace=False))
+    return [poses[i] for i in idx.tolist()]
+

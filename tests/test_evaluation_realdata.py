@@ -502,7 +502,15 @@ def test_criterion_4_lopo_table_and_outliers(evaluate_tree: dict):
                 assert v == pytest.approx(per_pose[row["val_pose"]], rel=1e-9), \
                     f"{model_id} 行 {row['val_pose']} 误差与逐姿态表不一致"
     n_poses = len(table_ids)
-    print(f"\n[标准 4] 留一姿态:{n_poses} 姿态 × {len(lopo_models)} 模型;点名名单:"
+    # 抽查落账一致(lopo meta.pose_sample_n,2026-10-21 抽查化;缺键老轮 = 全查)
+    lopo_meta = report["lopo"].get("meta") or {}
+    sample_n = lopo_meta.get("pose_sample_n")
+    if sample_n is not None:
+        assert int(sample_n) == n_poses, \
+            f"lopo meta 记抽查 {sample_n} 个,实际逐姿态表 {n_poses} 个——对不上"
+    print("\n[标准 4] 留一姿态:"
+          + (f"抽查 {n_poses}" if sample_n is not None else f"全查 {n_poses}")
+          + f" 姿态 × {len(lopo_models)} 模型;点名名单:"
           + "; ".join(
               f"{m}:{len(lopo_models[m]['outlier_poses'])} 个"
               for m in lopo_models))

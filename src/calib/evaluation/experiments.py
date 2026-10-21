@@ -56,6 +56,7 @@ from calib.evaluation.splitting import (
     leave_one_pose_out,
     obs_rows,
     pose_row_mask,
+    sample_pose_ids,
     slice_groups_by_index,
     split_by_pose_ids,
     unique_poses,
@@ -682,6 +683,7 @@ def lopo(
     progress=None,
     models: Sequence[str] | None = None,
     warm_inits: dict | None = None,
+    pose_sample_n: int | None = None,
 ) -> dict:
     """留一姿态实验(D-08,EVA-05 实验侧):每次留 1 个姿态当考题。
 
@@ -696,6 +698,10 @@ def lopo(
     "候选模型"——选型选中的,没选出时取交叉验证泛化最优者)。留一姿态
     是"找问题姿态"的诊断,不参与三判据选型,4 个模型全跑属重复证据;
     不传则按配置全模型跑(保持旧行为,小样测试用)。
+    pose_sample_n 参数(2026-10-21 二次提速裁定,quick 档默认 30):
+    只抽 n 个姿态单独考试(种子抽样可复现,splitting.sample_pose_ids),
+    训练侧仍用全体其余姿态——"这 30 个姿态合群"是抽查,漏查姿态要下
+    结论换 full 档全查;None = 全查(旧行为)。
 
     返回 {"schema": "lopo-v1", "models": {mX: {"per_pose", "mean_lopo_px",
     "mad_z", "outlier_poses", "n_failed_poses", "loss_used", "rows"}},
@@ -714,7 +720,15 @@ def lopo(
     _check_obs_board(obs, board)
 
     poses = unique_poses(obs)
-    assignment = leave_one_pose_out(poses)
+    assignment_all = leave_one_pose_out(poses)
+    if pose_sample_n is None or pose_sample_n >= len(assignment_all):
+        assignment = assignment_all
+        sampled_poses = None
+    else:
+        sampled_poses = set(
+            sample_pose_ids(poses, pose_sample_n, cfg, purpose="lopo"))
+        assignment = [e for e in assignment_all
+                      if e["val_pose"] in sampled_poses]
     if models is None:
         models = tuple(eval_cfg.models)
     else:
@@ -809,6 +823,7 @@ def lopo(
         "meta": {
             "n_models": len(models),
             "n_poses": len(poses),
+            "pose_sample_n": (None if sampled_poses is None else len(sampled_poses)),
             "n_solves": len(tasks),
             "n_failed_total": int(sum(m["n_failed_poses"] for m in models_out.values())),
             "mad_z_threshold": float(eval_cfg.mad_z_threshold),

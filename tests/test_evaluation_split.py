@@ -29,6 +29,7 @@ from calib.evaluation.splitting import (
     leave_one_pose_out,
     obs_rows,
     pose_row_mask,
+    sample_pose_ids,
     slice_groups_by_index,
     split_by_pose_ids,
     unique_poses,
@@ -227,6 +228,39 @@ def test_leave_one_pose_out_rejects_empty_and_duplicates():
         leave_one_pose_out([])
     with pytest.raises(ValueError, match="重复"):
         leave_one_pose_out(["pose_a", "pose_a"])
+
+
+# ---- 留一姿态抽查:sample_pose_ids(2026-10-21 quick 档 30/80 裁定)----
+
+def test_sample_pose_ids_deterministic_subset():
+    """抽查 = 种子确定性抽样:同配置两次恒等、是原子集、个数恰为 n。"""
+    poses = _pose_list(80)
+    a = sample_pose_ids(poses, 30, CFG)
+    b = sample_pose_ids(poses, 30, CFG)
+    assert a == b
+    assert len(a) == 30
+    assert set(a) <= set(poses)
+    assert len(set(a)) == 30
+    # 原名单顺序保持(读产物的人好对照)
+    assert a == [p for p in poses if p in set(a)]
+
+
+def test_sample_pose_ids_not_prefix_and_seed_sensitive():
+    """抽样不是"只看前 30 个"(否则后 50 个姿态永远没人查);换 seed 换样本。"""
+    poses = _pose_list(80)
+    a = sample_pose_ids(poses, 30, CFG)
+    assert set(a) != set(poses[:30])  # 前缀抽样被否决的直接证据
+    cfg_other = CalibrationConfig(seed=CFG.seed + 1)
+    assert set(sample_pose_ids(poses, 30, cfg_other)) != set(a)
+
+
+def test_sample_pose_ids_n_ge_len_returns_all_and_zero_rejected():
+    """n >= 姿态数 = 全查原样返回;n < 1 中文报错。"""
+    poses = _pose_list(80)
+    assert sample_pose_ids(poses, 80, CFG) == poses
+    assert sample_pose_ids(poses, 200, CFG) == poses
+    with pytest.raises(ValueError, match="lopo 抽查数"):
+        sample_pose_ids(poses, 0, CFG)
 
 
 # ---- 行为 6:_seed_for——同标签恒等、异标签互异、base_seed 变则全变 ----

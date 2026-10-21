@@ -449,6 +449,33 @@ def test_lopo_models_subset_and_validation(warm_setup):
     assert "evaluate.models" in str(exc_info.value)
 
 
+def test_lopo_pose_sample_n_screens_subset_deterministically(warm_setup):
+    """lopo 抽查(quick 档 30/80 裁定):只考被抽中的姿态,训练仍用全体其余;
+    种子确定性、meta 记录抽查数;n >= 姿态数回落全查。"""
+    from calib.evaluation.splitting import sample_pose_ids, unique_poses
+
+    s = warm_setup
+    kwargs = {"obs": s["obs"], "board": _board_of(s), "cfg": s["cfg"],
+              "optimizer_config": s["optimizer_config"], "models": ["m1"]}
+    rep = experiments_mod.lopo(**kwargs, pose_sample_n=3)
+    expected = sample_pose_ids(unique_poses(s["obs"]), 3, s["cfg"])
+    got = [r["val_pose"] for r in rep["models"]["m1"]["rows"]]
+    assert sorted(got) == sorted(expected)
+    assert rep["meta"]["pose_sample_n"] == 3
+    assert rep["meta"]["n_poses"] == 6  # 抽查不改全体姿态数
+    assert rep["meta"]["n_solves"] == 3
+    # 每行训练侧仍含全体其余姿态(抽查只决定谁被单独考试)
+    row = rep["models"]["m1"]["rows"][0]
+    assert row["n_train_poses"] == 5
+    # 种子确定性:重跑逐位一致
+    rep2 = experiments_mod.lopo(**kwargs, pose_sample_n=3)
+    assert [r["val_pose"] for r in rep2["models"]["m1"]["rows"]] == got
+    # n >= 姿态数 = 全查(旧行为)
+    full = experiments_mod.lopo(**kwargs, pose_sample_n=9)
+    assert full["meta"]["pose_sample_n"] is None
+    assert full["meta"]["n_solves"] == 6
+
+
 def test_load_warm_inits_missing_product_chinese_error(tmp_path):
     """加载器:__scipy 产物缺失当场中文报错(不悄悄退回冷启动)。"""
     from calib.evaluation.experiments import load_warm_inits

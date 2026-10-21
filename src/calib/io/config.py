@@ -359,6 +359,10 @@ class EvaluateConfig:
     quick_cv_n_folds: int = 3
     quick_cv_n_rounds: int = 3
     quick_bootstrap_n: int = 50
+    # quick 档留一姿态抽查数(2026-10-21 二次裁定):80 个姿态里按种子抽
+    # 这么多个单独考试(训练侧仍用全体其余姿态,可复现),其余姿态没被
+    # 抽到不下结论;full 档仍全查
+    quick_lopo_n: int = 30
     # test 整体 RMS 选型的升级门槛(2026-10-21 定案):复杂度高一档的模型
     # 相对当前模型的整体 RMS 提升 ≥ 该比例才升级,否则停驻取更简者;依据
     # docs/findings.md 结论 2(本批数据 m3/m4 只比 m2 好 1.2%–1.9%,选 m2)
@@ -942,7 +946,8 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
         _fail("evaluate.quick_cv_n_folds", quick_cv_n_folds,
               "必须是 >= 2 的整数(quick 档交叉验证折数;1 折留不出考题)")
     for name, default in (("quick_cv_n_rounds", cfg.quick_cv_n_rounds),
-                          ("quick_bootstrap_n", cfg.quick_bootstrap_n)):
+                          ("quick_bootstrap_n", cfg.quick_bootstrap_n),
+                          ("quick_lopo_n", cfg.quick_lopo_n)):
         value = section.get(name, default)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             _fail(f"evaluate.{name}", value,
@@ -989,6 +994,7 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
         quick_cv_n_folds=quick_cv_n_folds,
         quick_cv_n_rounds=section.get("quick_cv_n_rounds", cfg.quick_cv_n_rounds),
         quick_bootstrap_n=section.get("quick_bootstrap_n", cfg.quick_bootstrap_n),
+        quick_lopo_n=section.get("quick_lopo_n", cfg.quick_lopo_n),
         selection_improve_min=float(improve_min),
     )
 

@@ -1347,7 +1347,8 @@ def evaluate() -> None:
         profile_note = (
             "quick 档(日常默认):先全模型交付 + test 选型,四类实验只考当选模型,"
             f"重复缩水为交叉验证 {eval_cfg.quick_cv_n_folds} 折 × "
-            f"{eval_cfg.quick_cv_n_rounds} 轮、bootstrap {eval_cfg.quick_bootstrap_n} 次"
+            f"{eval_cfg.quick_cv_n_rounds} 轮、bootstrap {eval_cfg.quick_bootstrap_n} 次、"
+            f"留一姿态抽查 {eval_cfg.quick_lopo_n} 个(训练仍用全体姿态,可复现)"
         )
     else:
         profile_note = "full 档(新数据首轮 / 交付前终跑):全部模型、正式档重复次数不缩水"
@@ -1450,6 +1451,7 @@ def evaluate() -> None:
 
         # ---- ③b 实验档位落地(quick 只考当选模型 + 重复缩水;选型缺席
         #         或 full 档回退全模型、正式档次数)----
+        lopo_sample_n: int | None = None
         if (eval_cfg.profile == "quick" and selection is not None
                 and selection.get("selected")):
             eff_eval = replace(
@@ -1460,9 +1462,11 @@ def evaluate() -> None:
             )
             eff_cfg = replace(cfg, evaluate=eff_eval)
             experiment_models = (str(selection["selected"]),)
+            lopo_sample_n = eval_cfg.quick_lopo_n
             typer.echo(f"  quick 档:四类实验只考当选模型 {experiment_models[0]}"
                        f"(交叉验证 {eff_eval.cv_n_folds} 折 × {eff_eval.cv_n_rounds} 轮、"
-                       f"bootstrap {eff_eval.bootstrap_n} 次;复核时用 full 档)")
+                       f"bootstrap {eff_eval.bootstrap_n} 次、留一姿态抽查 "
+                       f"{lopo_sample_n} 个;复核时用 full 档)")
         else:
             eff_cfg = cfg
             experiment_models = models
@@ -1609,7 +1613,8 @@ def evaluate() -> None:
             obs_train, board, eff_cfg, optimizer_config,
             progress=_count_progress("留一姿态", 5),
             models=_lopo_candidate_model(cv, selection, models),
-            warm_inits=warm_inits))
+            warm_inits=warm_inits,
+            pose_sample_n=lopo_sample_n))
     except Exception as e:  # 故意宽接:失败契约(T-04-06-04),失败也落盘
         note = f"评估阶段中途失败:{type(e).__name__}——{e}"
         save_evaluate_report(out_dir, make_failure_evaluate(lineage, note), lineage)
@@ -1643,6 +1648,7 @@ def evaluate() -> None:
             "warm_start_experiments": bool(warm_inits),
             "profile": eval_cfg.profile,
             "experiment_models": list(experiment_models),
+            "lopo_pose_sample_n": lopo_sample_n,
             "selection_improve_min": eval_cfg.selection_improve_min,
             "duration_s": round((datetime.now(UTC) - started).total_seconds(), 1),
         },
