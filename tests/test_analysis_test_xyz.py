@@ -80,13 +80,14 @@ def test_inversion_identity_recovers_dx0():
     逐位找回,不允许"差不多");理论 σ 与手算 sqrt(diag(inv(AᵀA))) 一致。
     """
     rng = np.random.default_rng(2026)
-    # 列各自缩放,让 AᵀA 条件数拉大(但不越 1e4 线),贴近真实几何形态
-    scales = np.array([1.0, 40.0, 2500.0])
+    # 列各自缩放,让 AᵀA 条件数拉开(但不越 1e4 线,病态分支由下一例专测)
+    scales = np.array([1.0, 4.0, 16.0])
     A = rng.normal(size=(176, 3)) * scales
     d_x0 = np.array([0.7, -1.2, 3.0])
     resid = A @ d_x0
 
     out = _frame_xyz_core(resid, A, cond_max=1.0e4)
+    assert out["cond"] < 1.0e4, "本例构造的是良态矩阵(病态分支由下一例专测)"
 
     assert np.allclose(out["dX"], d_x0, atol=1e-9), \
         f"反解恒等式失败:恢复 {out['dX']} vs 真值 {d_x0}"
@@ -202,3 +203,18 @@ def test_run_test_xyz_notes_present():
     assert "乐观偏差" in notes, "notes 必须声明 test 集参加选型的乐观偏差"
     assert "深度" in notes, "notes 必须点名 Z 分量的可观测性判读"
     assert section["schema"] == "analyze-test-xyz-v1"
+
+
+def test_source_single_math_source_red_line():
+    """源码红线(D-06):雅可比只来自 project_point_jacobian,本模块
+    自己写的只有 np.linalg 线性代数;绝不 import OpenCV、绝不手写
+    d(投影)/d(相机点) 公式。"""
+    import inspect
+
+    import calib.analysis.test_xyz as mod
+
+    source = inspect.getsource(mod)
+    assert "project_point_jacobian" in source, "点雅可比必须来自 models/ 接口"
+    assert "import cv2" not in source, "analysis 层绝不 import OpenCV"
+    for banned in ("projectPoints", "Rodrigues", "solvePnP"):
+        assert banned not in source, f"analysis 层不许出现 {banned}(位姿/投影只走既有接口)"
