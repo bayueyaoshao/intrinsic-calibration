@@ -25,6 +25,9 @@ from calib.visualization.analyze_figs import (
     plot_budget_bars,
     plot_coverage_footprint,
     plot_radial_bands,
+    plot_sensitivity_ranking,
+    plot_what_if,
+    plot_xyz_compare,
 )
 from calib.visualization.mosaic import build_mosaic, write_mosaics
 from calib.visualization.overlay import (
@@ -873,3 +876,147 @@ def test_spatial_figs_source_contains_extrapolation_labels():
         source = inspect.getsource(fn)
         assert "外推" in source, f"{fn.__name__} 缺外推区标注(足迹叠加硬要求)"
         assert "analyze.json" in source, f"{fn.__name__} docstring 缺口径声明"
+
+
+# ---------------------------------------------------------------------------
+# ANA-03/ANA-04:三分量对比图 + 敏感度排序图 + 补拍预演图
+# ---------------------------------------------------------------------------
+
+def _synthetic_test_xyz_section(valid: bool = True) -> dict:
+    """合成 test_xyz 段(键与 run_test_xyz 契约一致):三分量 median/max
+    与可观测性汇总,量级照真实数据(z 分数 < 3、放大倍数几百倍)。"""
+    def _mm(med, mx):
+        return {"median": med, "max": mx}
+    return {
+        "schema": "analyze-test-xyz-v1",
+        "model_id": "m2",
+        "n_frames": 3,
+        "n_valid": 3 if valid else 0,
+        "n_cond_excluded": 0,
+        "n_solve_failed": 0,
+        "per_direction": {
+            "dX_abs_mm": {"x": _mm(0.05, 0.09), "y": _mm(0.04, 0.08),
+                          "z": _mm(0.30, 0.55)},
+            "abs_zscore": {"x": _mm(0.6, 1.1), "y": _mm(0.5, 0.9),
+                           "z": _mm(1.8, 2.6)},
+        },
+        "observability": {"cond_median": 33.0, "cond_max": 51.0,
+                          "depth_amplification_median": 412.0},
+        "rms_px": {"median": 0.12, "max": 0.19},
+        "notes": ["Z 分量大 ≠ 误差主要在深度", "test 集参加过选型,带乐观偏差"],
+    }
+
+
+def _synthetic_what_if_section() -> dict:
+    """合成 what_if 子段(键与 run_sensitivity 的 full 档产出一致):
+    逐参数压缩比,fx/fy/cx/cy 略低于 1,k 参考列被补偿空间撑大。"""
+    return {
+        "synthetic": "补拍预演为合成假设(虚拟位姿非实拍)",
+        "n_poses_requested": 6,
+        "target_r": 0.75,
+        "n_candidates_considered": 375,
+        "n_poses_selected": 6,
+        "selected_r_max": [0.92, 0.90, 0.88, 0.87, 0.86, 0.85],
+        "compression_ratio": {"fx": 0.82, "fy": 0.83, "cx": 0.79, "cy": 0.80,
+                              "k1": 0.55, "k2": 0.51, "p1": 0.62, "p2": 0.60,
+                              "k3": 0.50},
+        "compression_ratio_k_reference": {"k1": 0.55, "k2": 0.51, "k3": 0.50},
+        "compression_reference_note": "k 列只作参考",
+    }
+
+
+def _synthetic_sensitivity_section() -> dict:
+    """合成 sensitivity 段(画图只消费现成键):最大方向载荷集中在
+    k2/k3(findings 结论 1 口径),方向像素当量与近零参数 p1/p2。"""
+    return {
+        "schema": "analyze-sensitivity-v1",
+        "model_id": "m2",
+        "step_sigma": 1.0,
+        "theory_spectrum": {
+            "param_names": ["fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3"],
+            "eigvals": [6.2e-06, 5.6e-07],
+            "top_directions": [
+                {"rank": 1, "eigval": 6.2e-06,
+                 "loads": {"k2": 0.42, "k3": 0.36, "k1": 0.15, "fx": 0.04,
+                           "fy": 0.02, "cx": 0.005, "cy": 0.003,
+                           "p1": 0.002, "p2": 0.001},
+                 "px_equiv": 0.054},
+                {"rank": 2, "eigval": 5.6e-07,
+                 "loads": {"fx": 0.36, "fy": 0.35, "k1": 0.09, "k3": 0.09,
+                           "cx": 0.05, "cy": 0.04, "k2": 0.01,
+                           "p1": 0.005, "p2": 0.005},
+                 "px_equiv": 0.325},
+            ],
+        },
+        "px_equivalents": {
+            "per_direction": [
+                {"rank": 1, "step_sigma": 1.0, "px_equiv": 0.054},
+                {"rank": 2, "step_sigma": 1.0, "px_equiv": 0.325},
+            ],
+            "p1_px_equiv": 0.0012,
+            "p2_px_equiv": 0.0011,
+            "note": "一切比较用像素当量公共货币",
+        },
+        "what_if": None,
+        "what_if_note": "quick 档不做 what-if",
+    }
+
+
+def test_plot_xyz_compare_renders_png(tmp_path):
+    """合成三分量段:左右两张条形图(原始 mm + z 分数)渲染成功,
+    PNG 非空、返回路径与入参一致。"""
+    out = plot_xyz_compare(_synthetic_test_xyz_section(),
+                           tmp_path / "test_xyz.png")
+    assert out == tmp_path / "test_xyz.png"
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_plot_xyz_compare_none_or_all_failed_draws_no_data(tmp_path):
+    """无数据不冒充:段为 None / n_valid=0(全失败)都不抛异常,
+    照常生成含"无数据"标注的 PNG。"""
+    out_none = plot_xyz_compare(None, tmp_path / "empty1.png")
+    assert out_none.is_file() and out_none.stat().st_size > 0
+    out_zero = plot_xyz_compare(_synthetic_test_xyz_section(valid=False),
+                                tmp_path / "empty2.png")
+    assert out_zero.is_file() and out_zero.stat().st_size > 0
+
+
+def test_plot_sensitivity_ranking_renders_png(tmp_path):
+    """合成敏感度段:最大方向载荷条形 + 像素当量天平(近零参数 p1/p2
+    走"画面影响可忽略"标注分支)渲染成功。"""
+    out = plot_sensitivity_ranking(_synthetic_sensitivity_section(),
+                                   tmp_path / "sensitivity_ranking.png")
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_plot_sensitivity_ranking_none_or_empty_draws_no_data(tmp_path):
+    """无数据不冒充:段为 None / top 方向空都不抛异常,照常出 PNG。"""
+    out_none = plot_sensitivity_ranking(None, tmp_path / "empty1.png")
+    assert out_none.is_file() and out_none.stat().st_size > 0
+    out_empty = plot_sensitivity_ranking({"theory_spectrum": {}},
+                                         tmp_path / "empty2.png")
+    assert out_empty.is_file() and out_empty.stat().st_size > 0
+
+
+def test_plot_what_if_renders_png_with_synthetic_title(tmp_path):
+    """合成 what_if 段:逐参数压缩比条形(1.0 参考线)渲染成功;源码
+    标题文本含「合成预演(假设非实测)」——合成证据不许被误读为实测。"""
+    out = plot_what_if(_synthetic_what_if_section(), tmp_path / "what_if.png")
+    assert out.is_file() and out.stat().st_size > 0
+    import inspect
+
+    from calib.visualization import analyze_figs
+
+    assert "合成预演(假设非实测)" in inspect.getsource(analyze_figs.plot_what_if)
+
+
+def test_plot_what_if_none_draws_no_data(tmp_path):
+    """无数据不冒充:what_if 为 None(quick 档)不抛异常,照常出
+    含「quick 档不做 what-if」标注的 PNG。"""
+    out = plot_what_if(None, tmp_path / "empty.png")
+    assert out.is_file() and out.stat().st_size > 0
+    import inspect
+
+    from calib.visualization import analyze_figs
+
+    assert "quick 档不做 what-if" in inspect.getsource(analyze_figs.plot_what_if)

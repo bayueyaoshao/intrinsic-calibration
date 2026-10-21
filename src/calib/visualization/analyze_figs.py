@@ -1,4 +1,5 @@
-"""误差归因阶段的出图:ANA-01 误差预算证据图 + ANA-02 残差结构两张空间图。
+"""误差归因阶段的出图:ANA-01 预算图 + ANA-02 残差两张空间图
++ ANA-03 三分量对比图 + ANA-04 敏感度排序图与补拍预演图。
 
 matplotlib Agg 后端直接写 PNG(离线批处理:不弹窗、不依赖显示服务),
 模块头三件套照 evaluate_figs.py(Agg 先于 pyplot、中文字体、unicode_minus)。
@@ -339,6 +340,239 @@ def plot_coverage_footprint(residual_section: dict | None,
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=7)
     fig.suptitle("覆盖足迹:拍到过哪里、哪里靠外推", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# ANA-03/ANA-04:三分量对比图 + 敏感度排序图 + 补拍预演图
+# ---------------------------------------------------------------------------
+
+def _median_max_bars(ax, block: dict, label_fmt: str) -> None:
+    """在一个轴上画 {median, max} 三分量分组条形(x/y/z,缺值跳过)。"""
+    comps = ("x", "y", "z")
+    xs = np.arange(len(comps), dtype=np.float64)
+    width = 0.38
+    for offset, key, color, name in (
+            (-width / 2, "median", "#1f77b4", "中位"),
+            (width / 2, "max", "#ff7f0e", "最大")):
+        vals = []
+        for comp in comps:
+            entry = (block or {}).get(comp) or {}
+            v = entry.get(key)
+            vals.append(float(v) if v is not None else 0.0)
+        ax.bar(xs + offset, vals, width, color=color, label=name)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{label_fmt} {c}" for c in comps])
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+
+
+def plot_xyz_compare(test_xyz_section: dict | None,
+                     out_path: Path | str) -> Path:
+    """把 test 三分量分解段画成左右两张条形图(PNG),返回图路径。
+
+    输入是 analyze.json 的 test_xyz 段(只消费段内现成键)。左子图 =
+    逐方向 |dX| 的中位/最大(单位 = 物点单位,本板为 mm——"整块棋盘朝
+    哪边挪了多少毫米");右子图 = 逐方向 |z 分数| 的中位/最大(位移除以
+    理论标准差,消除各方向可观测性差异后的"几个 σ"判读),标题标注深度
+    放大倍数中位(RESEARCH Pitfall 7:Z 分量原始量级天然被放大,判读看
+    z 分数列)。
+
+    段缺席(None)或没有有效帧时不冒充数据:画"无数据"文字标注。
+    图是可视化,数字结论以 analyze.json 的 test_xyz 段为准。
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    section = test_xyz_section or {}
+    per_dir = section.get("per_direction") or {}
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(12.5, 5.0))
+
+    has_data = bool(per_dir.get("dX_abs_mm")) and bool(per_dir.get("abs_zscore")) \
+        and (section.get("n_valid") or 0) > 0
+    if not has_data:
+        for ax in (ax_left, ax_right):
+            ax.text(0.5, 0.5, "无数据", ha="center", va="center",
+                    fontsize=14, color="#777777", transform=ax.transAxes)
+            ax.set_axis_off()
+        fig.suptitle("test 三分量分解:误差往相机坐标系哪个方向挪", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    _median_max_bars(ax_left, per_dir.get("dX_abs_mm"), "|dX|")
+    ax_left.set_ylabel("|dX|(物点单位,本板为 mm)")
+    ax_left.set_title("原始位移:整块棋盘朝哪个方向挪了多少\n"
+                      "(单位与棋盘方格边长相同)", fontsize=9)
+
+    _median_max_bars(ax_right, per_dir.get("abs_zscore"), "|z|")
+    ax_right.set_ylabel("|z 分数|(= 位移 ÷ 理论标准差)")
+    amp = (section.get("observability") or {}).get("depth_amplification_median")
+    amp_txt = (f"深度放大倍数中位 {amp:.0f} 倍"
+               if amp is not None else "深度放大倍数缺席")
+    ax_right.set_title(f"z 分数判读:扣除各方向可观测性差异后的\"几个 σ\"\n"
+                       f"({amp_txt};Z 分量看这列,别看原始量级)", fontsize=9)
+
+    fig.suptitle("test 三分量分解:误差往相机坐标系哪个方向挪", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def plot_sensitivity_ranking(sensitivity_section: dict | None,
+                             out_path: Path | str) -> Path:
+    """把参数敏感度段画成左右两张条形图(PNG),返回图路径。
+
+    输入是 analyze.json 的 sensitivity 段(只消费段内现成键)。左子图 =
+    最大特征方向(rank 1)的逐参数载荷条形(无量纲坐标占比——像素参数
+    被 ÷焦距压平后的软方向判读口径,findings 结论 1 的"k2/k3 软方向"
+    在这个口径下可见);右子图 = 像素当量天平:前 3 大方向各走
+    step_sigma×σ 一步的画面最大位移 + 近零参数 p1/p2 的 σ 级像素当量,
+    低于 0.05 px 的就地标注"画面影响可忽略"。
+
+    段缺席(None)或没有 top 方向时不冒充数据:画"无数据"文字标注。
+    图是可视化,数字结论以 analyze.json 的 sensitivity 段为准。
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    section = sensitivity_section or {}
+    tops = ((section.get("theory_spectrum") or {}).get("top_directions")) or []
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(12.5, 5.0))
+
+    if not tops:
+        for ax in (ax_left, ax_right):
+            ax.text(0.5, 0.5, "无数据", ha="center", va="center",
+                    fontsize=14, color="#777777", transform=ax.transAxes)
+            ax.set_axis_off()
+        fig.suptitle("参数敏感度:哪个方向最刹不住车", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    # ---- 左子图:最大方向逐参数载荷(水平条形,占比降序)----
+    loads = tops[0].get("loads") or {}
+    names = list(loads.keys())[::-1]  # barh 自下而上,反转让最大占比在顶
+    shares = [float(loads[n]) for n in names]
+    ax_left.barh(np.arange(len(names)), shares, 0.6, color="#1f77b4")
+    ax_left.set_yticks(np.arange(len(names)))
+    ax_left.set_yticklabels(names)
+    ax_left.set_xlabel("载荷占比(无量纲坐标,组内和为 1)")
+    px_top = float(tops[0].get("px_equiv") or 0.0)
+    ax_left.set_title(
+        f"最大敏感方向(rank 1)往哪些参数集中\n"
+        f"(该方向走一步 σ 的画面位移 {px_top:.3f} px)", fontsize=9)
+    ax_left.grid(True, axis="x", alpha=0.3)
+
+    # ---- 右子图:像素当量天平(逐方向 + 近零参数)----
+    labels: list[str] = []
+    values: list[float] = []
+    for d in tops:
+        labels.append(f"方向{d.get('rank')}")
+        values.append(float(d.get("px_equiv") or 0.0))
+    px_equivs = section.get("px_equivalents") or {}
+    for key, name in (("p1_px_equiv", "p1"), ("p2_px_equiv", "p2")):
+        v = px_equivs.get(key)
+        if v is not None:
+            labels.append(name)
+            values.append(float(v))
+    xs = np.arange(len(labels), dtype=np.float64)
+    bars = ax_right.bar(xs, values, 0.6, color="#2ca02c")
+    ax_right.axhline(
+        _PX_VISIBLE_LINE, linestyle="--", color="#d62728", linewidth=1.0,
+        label=f"{_PX_VISIBLE_LINE:g} px 参考线(晃动开始可见)")
+    for rect, value in zip(bars, values):
+        if value < _PX_NEGLIGIBLE:
+            ax_right.annotate(
+                "画面影响可忽略",
+                (rect.get_x() + rect.get_width() / 2, value),
+                textcoords="offset points", xytext=(2, 3),
+                ha="center", va="bottom", fontsize=7, rotation=90,
+                color="#777777")
+        else:
+            ax_right.annotate(
+                f"{value:.3f}",
+                (rect.get_x() + rect.get_width() / 2, value),
+                textcoords="offset points", xytext=(0, 3),
+                ha="center", va="bottom", fontsize=7)
+    ax_right.set_xticks(xs)
+    ax_right.set_xticklabels(labels)
+    ax_right.set_ylabel("σ 级步长的像素当量(px)")
+    step_sigma = section.get("step_sigma")
+    step_txt = f"step_sigma×σ = {step_sigma:g}×σ" if step_sigma else "σ 级步长"
+    ax_right.set_title(f"像素当量天平:不同量纲参数唯一能比的平台\n"
+                       f"({step_txt};近零参数看百分比没有意义)", fontsize=9)
+    ax_right.legend(loc="best", fontsize=8)
+    ax_right.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("参数敏感度:哪个方向最刹不住车(载荷 = 无量纲坐标占比)",
+                 fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def plot_what_if(what_if_section: dict | None, out_path: Path | str) -> Path:
+    """把 what-if 补拍预演段画成逐参数压缩比条形图(PNG),返回图路径。
+
+    输入是 sensitivity 段的 what_if 子段(仅 full 档产出,quick 档为
+    None——调用方只在 what_if 非 None 时调用)。压缩比 = σ=1 基准下补拍
+    后/补拍前的逐参数理论标准差之比,< 1 = 补拍有帮助;1.0 参考线。
+    标题必须含"合成预演(假设非实测)"——合成证据不许被误读为实测
+    (A5/裁定②);k1–k3 的单独压缩比只是参考列(强相关参数的单独下界
+    被参数间补偿空间撑大),判读看 fx/fy/cx/cy。
+
+    段缺席(None)时不冒充数据:画"无数据(quick 档不做 what-if)"。
+    图是可视化,数字结论以 analyze.json 的 sensitivity.what_if 段为准。
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    section = what_if_section or {}
+    ratio = section.get("compression_ratio") or {}
+    fig, ax = plt.subplots(figsize=(9.0, 5.0))
+
+    if not ratio:
+        ax.text(0.5, 0.5, "无数据(quick 档不做 what-if)", ha="center",
+                va="center", fontsize=13, color="#777777",
+                transform=ax.transAxes)
+        ax.set_axis_off()
+        fig.suptitle("补拍预演:合成假设(非实测)", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    names = list(ratio.keys())
+    values = [float(ratio[n]) for n in names]
+    xs = np.arange(len(names), dtype=np.float64)
+    k_names = set((section.get("compression_ratio_k_reference") or {}).keys())
+    colors = ["#ff7f0e" if n in k_names else "#1f77b4" for n in names]
+    bars = ax.bar(xs, values, 0.6, color=colors)
+    ax.axhline(1.0, linestyle="--", color="#d62728", linewidth=1.2,
+               label="1.0 参考线(补拍前水平;< 1 = 补拍有帮助)")
+    for rect, value in zip(bars, values):
+        ax.annotate(f"{value:.2f}",
+                    (rect.get_x() + rect.get_width() / 2, value),
+                    textcoords="offset points", xytext=(0, 3),
+                    ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(names)
+    ax.set_ylabel("压缩比(补拍后 / 补拍前的理论标准差,σ=1 基准)")
+    n_sel = section.get("n_poses_selected")
+    target_r = section.get("target_r")
+    ax.set_title(
+        f"合成 {n_sel} 个够到画面四角(目标 r ≥ {target_r})的虚拟位姿并入"
+        f"信息预算\n(橙色 = k1–k3 参考列:单独压缩比被参数间补偿空间撑大,"
+        f"判读看蓝列)", fontsize=9)
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, axis="y", alpha=0.3)
+
+    fig.suptitle("补拍预演:合成预演(假设非实测,虚拟位姿非实拍)", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

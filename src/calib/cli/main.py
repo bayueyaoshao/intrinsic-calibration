@@ -29,6 +29,8 @@ from calib.analysis.artifacts import (
 )
 from calib.analysis.budget import run_budget
 from calib.analysis.residual_structure import run_residual_structure
+from calib.analysis.sensitivity import run_sensitivity
+from calib.analysis.test_xyz import run_test_xyz
 from calib.corners.artifacts import CANONICAL_RULE_VERSION, save_corners
 from calib.corners.canonical import burst_consistency
 from calib.corners.detect import detect_classic, detect_sb
@@ -85,6 +87,9 @@ from calib.visualization.analyze_figs import (
     plot_budget_bars,
     plot_coverage_footprint,
     plot_radial_bands,
+    plot_sensitivity_ranking,
+    plot_what_if,
+    plot_xyz_compare,
 )
 from calib.visualization.evaluate_figs import (
     plot_cv_errorbars,
@@ -1817,8 +1822,9 @@ def analyze() -> None:
     (quick 档实验明细只有当选模型,一切明细键按它拼)→ 血缘登记:全部
     上游产物一次登记进指纹,防串轮 → 六块执行区:块 1 误差预算直调
     (刻意不套逐块兜底——实测低于理论下界的铁律硬报错必须冒泡到外层,
-    失败契约落盘后退出码 1);块 2 残差方向分解(单块失败该段记 None,
-    不中断其余分析块);块 3–6 留位(由 05-04~05-06 计划逐块接入)→
+    失败契约落盘后退出码 1);块 2–4 残差方向分解 / test 三分量分解 /
+    参数敏感度排序(单块失败该段记 None,不中断其余分析块);
+    块 5–6 留位(由 05-05~05-06 计划逐块接入)→
     analyze.json + analysis/*.npz 明细旁车 + 证据图落盘
     (图失败只播报不拦主产物)→ 中途失败也照常落盘失败契约再退出码 1 →
     打印中文汇总与人工核查四要素指引。
@@ -1953,7 +1959,7 @@ def analyze() -> None:
     # ---- 六块执行区:块 1 误差预算直调(刻意不套逐块兜底——实测低于
     # 理论下界的铁律硬报错必须冒泡到外层失败契约,退出码 1,不静默);
     # 块 2 起用 _stage 逐块兜底(照 evaluate 体例:单块失败该段记 None,
-    # 不中断其余分析块);块 3–6 显式置 None 留位 ----
+    # 不中断其余分析块);块 5–6 显式置 None 留位 ----
     def _stage(name: str, run):
         try:
             return run()
@@ -1992,8 +1998,37 @@ def analyze() -> None:
     block2 = _stage("残差方向分解", _block_residual)
     if block2 is not None:
         residual_structure, residual_detail, residual_uv_all = block2
-    test_xyz = None             # 块 3 test 三分量分解(由 05-04 计划接入)
-    sensitivity = None          # 块 4 参数敏感度排序(由 05-04 计划接入)
+
+    def _block_test_xyz():
+        """块 3 取数 + 三分量分解(取数也在块内:test 角点装不下只垮这一块)。"""
+        obs_test = load_observation_set(
+            corners_run / "corners_test_sb.npz", manifest_path, board,
+            split="test")
+        return run_test_xyz(model_id, evaluate_report, obs_test, board, cfg)
+
+    test_xyz: dict | None = None
+    test_xyz_detail: dict | None = None
+    block3 = _stage("test 三分量分解", _block_test_xyz)
+    if block3 is not None:
+        test_xyz, test_xyz_detail = block3
+
+    def _block_sensitivity():
+        """块 4 取数 + 敏感度排序(覆盖判据引用块 2 回填的 residual_structure
+        段:块 2 缺席时传 None,建议规则表退化「覆盖未知」分支并中文注明)。"""
+        return run_sensitivity(
+            model_id, evaluate_report,
+            fisher_run / f"fisher_{model_id}.npz",
+            evaluate_run / "experiments" / "bootstrap.npz",
+            evaluate_run / "experiments" / "slices.npz",
+            model, object_points, ref_rvec, ref_tvec,
+            residual_structure, cfg)
+
+    sensitivity: dict | None = None
+    sensitivity_detail: dict | None = None
+    block4 = _stage("参数敏感度排序", _block_sensitivity)
+    if block4 is not None:
+        sensitivity, sensitivity_detail = block4
+
     corner_opt = None           # 块 5 角点寻优实验(由 05-05 计划接入)
     anisotropy = None           # 块 6 连拍各向异性(由 05-06 计划接入)
     try:
@@ -2052,6 +2087,10 @@ def analyze() -> None:
         report["_budget_detail"] = budget_detail
     if residual_structure is not None:
         report["_residual_detail"] = residual_detail
+    if test_xyz is not None:
+        report["_test_xyz_detail"] = test_xyz_detail
+    if sensitivity is not None:
+        report["_sensitivity_detail"] = sensitivity_detail
     paths = save_analyze_report(out_dir, report, lineage)
 
     # ---- 证据图(附加产物:单张失败只播报,不拦主产物)----
@@ -2077,6 +2116,28 @@ def analyze() -> None:
             except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
                 typer.echo(f"  {fig_name}未生成(不影响数据产物):"
                            f"{type(e).__name__}——{e}")
+    if test_xyz is not None:
+        try:
+            plot_xyz_compare(test_xyz, figures_dir / "test_xyz.png")
+            n_figs += 1
+        except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
+            typer.echo(f"  三分量对比图未生成(不影响数据产物):"
+                       f"{type(e).__name__}——{e}")
+    if sensitivity is not None:
+        sens_figs = [("敏感度排序图", lambda: plot_sensitivity_ranking(
+            sensitivity, figures_dir / "sensitivity_ranking.png"))]
+        if sensitivity.get("what_if") is not None:
+            # 补拍预演图只在 full 档 what_if 产出时画(quick 档连图都不出,
+            # 不留"无数据"占位——图区不冒充有预演结论)
+            sens_figs.append(("补拍预演图", lambda: plot_what_if(
+                sensitivity["what_if"], figures_dir / "what_if.png")))
+        for fig_name, plot_it in sens_figs:
+            try:
+                plot_it()
+                n_figs += 1
+            except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
+                typer.echo(f"  {fig_name}未生成(不影响数据产物):"
+                           f"{type(e).__name__}——{e}")
 
     # ---- 中文汇总 + 人工核查四要素指引 ----
     typer.echo("误差归因完成,analyze.json 与预算证据已写盘。")
@@ -2096,9 +2157,29 @@ def analyze() -> None:
             f"r={cov['r_corner_frame']:.3f},r>0.5 的观测占 "
             f"{cov['frac_beyond_05']:.1%} 却承载 k2 信息的 "
             f"{cov['info_share_beyond_05']:.1%}(覆盖判据见 findings 结论 5)")
+    if test_xyz is not None:
+        obs_blk = test_xyz["observability"]
+        amp = obs_blk.get("depth_amplification_median")
+        amp_txt = ((f"{amp:.0f}" if amp >= 10 else f"{amp:.2f}") + " 倍"
+                   if amp is not None else "缺席")
+        typer.echo(
+            f"  test 三分量分解:{test_xyz['n_valid']}/{test_xyz['n_frames']} 帧"
+            f"有效(病态 {test_xyz['n_cond_excluded']}、解不出 "
+            f"{test_xyz['n_solve_failed']});深度放大倍数中位 {amp_txt}"
+            f"(Z 分量判读看 z 分数列,notes 有固定声明)")
+    if sensitivity is not None:
+        uniq = sensitivity["uniqueness"]
+        what_if_bit = (";补拍预演已出(full 档,合成假设非实测)"
+                       if sensitivity.get("what_if") is not None
+                       else ";补拍预演仅 full 档做")
+        typer.echo(
+            f"  参数敏感度:建议 {len(sensitivity['advice'])} 条"
+            f"(只提示方向不自动执行);bootstrap 最大位移 "
+            f"{uniq['bootstrap_max_disp_px']:.2f}px、多起点判定 "
+            f"{uniq['multistart_verdict']}{what_if_bit}")
     if partial:
         typer.echo(f"  待接入的分析段({len(partial)} 个,报告记 None):"
-                   f"{'、'.join(partial)}——由 05-03~05-06 计划逐块接入")
+                   f"{'、'.join(partial)}——由 05-05~05-06 计划逐块接入")
     typer.echo("  人工核查四要素指引:")
     typer.echo(f"  1) 看哪个文件:{paths['analyze_json']}(主契约)与 "
                f"{out_dir / 'analysis' / 'budget.npz'}(逐行底账)与 "
@@ -2119,13 +2200,24 @@ def analyze() -> None:
                           "系统偏移表、coverage 覆盖足迹、extrapolation_note 外推"
                           "披露——最远观测 r 到画面四角之间没有照片,k2/k3 在那里"
                           "纯靠外推)")
+    if test_xyz is not None:
+        where_to_look += (";test_xyz 段(per_direction 逐方向 |dX| 与 |z 分数| "
+                          "的 median/max 表、observability 条件数与深度放大倍数、"
+                          "notes 两条固定声明——test 集参加过选型,成绩带轻微"
+                          "乐观偏差)")
+    if sensitivity is not None:
+        where_to_look += (";sensitivity 段(advice 应对建议规则表——只提示方向"
+                          "不自动执行、uniqueness 解不唯一证据、what_if 补拍预演"
+                          "仅 full 档产出,quick 档见 what_if_note)")
     typer.echo(f"  3) 具体看哪里:{where_to_look}。")
     typer.echo("  4) 好坏判据:零违例(n_pointwise_violations = 0)且三个统计量"
                "比值全部不低于硬告警线(约 0.42)才算 pass;本数据的基准是实测"
                "为同口径下界的约 102 / 1108 / 1444 倍——远高于线说明精度瓶颈"
                "不在检测噪声,而在系统性误差(docs/findings.md 结论 4);"
                "哪天比值跌破线或出现违例,就是口径错配或数据被污染的信号,"
-               "命令会当场硬报错而不是静默出表。")
+               "命令会当场硬报错而不是静默出表。"
+               "Z 分量判读看 z 分数列而非原始量级;敏感度结论以像素当量为准;"
+               "建议不自动执行。")
     typer.echo(f"  分析产物:{out_dir}")
     typer.echo(f"  汇总报告:{paths['analyze_json']}(明细旁车 "
                f"{len(paths['detail_npz'])} 份:analysis/)")

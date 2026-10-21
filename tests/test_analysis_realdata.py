@@ -133,26 +133,28 @@ def analyze_tree() -> dict:
 
 
 def test_analyze_sections_shape_and_selected_model(analyze_tree: dict):
-    """契约形状:budget 与 residual_structure 段有值,其余四段显式缺位
-    (None)并进 meta.missing_sections;目标模型与 evaluate 选型结论一致
-    (m2)。"""
+    """契约形状:budget / residual_structure / test_xyz / sensitivity 四段
+    有值,块 5–6 显式缺位(None)并进 meta.missing_sections;目标模型与
+    evaluate 选型结论一致(m2)。"""
     report = analyze_tree["report"]
     budget = report["budget"]
     assert isinstance(budget, dict) and budget, "budget 段缺席(误差归因没跑成)"
     residual = report["residual_structure"]
     assert isinstance(residual, dict) and residual, \
         "residual_structure 段缺席(残差方向分解没跑成)"
-    for key in ("test_xyz", "sensitivity", "corner_opt", "anisotropy"):
+    for key in ("corner_opt", "anisotropy"):
         assert report[key] is None, \
             f"{key} 段应由后续计划接入,当前必须显式为 None"
     assert set(report["meta"]["missing_sections"]) == {
-        "test_xyz", "sensitivity", "corner_opt", "anisotropy"}
+        "corner_opt", "anisotropy"}
     assert report["meta"]["selected_model"] == "m2", \
         f"目标模型应与 evaluate 选型结论一致,实际 {report['meta']['selected_model']!r}"
     assert budget["schema"] == "analyze-budget-v1"
     assert budget["sigma_detector_corner"] == pytest.approx(0.008708, abs=1e-4), \
         "噪声口径必须是检测器级 σ(CRLB 口径铁律,时域口径会虚高约 35 倍)"
     assert residual["schema"] == "analyze-residual-v1"
+    assert report["test_xyz"]["schema"] == "analyze-test-xyz-v1"
+    assert report["sensitivity"]["schema"] == "analyze-sensitivity-v1"
     assert "delivery" in report["meta"]["r_normalization_basis"], \
         "r 归一化基准必须随 meta 透传(跨轮比较先对齐口径)"
     assert residual["r_normalization_baseline_check"]["status"] == "consistent", \
@@ -240,21 +242,106 @@ def test_analyze_residual_sidecars_and_figures(analyze_tree: dict):
           "+ radial_bands.png + coverage_footprint.png 在盘")
 
 
-def test_analyze_block2_uses_stage_and_budget_stays_direct():
-    """源码断言(接线体例):块 2 残差方向分解包在 _stage 里(单块失败
-    记 None 照常出报告),块 1 预算依旧直调不套兜底(铁律违例必须退出
-    码 1)——两种失败语义不许混。"""
+def test_analyze_blocks_234_use_stage_and_budget_stays_direct():
+    """源码断言(接线体例):块 2/3/4 包在 _stage 里(单块失败记 None
+    照常出报告),块 1 预算依旧直调不套兜底(铁律违例必须退出码 1)——
+    两种失败语义不许混。"""
     import inspect
 
     import calib.cli.main as cli_main
 
     source = inspect.getsource(cli_main.analyze)
-    assert '_stage("残差方向分解"' in source, "块 2 必须走 _stage 逐块兜底"
+    for call in ('_stage("残差方向分解"', '_stage("test 三分量分解"',
+                 '_stage("参数敏感度排序"'):
+        assert call in source, f"{call} 缺席:诊断块必须走 _stage 逐块兜底"
     assert "run_residual_structure" in source and "run_budget(" in source
     # budget 直调:run_budget 的调用行不许出现在 _stage 调用行上
     for line in source.splitlines():
         if "run_budget(" in line:
             assert "_stage" not in line, "budget 必须直调,不许套 _stage"
+
+
+def test_analyze_test_xyz_section(analyze_tree: dict):
+    """ANA-03 真实数据:test 65 张全部分解(零失败零病态);逐方向
+    median/max 有值;notes 两条固定声明在盘(test 乐观偏差 + 深度判读);
+    深度放大倍数中位有值(可观测性归一不缺席)。"""
+    section = analyze_tree["report"]["test_xyz"]
+    assert section["n_frames"] == 65, \
+        f"test 侧应逐帧分解 65 张,实际 {section['n_frames']}"
+    assert section["n_valid"] == 65, \
+        f"65 张应全部有效(真实数据角点质量足以支撑反解),实际 {section['n_valid']}"
+    assert section["n_cond_excluded"] == 0 and section["n_solve_failed"] == 0, \
+        "真实数据不该有病态帧/解不出的帧(出现即上游角点或内参出问题)"
+    for comp in ("x", "y", "z"):
+        for block in ("dX_abs_mm", "abs_zscore"):
+            entry = section["per_direction"][block][comp]
+            assert entry["median"] is not None and entry["max"] is not None
+    assert section["observability"]["depth_amplification_median"] is not None
+    notes = " ".join(section["notes"])
+    assert "乐观偏差" in notes, "notes 必须声明 test 集参加过选型的乐观偏差"
+    assert "深度" in notes, "notes 必须点名 Z 分量的可观测性判读"
+    print("\n[ANA-03] 65 帧全解;|dX| 中位 x/y/z = "
+          + ", ".join(
+              f"{section['per_direction']['dX_abs_mm'][c]['median']:.3f}mm"
+              for c in ("x", "y", "z"))
+          + f";深度放大倍数中位 "
+          f"{section['observability']['depth_amplification_median']:.2f} 倍")
+
+
+def test_analyze_sensitivity_section(analyze_tree: dict):
+    """ANA-04 真实数据(findings 结论 1/2/3 对账):uniqueness 的 bootstrap
+    最大位移当量 ≈ 1.9943(±1%),多起点数值键在盘;advice 非空且首条
+    点名 k2/k3 软方向、给"补"字手段、带"不自动执行"声明(裁定③);
+    近零参数像素当量低于 0.05px 影响线;quick 档 what_if 为 None 且
+    what_if_note 说明档位;双谱对账夹角有限在 [0,1]。"""
+    section = analyze_tree["report"]["sensitivity"]
+    uniq = section["uniqueness"]
+    assert uniq["bootstrap_max_disp_px"] == pytest.approx(1.9943, rel=0.01), \
+        f"bootstrap 最大位移 {uniq['bootstrap_max_disp_px']:.4f} 偏离结论 2 " \
+        f"基准 1.9943 超过 1%"
+    assert isinstance(uniq["multistart_disp_px"], float)
+    assert uniq["multistart_verdict"] in ("consistent", "inconsistent")
+    assert "解不唯一" in uniq["note"]
+
+    advice = section["advice"]
+    assert advice, "建议规则表不该为空(最大方向载荷集中在 k2/k3 必触发分支一)"
+    first = advice[0]
+    assert ("k2" in first["direction"] or "k3" in first["direction"]), \
+        f"首条建议应点名 k2/k3 软方向,实际:{first['direction']}"
+    assert "补" in first["advice"] and "不自动执行" in first["advice"], \
+        "首条建议要给补拍手段且带不自动执行声明(裁定③)"
+
+    px = section["px_equivalents"]
+    assert px["p1_px_equiv"] < 0.05 and px["p2_px_equiv"] < 0.05, \
+        "p1/p2 的 σ 级像素当量应低于 0.05px 影响线(结论 1 反面教材)"
+
+    assert section["what_if"] is None, "quick 档不做 what-if(裁定②)"
+    assert "quick 档" in section["what_if_note"]
+    emp = section["empirical_spectrum"]
+    for key in ("cosine_theory_vs_bootstrap", "cosine_theory_vs_slices"):
+        assert 0.0 <= emp[key] <= 1.0, f"{key} 应是 [0,1] 内的夹角余弦"
+    print(f"\n[ANA-04] bootstrap 最大位移 {uniq['bootstrap_max_disp_px']:.4f}px;"
+          f"建议 {len(advice)} 条(首条:{first['direction'][:30]});"
+          f"理论 vs 经验夹角 cos = {emp['cosine_theory_vs_bootstrap']:.3f} / "
+          f"{emp['cosine_theory_vs_slices']:.3f}")
+
+
+def test_analyze_xyz_sensitivity_sidecars_and_figures(analyze_tree: dict):
+    """产物保真:test_xyz.npz(dX 65×3 逐帧矩阵)与 sensitivity.npz 旁车
+    在盘;三分量对比图与敏感度排序图在盘;quick 档无补拍预演图。"""
+    run_dir = analyze_tree["run_dir"]
+    detail = analyze_tree["details"]["test_xyz"]
+    assert detail["dX"].shape == (65, 3), \
+        f"test_xyz 旁车 dX 应 (65, 3),实际 {detail['dX'].shape}"
+    assert np.isfinite(detail["dX"]).all(), "65 帧全有效,dX 不该有 NaN"
+    assert (run_dir / "analysis" / "test_xyz.npz").is_file()
+    assert (run_dir / "analysis" / "sensitivity.npz").is_file()
+    assert (run_dir / "figures" / "test_xyz.png").is_file()
+    assert (run_dir / "figures" / "sensitivity_ranking.png").is_file()
+    assert not (run_dir / "figures" / "what_if.png").is_file(), \
+        "quick 档不做 what-if,补拍预演图不该存在"
+    print(f"\n[产物] test_xyz.npz(dX {detail['dX'].shape})+ sensitivity.npz "
+          "+ test_xyz.png + sensitivity_ranking.png 在盘(what_if.png 无,quick 档)")
 
 
 def test_analyze_budget_recheck_consistent_and_zero_violations(analyze_tree: dict):
