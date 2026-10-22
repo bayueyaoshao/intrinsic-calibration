@@ -58,7 +58,22 @@ flowchart TD
 | ⑤ | 算理论精度极限 | `calib fisher` | corners_train_sb.npz + manifest.json、noise.json(双口径 σ)、各模型 m{X}__scipy/result.json + extrinsics.npz(线性化点:算误差界时用的那组解) | run_<时间戳>/{crlb.json(16 份 CRLB 记录:4 模型 × 2 观测集 640全帧/80姿态 × 2 σ 口径,逐内参标准差下界 + Σ 敏感性带 + 特征谱/条件数分档 + 软方向 + OpenCV stdDev 交叉验证结论;失败轮数值为 null 且写中文原因), fisher_m{X}.npz(逐模型 Fisher 矩阵明细,各带血缘旁车 meta.json), figures/(逐份记录的特征谱图)} | noise/ | NOI-03 |
 | ⑥ | 防作弊考试 | `calib evaluate` | corners_train/test_sb.npz + manifest.json(同轮血缘)、noise.json、各模型标定解(mX__scipy / mX__opencv)、crlb.json(Fisher 预警来源)、config/calibration.yaml | evaluate.json(优化器对比 + test 整体 RMS 选型走查 + 判行表 + 交付), experiments/*.npz(逐折/逐次/逐组明细旁车), figures/(判行表三图)。流程:优化器对比 → 全量重训交付(test 独立照片全模型逐张评分)→ test 整体 RMS 选型(复杂度逐档走查,提升 ≥10% 才升级)→ 四类实验(quick 档只考当选模型、重复缩水:交叉验证 3×3 / bootstrap 50 / 留一抽查 30;full 档全模型全量)→ 三判据第二意见 + 两处一致性对账 | evaluation/ | EVA-01~05 |
 | ⑦ | 误差归因 | `calib analyze` | evaluate 轮(evaluate.json + experiments/*.npz)、fisher 轮(crlb.json + fisher_mX.npz)、noise 轮(noise.json + temporal_sigma_per_corner.npz)、corners 轮(corners_train/test_sb.npz)、manifest.json、标定轮三件套(result.json / extrinsics.npz / residuals.npz);input_data 图像仅角点寻优(块 5)重算时读 | run_<时间戳>/{analyze.json(schema analyze-v1,六段:误差预算 / 残差方向分解 / test 三分量 / 参数敏感度 / 角点退化寻优 / 连拍各向异性;单段失败记 None 不中断其余段), analysis/ 六份明细 npz 旁车(逐行底账,各带血缘 meta.json), figures/(证据图九张)} | analysis/ | ANA-01~04, COR-02~03 |
-| ⑧ | 汇总证据出报告 | `calib report` / `calib run-all` | 全部产物 | report.html/md, figures/ | visualization/, report/ | REP-01~03, ITER-01~04 |
+| ⑧ | 汇总证据出报告 | `calib report` / `calib run-all` | 全部产物 | run_<时间戳>/{report.html(浏览版), report.md(纯文本版), report_data.json(机器可读底账,报告里每个数字都能在里面逐位找到同值), figures/(上游各阶段证据图原样归集), suggest_exclude.json(回环建议的剔除候选清单,人工确认后才填进 config 的剔除名单)};新轮落盘成功后自动删更旧的轮,只留最新两轮 | visualization/, report/ | REP-01~03, ITER-01~04 |
+
+## 一键全流程与回头路(run-all)
+
+`calib run-all` 按上表 ①→⑧ 顺序一条命令跑完全程(input_data/ 直达
+output/report/)。任一步失败当场停:播报"已完成到第几步、产物在哪、
+恢复用哪条命令",退出码 1,绝不静默续跑(血缘指纹已保证重跑安全,
+自动跳过反而有"上游变了下游没跑"的静默风险)。
+
+两个流程范围开关(只圈定跑哪几步,不是算法参数):
+
+- `calib run-all --from <步> --until <步>`:只跑区间内各步(含两端)。
+  典型用法:人工确认剔除候选、把名单填进 config 后,跑
+  `calib run-all --from calibrate`,复用角点/噪声产物只重跑标定及其后;
+- 各阶段单步命令(`calib corners` 等)本就独立,读各上游最新一轮产物,
+  上游缺什么会中文报错指路。
 
 ## 核心设计原则
 

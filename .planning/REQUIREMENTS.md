@@ -52,22 +52,22 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### 报告与交付 (REP)
 
-- [ ] **REP-01**: 可视化原语——角点叠加/残差热图/CV 曲线/CRLB 对比/敏感度排序/摆位覆盖图,matplotlib 统一输出 PNG
-- [ ] **REP-02**: 证据链报告组装(HTML/Markdown)——各阶段结论、图表、血缘指纹汇总,含最终内参 + 协方差 + 模型选型结论 + 误差预算表
-- [ ] **REP-03**: CLI 全流水线一条命令(run-all)+ 各阶段独立子命令 + Python 库接口
+- [x] **REP-01**: 可视化原语——角点叠加/残差热图/CV 曲线/CRLB 对比/敏感度排序/摆位覆盖图,matplotlib 统一输出 PNG(06-01 六类证据图原样归集进报告 figures/ 并按节编号索引;模板零本数据集数字由测试锁定)
+- [x] **REP-02**: 证据链报告组装(HTML/Markdown)——各阶段结论、图表、血缘指纹汇总,含最终内参 + 协方差 + 模型选型结论 + 误差预算表(06-01/06-02 九节证据链双模板 + report_data.json 逐位同源底账 + 失败轮/缺席段披露不冒充数值)
+- [x] **REP-03**: CLI 全流水线一条命令(run-all)+ 各阶段独立子命令 + Python 库接口(06-03 run-all 八步一条命令 + --from/--until 区间 + 失败断点中文指引;九个子命令与库接口有测试)
 
 ### 迭代与回环 (ITER)
 
 - [x] **ITER-01**: 阶段间仅通过带血缘(配置指纹+上游哈希+时间戳)的落盘产物通信,输入输出契约显式;每阶段可独立运行/重跑/检查
-- [ ] **ITER-02**: 问题视图/姿态标记与剔除清单机制,剔除后重标定一键执行
-- [ ] **ITER-03**: 运行清单(run manifest)+ 跨运行对比——报告含本次 vs 上次关键指标 diff
-- [ ] **ITER-04**: 回环触发条件表内置,报告自动给出"回哪一步、做什么"的建议
+- [x] **ITER-02**: 问题视图/姿态标记与剔除清单机制,剔除后重标定一键执行(06-02 suggest_exclude.json 三路候选逐条带理由;人工确认填 exclude_images 后 run-all --from calibrate 一条命令重标)
+- [x] **ITER-03**: 运行清单(run manifest)+ 跨运行对比——报告含本次 vs 上次关键指标 diff(06-02「与上次对比」节:上一份 report_data.json 作锚点,六键对比、首次运行如实说明)
+- [x] **ITER-04**: 回环触发条件表内置,报告自动给出"回哪一步、做什么"的建议(06-02 回环建议规则引擎十类触发,报告⑧节建议表,步骤名与 pipeline.md 逐字一致)
 
 ### 可复用性 (REU)
 
-- [ ] **REU-01**: 数据契约弹性——姿态数/每姿态重复张数/测试集张数全部数据驱动,不硬编码;重复数不齐时:分组数按最少重复数截断、聚合按张数加权、单张姿态退化单帧噪声估计,均不影响标定正确性
-- [ ] **REU-02**: 换数据集零代码——新数据符合目录契约放入后,仅调整 config 即可 run-all 一键完成标定+分析+报告
-- [ ] **REU-03**: 换棋盘规格零代码——board.yaml 是棋盘参数唯一来源;角点参数扫描范围随实测方格边长自适应
+- [x] **REU-01**: 数据契约弹性——姿态数/每姿态重复张数/测试集张数全部数据驱动,不硬编码;重复数不齐时:分组数按最少重复数截断、聚合按张数加权、单张姿态退化单帧噪声估计,均不影响标定正确性(06-04 张数不齐变体 8/8/5/2 真实数据锁定:组数=最少重复数 2、test 独立照全走单帧折算、①–⑥ 退出码 0;缩水数据的 ANA-01 守卫拒绝行为同一测试锁定)
+- [x] **REU-02**: 换数据集零代码——新数据符合目录契约放入后,仅调整 config 即可 run-all 一键完成标定+分析+报告(06-04 仅改 config 变体跑通①–⑥ + 报告对失败链披露渲染 + docs/new-dataset.md 六步迁移清单;全量真链放行走人工 checkpoint)
+- [x] **REU-03**: 换棋盘规格零代码——board.yaml 是棋盘参数唯一来源;角点参数扫描范围随实测方格边长自适应(06-04 回归验证 board.yaml 唯一来源未被新代码破坏,阶段一 io/corners 测试零回退)
 
 ## v2 Requirements
 
@@ -130,15 +130,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ANA-04 | Phase 5 | Shipped (Phase 5)(05-04 bootstrap 重复敏感度 run_sensitivity + advice 建议规则 + uniqueness 解不唯一证据;05-04 接 calib analyze 端到端) |
 | COR-02 | Phase 5 | Shipped (Phase 5)(05-05 角点退化寻优库层 + A1 销险;05-05 接 calib analyze 块 5,quick 档双口径真实数据定案) |
 | COR-03 | Phase 5 | Shipped (Phase 5)(05-06 连拍各向异性 run_anisotropy:temporal 过滤 + 防零除 + 分带/象限切片;05-06 接 calib analyze 块 6,六块全链收口) |
-| REP-01 | Phase 6 | Pending |
-| REP-02 | Phase 6 | Pending |
-| REP-03 | Phase 6 | Pending |
-| ITER-02 | Phase 6 | Pending |
-| ITER-03 | Phase 6 | Pending |
-| ITER-04 | Phase 6 | Pending |
-| REU-01 | Phase 6 | Pending |
-| REU-02 | Phase 6 | Pending |
-| REU-03 | Phase 6 | Pending |
+| REP-01 | Phase 6 | Shipped (Phase 6)(06-01 六类证据图归集 + 按节编号索引 + 模板零数据集数字) |
+| REP-02 | Phase 6 | Shipped (Phase 6)(06-01/06-02 九节证据链双模板 + report_data.json 逐位同源底账 + 缺席披露) |
+| REP-03 | Phase 6 | Shipped (Phase 6)(06-03 run-all 八步一条命令 + --from/--until + 断点中文指引 + 各子命令退出码收口) |
+| ITER-02 | Phase 6 | Shipped (Phase 6)(06-02 suggest_exclude.json 三路候选 + 人工确认填 exclude_images 后 --from calibrate 一键重标) |
+| ITER-03 | Phase 6 | Shipped (Phase 6)(06-02 「与上次对比」节,上一份报告轮作锚点六键对比) |
+| ITER-04 | Phase 6 | Shipped (Phase 6)(06-02 回环建议规则引擎十类触发,报告⑧节给"回哪一步、做什么") |
+| REU-01 | Phase 6 | Shipped (Phase 6)(06-04 张数不齐变体 8/8/5/2 真实数据锁定:组数=最少重复数、单帧折算来源标注、①–⑥ 退出码 0 + ANA-01 守卫行为锁定) |
+| REU-02 | Phase 6 | Shipped (Phase 6)(06-04 仅改 config 变体①–⑥ 跑通 + 报告披露渲染 + docs/new-dataset.md 六步迁移清单;全量真链人工 checkpoint 放行) |
+| REU-03 | Phase 6 | Shipped (Phase 6)(06-04 回归验证 board.yaml 唯一来源与方格边长自适应,阶段一测试零回退) |
 
 **Coverage:**
 
@@ -148,4 +148,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-16*
-*Last updated: 2026-10-21 after Phase 4 execution complete (EVA-01~05 + SOL-02 shipped,累计 17/32)*
+*Last updated: 2026-10-23 after Phase 6 execution complete (REP-01~03 + ITER-02~04 + REU-01~03 shipped,v1 全部 32/32;REU-02 全量真链放行待人工 checkpoint)*
