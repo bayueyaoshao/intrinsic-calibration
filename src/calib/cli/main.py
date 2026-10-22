@@ -162,8 +162,7 @@ def _not_implemented(step: int, name: str) -> None:
     typer.echo(f"本命令对应流水线第{'①②③④⑤⑥⑦⑧'[step - 1]}步「{name}」,由后续阶段实现。")
 
 
-@app.command(help="① 照片入库体检:全体检——模糊度/曝光/棋盘可见性逐张打分,存疑只标记不剔除(D-01),判定来源逐条写进 manifest,存疑原图另存副本,并生成与上一轮的存疑对比表")
-def ingest() -> None:
+def _run_ingest() -> None:
     """流水线第①步:全体检 + 登记造册(一张照片都不漏、一张都不剔)。
 
     步骤:读配置 → 扫描 train/test 目录 → 逐张核对分辨率一致
@@ -253,6 +252,23 @@ def ingest() -> None:
                    f"持续存疑 {diff_counts['persistent']} 张")
     typer.echo(f"  跨轮对比表:{diff_path}")
     typer.echo(f"  数据清单:{run_dir / 'manifest.json'}")
+
+
+@app.command(help="① 照片入库体检:全体检——模糊度/曝光/棋盘可见性逐张打分,存疑只标记不剔除(D-01),判定来源逐条写进 manifest,存疑原图另存副本,并生成与上一轮的存疑对比表")
+def ingest() -> None:
+    """第①步命令入口:坏输入收口为中文一句 + 退出码 1,不吐堆栈(T-06-07)。
+
+    实现体在 _run_ingest;库函数照旧抛 ValueError(库层测试零回退),
+    这里只管把命令入口的报错呈现收拾体面。连配置文件缺失这类读盘失败
+    (OSError)一并收口,坏输入一律不走堆栈。
+    """
+    try:
+        _run_ingest()
+    except (ValueError, OSError) as e:
+        typer.echo(f"照片入库体检失败:{e}")
+        typer.echo("  请先检查 config/ 配置与 input_data/ 输入数据"
+                   "(目录结构、棋盘规格、照片是否可读),修正后重跑 calib ingest。")
+        raise typer.Exit(code=1) from e
 
 
 def _stats_block(values: np.ndarray) -> dict | None:
@@ -421,12 +437,7 @@ def _burst_review_frames(images: list[dict], arrays: dict,
     return frames
 
 
-@app.command(help="② 找棋盘角点:经典与新款两个检测器并跑、各存一份,"
-                  "SB 未检出时用经典检测器兜底(可在配置关闭),"
-                  "亚像素窗口按实测方格边长比例推导;"
-                  "存疑帧与连拍点名帧各归拢一个专属复核文件夹"
-                  "(原图副本 + 两颗检测器标记图 + 逐张中文原因)")
-def corners() -> None:
+def _run_corners() -> None:
     """流水线第②步:在数据清单登记的全部照片上找角点。
 
     步骤:读配置 → 找最新一轮 ingest 产物读照片清单 → 逐张读图,
@@ -739,6 +750,26 @@ def corners() -> None:
     typer.echo(f"  质量摘要:{summary_path}")
 
 
+@app.command(help="② 找棋盘角点:经典与新款两个检测器并跑、各存一份,"
+                  "SB 未检出时用经典检测器兜底(可在配置关闭),"
+                  "亚像素窗口按实测方格边长比例推导;"
+                  "存疑帧与连拍点名帧各归拢一个专属复核文件夹"
+                  "(原图副本 + 两颗检测器标记图 + 逐张中文原因)")
+def corners() -> None:
+    """第②步命令入口:坏输入收口为中文一句 + 退出码 1,不吐堆栈(T-06-07)。
+
+    最常见的坏输入是还没跑过 calib ingest(找不到入库清单)。实现体在
+    _run_corners,库函数照旧抛 ValueError,这里只管命令入口的报错呈现。
+    """
+    try:
+        _run_corners()
+    except (ValueError, OSError) as e:
+        typer.echo(f"找棋盘角点失败:{e}")
+        typer.echo("  请先检查 config/ 配置与上游产物"
+                   "(还没有入库清单时先跑 calib ingest),修正后重跑 calib corners。")
+        raise typer.Exit(code=1) from e
+
+
 @app.command(help="③ 测噪声底:同一拍摄位置的连拍相减,实测这批数据天生的噪声水平")
 def noise() -> None:
     """流水线第③步:测这批数据天生的噪声底(两条线:注入实验 + 时域实测)。
@@ -971,9 +1002,7 @@ def _manifest_path_for(corners_run: Path, corner_route: str = "sb") -> Path:
     return latest_run_dir(OUTPUT_ROOT, "ingest") / "manifest.json"
 
 
-@app.command(help="④ 求解相机内参:配置矩阵驱动——模型 × OpenCV 原生/OpenCV 初值→scipy 精化"
-                  "(含鲁棒核对照)逐组合并排出结果,三件套带血缘落盘")
-def calibrate() -> None:
+def _run_calibrate() -> None:
     """流水线第④步:在 train 角点(sb 路线,D-02)上跑配置矩阵标定(D-01 全矩阵)。
 
     步骤:读配置 → 找最新一轮 corners 产物,按 corner_route 定位 train 角点
@@ -1070,6 +1099,23 @@ def calibrate() -> None:
 
     typer.echo(f"  标定产物:{run_dir}")
     typer.echo(f"  对比摘要:{comparison_path}")
+
+
+@app.command(help="④ 求解相机内参:配置矩阵驱动——模型 × OpenCV 原生/OpenCV 初值→scipy 精化"
+                  "(含鲁棒核对照)逐组合并排出结果,三件套带血缘落盘")
+def calibrate() -> None:
+    """第④步命令入口:坏输入收口为中文一句 + 退出码 1,不吐堆栈(T-06-07)。
+
+    最常见的坏输入是剔除名单写错、角点产物缺失或清单对不上。实现体在
+    _run_calibrate,库函数照旧抛 ValueError,这里只管命令入口的报错呈现。
+    """
+    try:
+        _run_calibrate()
+    except (ValueError, OSError) as e:
+        typer.echo(f"求解相机内参失败:{e}")
+        typer.echo("  请先检查 config/ 配置与剔除名单、上游角点产物"
+                   "(还没有角点时先跑 calib corners),修正后重跑 calib calibrate。")
+        raise typer.Exit(code=1) from e
 
 
 @app.command(help="⑤ 算理论精度极限:标定前预测这批数据最好能做到什么程度,并检查摆拍位置是否有缺陷(Fisher 信息/CRLB)")

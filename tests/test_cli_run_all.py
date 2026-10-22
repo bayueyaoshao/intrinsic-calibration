@@ -85,3 +85,34 @@ def test_run_all_bad_step_names_fail_fast_in_chinese(tmp_path, monkeypatch):
     assert "区间是空的" in inverted.output
 
     assert calls == [], "参数非法时应快速失败,任何一步都不该被调用"
+
+
+def test_run_all_stops_at_failed_step_with_recovery_hint(tmp_path, monkeypatch):
+    """中途失败即停(T-06-06,直调链 Exit 冒泡即停的兜底验证)。
+
+    假 evaluate 抛 typer.Exit(1)(与真命令失败契约收口后的形态一致):
+    run-all 退出码 1、播报含「已完成到」「恢复」、失败步之后的
+    analyze/report 不再被调用。
+    """
+    monkeypatch.chdir(tmp_path)
+    calls = _install_fake_steps(monkeypatch, fail_at="evaluate",
+                                fail_exc=typer.Exit(code=1))
+    result = runner.invoke(app, ["run-all"])
+    assert result.exit_code == 1
+    assert calls == ["ingest", "corners", "noise", "calibrate", "fisher",
+                     "evaluate"], "失败步之后的步骤绝不该被调用"
+    assert "已完成到" in result.output
+    assert "恢复" in result.output
+    assert "--from evaluate" in result.output, "恢复命令应指回失败那一步"
+
+
+def test_ingest_bad_input_wrapped_as_chinese_error(tmp_path, monkeypatch):
+    """退出码收口(T-06-07):坏输入的裸 ValueError 收口为中文一句
+    + 退出码 1,不吐 traceback(修复前直接吐堆栈)。"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir()  # config 目录在但 board.yaml 缺失 → 库层中文 ValueError
+    result = runner.invoke(app, ["ingest"])
+    assert result.exit_code == 1
+    assert "照片入库体检失败" in result.output
+    assert "请先检查" in result.output
+    assert "Traceback" not in result.output
