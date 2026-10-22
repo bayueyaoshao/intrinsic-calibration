@@ -218,7 +218,21 @@ Plans:
   4. 用一份缩小/变体的测试数据集(姿态数/重复张数不同、张数不齐)验证:仅改 config 即可 run-all 跑通,标定正确性不受张数不齐影响
   5. 各阶段 CLI 子命令均可独立运行于既有上游产物(`--from/--until` 语义),Python 库接口可用(非 CLI 路径有测试)
 
-**Plans:** TBD
+**Plans:** 4 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 06-01-PLAN.md — 报告组装库层与模板:report/build.py 组装纯函数 + jinja2 双模板 + `calib report` 命令落地(report_data.json 契约 + 缺席段/断链披露)(REP-01/02,用户裁定①)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 06-02-PLAN.md — 回环三件:回环建议规则引擎 + suggest_exclude.json + 跨运行 diff(锚点=上一份 report 轮)接进报告(ITER-02/03/04,用户裁定①②)
+- [ ] 06-03-PLAN.md — CLI 全流水线收口:run-all 八步接 report + --from/--until + 失败断点中文指引 + 退出码收口 + 合成测试(REP-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 06-04-PLAN.md — 可复用性硬化与全链验收:张数不齐变体测试 + 新数据迁移文档 + REU 逐条对账 + docs/需求状态同步 + 真数据人工 checkpoint(REU-01/02/03,含 checkpoint)
 
 ## Progress
 
@@ -229,7 +243,7 @@ Plans:
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 6/6 | Complete    | 2026-10-19 |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 6/6 | Complete    | 2026-10-21 |
 | 5. 误差预算 + 诊断 + 角点提取寻优 | 6/6 | Complete   | 2026-10-22 |
-| 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/TBD | Not started | - |
+| 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/4 | Planned | - |
 
 ## Phase Closing Checklist (applies to every phase)
 
