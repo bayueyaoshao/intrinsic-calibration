@@ -302,6 +302,15 @@ class EvaluateConfig:
     # 折数 ≥ 2 是交叉验证的最低要求,1 折等于不考)
     cv_n_folds: int = 5
     cv_n_rounds: int = 5
+    # 训练侧每姿态取几张连拍(2026-10-22 降载裁定):交叉验证 / bootstrap /
+    # 留一姿态三类实验的训练侧,每姿态最多取"文件序前 N 张"(文件名含
+    # 时间戳,按文件名排序就是拍摄时间序,确定性、不引入新随机源);
+    # 验证侧不受影响仍带全部连拍。依据 docs/findings.md 结论 1——每姿态
+    # 1 张与连拍 8 张无实质差别,参数晃动的大头是位姿抽样不是检测噪声;
+    # 默认 1 = 每姿态 1 张,训练规模从约 640 行降到约 80 行量级。
+    # 豁免:重复张分组(slices)/ 噪声估计 / Fisher / calib calibrate
+    # 主标定 / calib analyze 都不读本键。
+    exposures_per_pose: int = 1
     # bootstrap 重采样次数(D-04:按姿态有放回重采 200 次,4 模型共用同批)
     bootstrap_n: int = 200
     # 重复张分组实验开关(D-05:每姿态取第 i 张组成数据组,量纯噪声影响)
@@ -941,6 +950,12 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
     if not isinstance(cv_n_folds, int) or isinstance(cv_n_folds, bool) or cv_n_folds < 2:
         _fail("evaluate.cv_n_folds", cv_n_folds,
               "必须是 >= 2 的整数(1 折留不出考题,交叉验证至少两折)")
+    # 训练侧每姿态连拍数:整数、先拒 bool 伪装、>= 1(0 张等于没训练,
+    # 求解当场崩或静默出垃圾结果,必须在配置层拦下)
+    n_exp = section.get("exposures_per_pose", cfg.exposures_per_pose)
+    if not isinstance(n_exp, int) or isinstance(n_exp, bool) or n_exp < 1:
+        _fail("evaluate.exposures_per_pose", n_exp,
+              "必须是 >= 1 的整数(训练侧每姿态最多取几张连拍)")
 
     workers = section.get("evaluate_max_workers", cfg.evaluate_max_workers)
     if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
@@ -1045,6 +1060,7 @@ def _parse_evaluate(raw: dict) -> EvaluateConfig:
         optimizer_losses=tuple(losses),
         cv_n_folds=cv_n_folds,
         cv_n_rounds=section.get("cv_n_rounds", cfg.cv_n_rounds),
+        exposures_per_pose=section.get("exposures_per_pose", cfg.exposures_per_pose),
         bootstrap_n=section.get("bootstrap_n", cfg.bootstrap_n),
         slice_enabled=section.get("slice_enabled", cfg.slice_enabled),
         lopo_enabled=section.get("lopo_enabled", cfg.lopo_enabled),

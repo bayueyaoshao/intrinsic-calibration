@@ -552,14 +552,16 @@ def test_evaluate_repo_yaml_values():
     ev = load_calibration(REAL_CALIB).evaluate
     assert ev.models == ("m1", "m2", "m3", "m4")
     assert ev.optimizer_losses == ("linear", "soft_l1", "huber", "cauchy")
-    assert (ev.cv_n_folds, ev.cv_n_rounds, ev.bootstrap_n) == (5, 5, 100)
+    assert (ev.cv_n_folds, ev.cv_n_rounds, ev.bootstrap_n) == (5, 5, 30)
     assert ev.slice_enabled is True and ev.lopo_enabled is True
     assert ev.evaluate_max_workers == 12
     assert ev.warm_start_experiments is False
-    # 选型重构(2026-10-21):默认 quick 档 + quick 缩水次数 + 10% 升级门槛
+    # 选型重构(2026-10-21):默认 quick 档 + quick 缩水次数 + 10% 升级门槛;
+    # 次数二次降载(2026-10-22):bootstrap 30 / quick 10 / 留一抽查 10
     assert ev.profile == "quick"
     assert (ev.quick_cv_n_folds, ev.quick_cv_n_rounds,
-            ev.quick_bootstrap_n, ev.quick_lopo_n) == (3, 3, 50, 30)
+            ev.quick_bootstrap_n, ev.quick_lopo_n) == (3, 3, 10, 10)
+    assert ev.exposures_per_pose == 1
     assert ev.selection_improve_min == pytest.approx(0.10)
     assert ev.tie_band_px == pytest.approx(0.005)
     assert ev.tie_band_rel == pytest.approx(0.02)
