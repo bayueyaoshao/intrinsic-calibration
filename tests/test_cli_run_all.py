@@ -43,6 +43,21 @@ def _install_fake_steps(monkeypatch, fail_at: str | None = None,
     return calls
 
 
+def test_real_steps_table_matches_pipeline_order():
+    """真实 STEPS 表的八步顺序直接对齐 docs/pipeline.md(不经过假表)。
+
+    其余用例先把 STEPS 整表换成按 PIPELINE_ORDER 排好的假函数再断言调用序,
+    真实表若被改乱序、漏一步或指错函数,白天快速档依旧全绿,只有夜间
+    realdata 全链能兜住——此例直接锁真实表,把「顺序对齐文档」的收口
+    拉到快速档明面上。顺带核失败指引要查的两张键表与真实表对得上:
+    通俗名 _STEP_CN 八步键一个不少,产物目录名 _STEP_OUTPUT_DIR 的键
+    都得是真实表里有的步骤名。
+    """
+    assert [name for name, _fn in cli_main.STEPS] == PIPELINE_ORDER
+    assert set(cli_main._STEP_CN) == set(PIPELINE_ORDER)
+    assert set(cli_main._STEP_OUTPUT_DIR) <= set(PIPELINE_ORDER)
+
+
 def test_run_all_full_range_follows_pipeline_order(tmp_path, monkeypatch):
     """全区间:八步调用序与 docs/pipeline.md 完全一致。
 
