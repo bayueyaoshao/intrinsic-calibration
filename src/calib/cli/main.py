@@ -2403,9 +2403,9 @@ def _run_report() -> None:
 
     只读各阶段最新一轮既有产物,组装与渲染全部交给 report/build.py 的一个
     顶层函数(本函数只管调用、清理与播报);缺哪路主文件就中文报错退出,
-    提示先跑对应命令。落 output/report/run_<时间戳>/ 四件:report.html、
-    report.md、report_data.json、figures/;新轮落盘成功后删更旧的轮,
-    只留最新两轮(上一轮是后续跨运行对比的读锚)。
+    提示先跑对应命令。落 output/report/run_<时间戳>/ 五件:report.html、
+    report.md、report_data.json、figures/、suggest_exclude.json;新轮落盘
+    成功后删更旧的轮,只留最新两轮(上一轮是后续跨运行对比的读锚)。
     """
     typer.echo("第⑧步 汇总证据出报告:读七路上游最新轮,只组装不重算……")
     result = run_report(OUTPUT_ROOT)

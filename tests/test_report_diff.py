@@ -132,6 +132,29 @@ def test_burst_suspect_image_ids_win_over_whole_pose_expansion():
     assert "1.40px" in cands[0]["reason"], "逐帧点名的理由沿用整组版的数字"
 
 
+def test_same_image_collected_once_across_routes():
+    """同一张照片被多路同时点名只收一条(重复上榜对人工确认是噪声)。
+
+    poseB 既被留一姿态整组展开、又被连拍断言整组展开,img_x0 还被
+    入库体检多来源点名——三路重叠后每张只留先到的一条。
+    """
+    manifest = _manifest([
+        _train("img_x0", "poseB", suspect=True,
+               sources=["pose_relative:blur", "pose_relative:exposure"]),
+        _train("img_x1", "poseB"),
+    ])
+    ev = _eval_doc(outlier_poses=[{"pose_id": "poseB", "mad_z": 4.2}])
+    corners = _corners_doc(failures=[
+        {"detector": "classic", "pose_id": "poseB",
+         "spread_median_px": 0.9, "spread_max_px": 1.4,
+         "threshold_px": [0.35, 1.4]},
+    ])
+    out = collect_exclude_candidates(ev, None, manifest, corners)
+    ids = [c["image_id"] for c in out["candidates"]]
+    assert len(ids) == len(set(ids)), f"同一张照片不得重复上榜:{ids}"
+    assert ids == ["img_x0", "img_x1"], f"三路重叠后各张只留一条:{ids}"
+
+
 def test_ingest_multi_source_suspects_only():
     """入库体检存疑:只有被多类判定来源同时点名的才算「计数高」。"""
     manifest = _manifest([

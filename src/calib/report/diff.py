@@ -168,6 +168,11 @@ def collect_exclude_candidates(evaluate_report: dict | None = None,
                                corners_report: dict | None = None) -> dict:
     """收集剔除候选清单(ITER-02):三路候选取并集,零候选落空表。
 
+    同一张照片只上榜一次:三路可能各自点名同一张(比如既被留一姿态
+    整组展开、又被入库体检多来源点名),重复两行理由不同,对人工确认
+    是噪声——先到的理由为准,后面重复的跳过。image_id 缺席的候选
+    (姿态在 manifest 里找不到照片)不参与去重,照收。
+
     参数(全部是各轮 JSON 读回的字典,缺席给 None):
         evaluate_report: evaluate.json(留一姿态点名来源);
         analyze_report:  analyze.json(本版三路候选不读它,参数保留与
@@ -179,9 +184,17 @@ def collect_exclude_candidates(evaluate_report: dict | None = None,
     顺序 = 留一点名 → 连拍断言 → 入库体检(多来源按计数降序)。
     """
     candidates: list[dict] = []
-    candidates += _lopo_candidates(evaluate_report, manifest)
-    candidates += _burst_candidates(corners_report, manifest)
-    candidates += _ingest_candidates(manifest)
+    seen_images: set[str] = set()
+    for batch in (_lopo_candidates(evaluate_report, manifest),
+                  _burst_candidates(corners_report, manifest),
+                  _ingest_candidates(manifest)):
+        for cand in batch:
+            image_id = cand.get("image_id")
+            if image_id and image_id in seen_images:
+                continue
+            if image_id:
+                seen_images.add(image_id)
+            candidates.append(cand)
     return {"candidates": candidates}
 
 
@@ -189,7 +202,7 @@ def collect_exclude_candidates(evaluate_report: dict | None = None,
 
 # 对比键清单(锚点 = 上一份 report 轮的 report_data.json,裁定②):
 # (报告里显示的指标名, metrics_raw 键, 变好方向)
-# 方向语义按指标含义写死:test RMS、预算比值、噪声底都是越低越好;
+# 变化方向按指标含义写死:test RMS、预算比值、噪声底都是越低越好;
 # 当选模型是名字,没有好坏,只报「持平 / 换成谁」。
 _DIFF_KEYS = (
     ("当选模型", "selected", "name"),
@@ -218,7 +231,7 @@ def _fmt_value(key: str, value) -> str:
 
 
 def _change_word(kind: str, current, previous) -> str:
-    """变化一栏的方向词(语义按指标含义写死,见 _DIFF_KEYS 第三列)。"""
+    """变化一栏的方向词(变化方向按指标含义写死,见 _DIFF_KEYS 第三列)。"""
     if previous is None:
         return "上次无此数据"
     if current is None:
