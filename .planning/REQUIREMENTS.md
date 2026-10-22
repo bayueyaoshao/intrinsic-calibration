@@ -16,7 +16,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 角点 (COR)
 
 - [x] **COR-01**: 角点检测与亚像素精化,候选方法/参数集可配置;窗口扫描范围从实测方格像素边长推导(比例化),不写死像素值
-- [ ] **COR-02**: 角点提取寻优——合成退化实验(加噪/模糊/低对比)下对比候选方法定位误差,以数据证明当前条件最优
+- [x] **COR-02**: 角点提取寻优——合成退化实验(加噪/模糊/低对比)下对比候选方法定位误差,以数据证明当前条件最优
 - [ ] **COR-03**: 角点提取误差 x/y 方向分解——同姿态连拍同名角点重复性的各向异性分析
 
 ### 噪声与可达精度 (NOI)
@@ -128,7 +128,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ANA-02 | Phase 5 | Complete |
 | ANA-03 | Phase 5 | Complete |
 | ANA-04 | Phase 5 | Complete |
-| COR-02 | Phase 5 | Pending |
+| COR-02 | Phase 5 | Complete |
 | COR-03 | Phase 5 | Pending |
 | REP-01 | Phase 6 | Pending |
 | REP-02 | Phase 6 | Pending |
