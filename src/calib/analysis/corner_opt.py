@@ -8,10 +8,10 @@
 更不复制第二份检测实现——源码防线测试锁定本文件不含 cv2 角点检测与
 亚像素精化函数的英文名,SB 结果也绝不进二次亚像素精化路径。
 
-CALIB_CB_ACCURACY 语义实测(2026-10-22,合成棋盘双帧,干净图与 σ=8 加噪
+CALIB_CB_ACCURACY 作用实测(2026-10-22,合成棋盘双帧,干净图与 σ=8 加噪
 各检一遍,本机 OpenCV 4.14.0):flags=0 与 flags=CALIB_CB_ACCURACY(=32)
 两档检出数相同、逐角点坐标逐位一致(位移 0.0000px)——"SB 追加亚像素
-精化"的预期语义未获证实,该 flag 在本机对 SB 输出无可测差异。两档仍都
+精化"的预期作用未获证实,该 flag 在本机对 SB 输出无可测差异。两档仍都
 保留为候选(结论由数据出,不预设):真实数据退化网格若两档曲线完全重合,
 即可判"该 flag 对本数据无效"。
 
@@ -68,11 +68,11 @@ PRODUCTION_LABEL = "sb"
 # full 固定 2 压随机性,配置键保留只为 quick/full 契约对称,见 AnalyzeConfig 注)
 _FULL_REPS = 2
 
-# CALIB_CB_ACCURACY 语义实测结论(A1 销险,随段落盘 + 模块 docstring 固定段)
+# CALIB_CB_ACCURACY 作用实测结论(A1 销险,随段落盘 + 模块 docstring 固定段)
 SB_ACCURACY_VERDICT = (
-    "CALIB_CB_ACCURACY 语义实测(2026-10-22,合成棋盘双帧,干净图与 σ=8 加噪"
+    "CALIB_CB_ACCURACY 作用实测(2026-10-22,合成棋盘双帧,干净图与 σ=8 加噪"
     "各检一遍,OpenCV 4.14.0):与 flags=0 检出数相同、逐角点坐标逐位一致"
-    "(位移 0.0000px),「SB 追加亚像素精化」的预期语义未获证实,该 flag 在本机"
+    "(位移 0.0000px),「SB 追加亚像素精化」的预期作用未获证实,该 flag 在本机"
     "对 SB 输出无可测差异;两档仍都保留为候选,真实数据退化网格若两档曲线"
     "完全重合,即可判该 flag 对本数据无效。"
 )
@@ -84,7 +84,7 @@ def apply_degradation(
     """给灰度图施加一族一档退化,返回 uint8 退化副本。
 
     三族(配置 analyze.noise_levels / blur_levels / contrast_gains 的档位):
-    - noise:   加高斯噪声,σ = level(灰阶);语义与收尾照 injection 的
+    - noise:   加高斯噪声,σ = level(灰阶);做法与收尾照 injection 的
                add_gaussian_noise;
     - blur:    高斯模糊,σ_px = level,核径 ≈ 6σ+1(奇数);level <= 0 恒等;
     - contrast:对比度增益,输出 = 128 + (输入 − 128) × gain;gain = 1.0 恒等。
@@ -148,7 +148,7 @@ def build_method_candidates(sq_px: float, cfg: AnalyzeConfig,
     - classic 各窗口档 w ∈ cfg.classic_win_ladder 中满足 2w+1 < sq_px 者:
       超档直接不进候选,不报错——这是设计内过滤(窗口吞邻角是本项目头号
       陷阱,窗口阶梯的合法域与 window.derive_window_frame 同一条断言);
-    - SB 两档:flags=0(生产位)+ flags=CALIB_CB_ACCURACY(精化位,语义
+    - SB 两档:flags=0(生产位)+ flags=CALIB_CB_ACCURACY(精化位,作用
       实测见模块 docstring);
     - full 档追加 SB_EXHAUSTIVE 候选(穷举搜索位)。
 

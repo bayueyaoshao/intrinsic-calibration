@@ -44,7 +44,7 @@ from calib.solve.scoring import solve_pose_only
 # 段模式版本:残差结构段的结构约定(加键不改键算兼容,删键必须升版本)
 SCHEMA_RESIDUAL = "analyze-residual-v1"
 
-# 位姿求解下限(solve_pose_only 的失败语义:4 点以下方程组欠定)。
+# 位姿求解下限(solve_pose_only 失败时怎么处理:4 点以下方程组欠定)。
 # 单帧可用角点少于此数时按失败帧占行,不中断整批。
 _MIN_PNP_POINTS = 4
 

@@ -99,7 +99,7 @@ def test_inversion_identity_recovers_dx0():
 
 
 def test_ill_conditioned_frame_raises_value_error():
-    """病态帧语义:cond 超阈值的 A 抛 ValueError(由编排层 NaN 占行),
+    """病态帧的处理方式:cond 超阈值的 A 抛 ValueError(由编排层 NaN 占行),
     异常必须是 ValueError 家族(plan 契约:抛 ValueError("病态帧"))。"""
     rng = np.random.default_rng(7)
     near = rng.normal(size=(176, 3))

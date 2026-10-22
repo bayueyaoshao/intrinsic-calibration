@@ -46,7 +46,7 @@ class _IllConditionedFrame(ValueError):
 
     是 ValueError 的子类——plan 契约是"cond 超阈值抛 ValueError 由编排层
     占行";子类化只是让编排层能把"病态帧"与"位姿解不出"两类失败分开
-    计数(n_cond_excluded / n_solve_failed),捕获语义不变。
+    计数(n_cond_excluded / n_solve_failed),捕获的异常类型不变。
     """
 
 
@@ -113,7 +113,7 @@ def frame_xyz(uv_view: np.ndarray, object_points: np.ndarray,
     "cond" / "depth_amplification" / "rms"(回代 RMS,像素)。
 
     dX 的单位 = 物点单位(棋盘方格边长的同一单位,本板为 mm);
-    cond 超过 cond_max 抛 ValueError(病态帧语义,见模块头)。
+    cond 超过 cond_max 抛 ValueError(病态帧的处理方式,见模块头)。
     """
     uv = np.asarray(uv_view, dtype=np.float64)
     rvec, tvec, rms = solve_pose_only(uv, object_points, params, model)

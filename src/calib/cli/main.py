@@ -1044,7 +1044,7 @@ def calibrate() -> None:
                    f"(名单已记进每个产物的血缘)")
 
     # ---- 存疑帧复核(D-04 闭环):矩阵跑完自动生成 suspect_review/ ----
-    # 复核失败不吞标定成功:任何意外只 echo 中文提示,退出语义不变
+    # 复核失败不吞标定成功:任何意外只 echo 中文提示,退出行为不变
     try:
         review = review_suspects(run_dir, corners_run, manifest_path, board, cfg)
         if review.get("frame_table"):

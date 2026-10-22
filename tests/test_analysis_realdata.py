@@ -256,7 +256,7 @@ def test_analyze_residual_sidecars_and_figures(analyze_tree: dict):
 def test_analyze_blocks_2345_use_stage_and_budget_stays_direct():
     """源码断言(接线体例):块 2–6 包在 _stage 里(单块失败记 None
     照常出报告),块 1 预算依旧直调不套兜底(铁律违例必须退出码 1)——
-    两种失败语义不许混。"""
+    两种失败的处理方式不许混。"""
     import inspect
 
     import calib.cli.main as cli_main
