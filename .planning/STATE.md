@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-22T01:50:00Z"
+last_updated: "2026-10-22T00:05:24.993Z"
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 29
-  completed_plans: 26
-  percent: 90
+  completed_plans: 27
+  percent: 93
 ---
 
 # STATE: intrinsic-calibration
@@ -23,16 +23,16 @@ progress:
 ## Current Position
 
 Phase: 5 (误差预算 + 诊断 + 角点提取寻优) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 
 - **Phase:** 5
-- **Plan:** 3 of 6 完成(05-03 ANA-02 残差方向分解端到端)
-- **Status:** 执行中(下一计划 05-04:test 三维误差 + 参数敏感度)
-- **Progress:** [█████████░] 90%
-- **备注:** 05-03 落地残差按视图/区域/r 分带 + r⁴ 覆盖足迹(结论 5
-  产品化)+ 外推显式披露;真实数据 run_20261021_173659 逐位吻合
-  (0.6853/0.7974/21.1%/61.4%),test 65 张全评分零失败,
-  全套 539 passed + 46 integration
+- **Plan:** 4 of 6 完成(05-04 ANA-03 test 三分量反解 + ANA-04 参数敏感度)
+- **Status:** 执行中(下一计划 05-05:COR-02 角点提取寻优)
+- **Progress:** [█████████░] 93%
+- **备注:** 05-04 落地 test 集三维误差反解 + 敏感度双谱对账;真实数据
+  run_20261021_182345:k2/k3 载荷 78%(结论 1 软方向)、余弦 0.967/0.752、
+  建议三分支命中、uniqueness 1.9943px 如实披露;全套 563 passed,
+  全量集成 46 passed / 3 failed(既有问题,登记 deferred-items.md)
 
 ## Performance Metrics
 
@@ -40,7 +40,7 @@ Plan: 4 of 6
 |--------|-------|
 | Phases complete | 4/6 |
 | Requirements shipped | 19/32 |
-| Plans this phase | 3/6 |
+| Plans this phase | 4/6 |
 | Blocked items | 0 |
 | Phase 05 P03 | 30min | 3 tasks | 6 files |
 | Phase 05 P02 | 18min | 3 tasks | 5 files |
@@ -51,6 +51,7 @@ Plan: 4 of 6
 | Phase 4 P03 | 18min | 2 tasks | 2 files |
 | Phase 4 P05 | 29min | 3 tasks | 5 files |
 | Phase 4 P06 | 跨 2 日 | CLI 闭环+集成对账+提速重构+选型重构 | 3 files(+docs) |
+| Phase 05 P04 | 6h38min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -87,41 +88,48 @@ Plan: 4 of 6
 
 ## Session Continuity
 
-- **Last action:** 05-03 执行完成(2026-10-22,30min,7f8bf88/2604094/
+- **Last action:** 05-04 执行完成(2026-10-22,6h38min 含集成套件,
+  05ad259/4592d97/21b8b13/b43f9d2)— ANA-03 test 三分量反解 + ANA-04
+  参数敏感度端到端:test_xyz 库层(最小范数反解,z 分数/深度放大/条件数,
+  病态 NaN 占行)+ sensitivity 库层(双谱对账 + 像素当量上天平 + 建议
+  三分支 + uniqueness 披露 + full 档 what-if)+ analyze 块 3/4 接线 +
+  三张证据图;真实数据 run_20261021_182345:k2/k3 载荷 78%(结论 1)、
+  余弦 0.967/0.752、advice 三条全命中、uniqueness 1.9943px;24 例新测试,
+  全套 563 passed。TDD(Task 1 RED 05ad259 → GREEN 4592d97)
+
+- **Previous action:** 05-03 执行完成(2026-10-22,30min,7f8bf88/2604094/
   1196bed/a08cf34)— ANA-02 残差方向分解端到端:库层(分带器左闭右开
   超界不丢/散布与系统偏移分离/覆盖足迹/r⁴ 律折算/train 读落盘残差 +
   test 只估位姿回代失败帧 NaN 占行)+ 双空间图(r 分带曲线 + 覆盖足迹,
   统一叠足迹与外推阴影)+ analyze 块 2 _stage 接线;真实数据
   run_20261021_173659 与 findings 结论 5 逐位吻合(0.6853/0.7974/
   21.1%/61.4%,基准与标定轮 max_rel_diff 0.0),旧轮 165501 已按及时
-  清理删除。16 例新测试,全套 539 passed + 46 integration
+  清理删除。16 例新测试,全套 539 passed
 
-- **Previous action:** 05-02 执行完成(2026-10-22,18min,a011c0c/06b2511/
+- **Earlier action:** 05-02 执行完成(2026-10-22,18min,a011c0c/06b2511/
   9da81d1)— calib analyze 命令端到端:上游六轮定位 + 失败轮拒绝 + 13 项
   血缘一次性登记 + budget 直调(铁律违例冒泡失败契约,退出码 1)+
   plot_budget_bars 预算条形图 + 四要素播报;真实数据首跑零违例,
   findings 结论 4 对账通过(阶段四遗留销账)
 
-- **Earlier action:** 05-01 执行完成(2026-10-22 凌晨,20min,63f1815/
-  a215641/7cf3004)— 配置/契约/库三层:AnalyzeConfig(analyze 段 16 键
-  中文校验)+ analyze 产物契约层(11 键 + 失败契约 + 六段 npz 旁车)+
-  run_budget 误差预算库;ANA-01 标记 Shipped
+- **Next action:** 05-05 COR-02 角点合成退化寻优端到端(唯一重计算块:
+  加噪/模糊/低对比 × winSize 阶梯 × SB 候选;双口径并报,裁定①;
+  quick/full 两档;corner_opt 段留位待接)
 
-- **Next action:** 05-04 test 三维误差 + 参数敏感度(test_xyz/sensitivity
-  两段按 _stage 接入 analyze,同体例:库函数 + npz 旁车 + 图 + meta 透传
-  + missing_sections 收缩 + 集成测试断言从 None 改有值);分带器
-  (assign_bands/band_stats)已在 residual_structure.py,05-06 anisotropy
-  直接复用同一把尺
-
-- **Notes for next session:** 最新 analyze 轮 run_20261021_173659 在盘
-  (residual_structure 段有值),05-04 重跑 analyze 后指纹门自动要求
-  重跑消费;真实信号备查——test 侧最外带 RMS 0.39px 显著高于 train
-  0.14px,可作 test_xyz 分解的对照起点;外推披露 σ 口径 =
-  slices.empirical_std(0.0966px,与 budget 同源),findings 的 0.135px
-  是最大组间散布口径,两套数字各说各话别混写;空间图既定样式 = 足迹
-  散点 + r 等值线 + 外推阴影 + 标题注明归一化基准轮名
+- **Notes for next session:** 最新 analyze 轮 run_20261021_182345 在盘
+  (test_xyz/sensitivity 段有值,五图四旁车,what_if.png quick 档正确
+  缺席),指纹门自动消费;全量集成 3 个既有失败已登记
+  deferred-items.md(血缘断链 ×2 + 注入老测试与阶段四划分演进脱节 ×1),
+  05-06 收口或阶段六开篇安排专门一轮修复,避免带病进最终验证;
+  敏感度结论备查——补 6 个够到画面四角的姿态是当前性价比最高动作
+  (k2/k3 方向 0.095px 当量 × 外推区零观测);05-03 时「46 integration
+  零回归」实为子集运行外推,全量套件自本计划起才真正跑通
 
 ## Decisions
+
+- [Phase 05]: 敏感度载荷口径取无量纲坐标——像素参数被 ÷焦距刻度压平,k2/k3 软方向只在无量纲载荷下可见(findings 结论 1 机制落成实现判据);跨谱对账在原始坐标做,2 的幂刻度往返逐位一致 — 真实数据首跑暴露原始坐标载荷被焦距刻度反抢主导,dir1 呈现 fx/fy 与 findings 结论 1 不符;对照 plan 判据纠正为无量纲口径后 78% 逐位吻合
+- [Phase 05]: 建议规则表三分支数据驱动现算(补边缘姿态/补转角/不治),每条固定「只提示方向不自动执行」收尾(裁定③);what-if 仅 full 档、合成假设必带「非实拍」声明(裁定②),quick 档 what-if 图直接不生成 — 合成证据纪律:建议是提示不是动作,what-if 是合成假设不是实测;quick 档缺席图与段级 None + note 同口径
+- [Phase 05]: test_xyz 三分量与 what-if 谱合成的单一数学源:反解矩阵只从 project_point_jacobian 堆叠,谱合成只调 marginalized_fisher,两处源码级断言锁死(禁 import cv2/禁第二份 FIM 装配);病态帧 NaN 占行 + 乐观偏差与深度判读声明随段落账 — D-06/D-10 延续:分析层绝不重写投影/FIM 数学;病态与口径现象显式声明不冒充解释
 
 - [Phase 05]: 散布与偏移数字分离——band_stats 先减本带均值再取长度算 rms/median/max(整带同向挪动只动 mean_du/mean_dv),「整体偏」与「乱散」不可混淆;分带器一处实现,ANA-02 与 COR-03 共用同一把尺,严禁第二份
 - [Phase 05]: 外推披露 σ 口径与 budget 同源(slices.empirical_std ±σ 扰动 0.0966px),findings 结论 5 的 0.135px 是最大组间散布口径只做量级对照;判据表数值全部由公式从当前数据现算不抄死
