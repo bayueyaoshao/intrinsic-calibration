@@ -3,7 +3,8 @@
 八个阶段命令按 docs/pipeline.md 的顺序排列:
 ① ingest 照片入库体检 → ② corners 找棋盘角点 → ③ noise 测噪声底
 → ④ calibrate 求解相机内参 → ⑤ fisher 算理论精度极限 → ⑥ evaluate 防作弊考试
-→ ⑦ analyze 误差归因 → ⑧ report 汇总证据出报告;外加 run-all 一键跑已实现的全流程。
+→ ⑦ analyze 误差归因 → ⑧ report 汇总证据出报告;run-all 按这八步顺序
+一键从 input_data/ 跑到 output/report/,--from/--until 可只跑其中一段。
 
 硬性规则(D-12):命令行不接受任何算法参数,全部参数从 config/ 读——
 参数来源唯一,每次运行产物记录所用配置,结果才可追溯、可复现。
@@ -15,9 +16,11 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated
 
 import cv2
 import numpy as np
@@ -2387,27 +2390,140 @@ def report() -> None:
     typer.echo(f"  报告产物:{run_dir}")
 
 
-@app.command(help="run-all:一条命令按流水线顺序跑完已实现的全流程(未实现的阶段会说明)")
-def run_all() -> None:
-    """按顺序执行已实现的阶段;未实现的阶段打印占位说明,不中断。
+# ---------------------------------------------------------------- 一键全流程
 
-    接力顺序 = 流水线顺序(ingest → corners → calibrate → noise → fisher),
-    每步只靠落盘产物传递状态;哪一步断了命令就在哪一步停下并报退出码 1。
+# run-all 的步骤表:步骤名 + 对应命令函数,顺序严格照 docs/pipeline.md 八步
+# (① ingest → ② corners → ③ noise → ④ calibrate → ⑤ fisher → ⑥ evaluate
+# → ⑦ analyze → ⑧ report)。旧版把 calibrate 排在 noise 前面、与文档顺序
+# 颠倒,标定叙事对不上,已改正。
+STEPS: list[tuple[str, Callable[[], None]]] = [
+    ("ingest", ingest),
+    ("corners", corners),
+    ("noise", noise),
+    ("calibrate", calibrate),
+    ("fisher", fisher),
+    ("evaluate", evaluate),
+    ("analyze", analyze),
+    ("report", report),
+]
+
+# 各步的通俗名(播报与失败指引用,取自 docs/pipeline.md 的阶段命名)
+_STEP_CN: dict[str, str] = {
+    "ingest": "照片入库体检",
+    "corners": "找棋盘角点",
+    "noise": "测噪声底",
+    "calibrate": "求解相机内参",
+    "fisher": "算理论精度极限",
+    "evaluate": "防作弊考试",
+    "analyze": "误差归因",
+    "report": "汇总证据出报告",
+}
+
+# 步骤名 → output/ 下的产物目录名(只有 calibrate 例外:它写 output/calibration/,
+# 其余步骤与目录同名)。失败指引从这些目录现读最新一轮,不额外记账。
+_STEP_OUTPUT_DIR: dict[str, str] = {"calibrate": "calibration"}
+
+
+def _latest_round_or_note(step_name: str) -> str:
+    """失败指引与收尾播报用:现读某步骤最新一轮产物目录。
+
+    还没有落盘产物时如实说明,不报错——失败指引本身绝不能再失败。
     """
-    typer.echo("run-all:按流水线顺序执行已实现的阶段……")
+    try:
+        return str(latest_run_dir(
+            OUTPUT_ROOT, _STEP_OUTPUT_DIR.get(step_name, step_name)))
+    except ValueError:
+        return "未找到(该步骤还没有落盘产物)"
+
+
+def _announce_failure(done: list[str], failed_name: str, cause: Exception) -> None:
+    """失败断点指引(三要素):已完成到第几步 / 最新产物在哪 / 恢复用哪条命令。
+
+    产物位置从落盘现场现读(latest_run_dir),不额外记账;指引播报完由
+    调用方以退出码 1 结束。刻意不做自动断点续跑/跳过已完成步骤——血缘
+    指纹已保证重跑安全,自动跳过反而有"上游变了下游没跑"的静默风险
+    (T-06-08),--from 手动区间就是断点粒度。
+    """
+    all_names = [name for name, _fn in STEPS]
+    failed_pos = all_names.index(failed_name) + 1
+    if isinstance(cause, typer.Exit):
+        detail = "该步骤自己报错退出,失败原因见上方它的播报"
+    else:
+        detail = f"{type(cause).__name__}:{cause}"
+    typer.echo(f"run-all 在第 {failed_pos}/8 步「{failed_name}"
+               f"({_STEP_CN[failed_name]})」失败,已停止({detail})。")
+    if done:
+        last_pos = all_names.index(done[-1]) + 1
+        where = ";".join(
+            f"{name} → {_latest_round_or_note(name)}" for name in done)
+        typer.echo(f"  已完成到第 {last_pos}/8 步(本次共完成 {len(done)} 步:"
+                   f"{'、'.join(done)});已完成步骤的最新产物:{where}")
+    else:
+        typer.echo("  已完成到第 0/8 步(本次运行还没有跑完任何一步)。")
+    typer.echo(f"  恢复方法:排查修复后运行 calib run-all --from {failed_name}"
+               f" 从失败那步重跑(或单步运行 calib {failed_name} 检查)。")
+
+
+@app.command(name="run-all",
+             help="一键全流程:按 docs/pipeline.md 八步顺序跑完 ingest→corners→"
+                  "noise→calibrate→fisher→evaluate→analyze→report;任一步失败"
+                  "即停并播报断点与恢复命令;--from/--until 可只跑其中一段")
+def run_all(
+    from_step: Annotated[str, typer.Option(
+        "--from",
+        help="从哪一步开跑(步骤名,默认第一步 ingest)。典型用法:人工"
+             "剔除照片后 --from calibrate,只重跑标定及其后的步骤。")] = "ingest",
+    until_step: Annotated[str, typer.Option(
+        "--until",
+        help="跑到哪一步为止(含该步,默认最后一步 report)。")] = "report",
+) -> None:
+    """按流水线八步顺序一条命令跑完整条链(input_data/ 直达 output/report/)。
+
+    步骤表 = 模块级常量 STEPS,顺序与 docs/pipeline.md 一致;仍是直接函数
+    调用(不另起进程),每步只靠落盘产物传递状态。任一步报非零退出或抛
+    异常就当场停:播报已完成到第几步、产物在哪、恢复用哪条命令,退出码 1
+    (T-06-06:失败绝不静默续跑)。--from/--until 是流程范围开关,不是
+    算法参数,不违反 D-12(命令行零算法参数)。
+    """
+    all_names = [name for name, _fn in STEPS]
+    if from_step not in all_names:
+        typer.echo(f"--from 的步骤名「{from_step}」不认识。"
+                   f"可用步骤名:{'/'.join(all_names)}(顺序即流水线顺序)。")
+        raise typer.Exit(code=1)
+    if until_step not in all_names:
+        typer.echo(f"--until 的步骤名「{until_step}」不认识。"
+                   f"可用步骤名:{'/'.join(all_names)}。")
+        raise typer.Exit(code=1)
+    i_from, i_until = all_names.index(from_step), all_names.index(until_step)
+    if i_from > i_until:
+        typer.echo(f"--from「{from_step}」排在 --until「{until_step}」后面,"
+                   f"要跑的区间是空的。流水线顺序:{'→'.join(all_names)}。")
+        raise typer.Exit(code=1)
+    plan = STEPS[i_from:i_until + 1]
+
+    typer.echo(f"run-all:按流水线顺序执行第 {i_from + 1}~{i_until + 1} 步,"
+               f"共 {len(plan)} 步({' → '.join(name for name, _fn in plan)})……")
     typer.echo("")
-    ingest()
-    typer.echo("")
-    corners()
-    typer.echo("")
-    calibrate()
-    typer.echo("")
-    noise()
-    typer.echo("")
-    fisher()
-    typer.echo("")
-    typer.echo("后续阶段(防作弊考试/误差归因/汇总报告)由后续版本实现,"
-               "run-all 到第⑤步 crlb.json 为止。")
+    done: list[str] = []
+    for offset, (name, fn) in enumerate(plan):
+        typer.echo(f"第 {i_from + offset + 1}/8 步:{name}"
+                   f"({_STEP_CN[name]})……")
+        try:
+            fn()
+        except typer.Exit as exc:
+            if exc.exit_code == 0:
+                done.append(name)  # 步骤自己正常收尾,继续下一步
+                continue
+            _announce_failure(done, name, exc)
+            raise typer.Exit(code=1) from exc
+        except Exception as exc:  # 故意宽接:任一步失败即停,指引后统一退出码 1
+            _announce_failure(done, name, exc)
+            raise typer.Exit(code=1) from exc
+        done.append(name)
+        typer.echo("")
+
+    typer.echo(f"run-all 全部完成:区间内 {len(plan)} 步全部跑通。"
+               f"最新报告:{_latest_round_or_note('report')}")
 
 
 def main() -> None:
