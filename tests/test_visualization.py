@@ -23,6 +23,7 @@ from calib.corners.artifacts import save_corners
 from calib.io.config import BoardSpec, CalibrationConfig
 from calib.visualization.analyze_figs import (
     plot_budget_bars,
+    plot_corner_opt_curves,
     plot_coverage_footprint,
     plot_radial_bands,
     plot_sensitivity_ranking,
@@ -1020,3 +1021,60 @@ def test_plot_what_if_none_draws_no_data(tmp_path):
     from calib.visualization import analyze_figs
 
     assert "quick 档不做 what-if" in inspect.getsource(analyze_figs.plot_what_if)
+
+
+def _synthetic_corner_opt_section() -> dict:
+    """最小 corner_opt 段:2 方法 × 6 单元(噪声/模糊/对比各按真实键形)。"""
+    units = ["noise_0.0", "noise_2.0", "noise_4.0",
+             "blur_1.0", "blur_2.0", "contrast_0.2"]
+    unit_ops = {"noise_0.0": [["noise", 0.0]], "noise_2.0": [["noise", 2.0]],
+                "noise_4.0": [["noise", 4.0]], "blur_1.0": [["blur", 1.0]],
+                "blur_2.0": [["blur", 2.0]], "contrast_0.2": [["contrast", 0.2]]}
+
+    def _stat(rms):
+        return {"rms_px": rms, "median_px": rms * 0.8,
+                "mean_du": 0.001, "mean_dv": -0.002}
+
+    def _stats(noise_slope):
+        return {
+            "sb": {u: _stat(0.0 if u == "noise_0.0" else noise_slope * float(
+                u.split("_")[1])) for u in units},
+            "classic_w7": {u: _stat(0.0 if u == "noise_0.0" else noise_slope
+                                    * float(u.split("_")[1]) * 0.5)
+                           for u in units},
+        }
+
+    return {"units": units, "unit_ops": unit_ops,
+            "methods": ["classic_w7", "sb"], "production_method": "sb",
+            "threshold_px": 0.087,
+            "stats": {"_self": _stats(0.1), "_prod_sb": _stats(0.2)}}
+
+
+def test_plot_corner_opt_curves_short_reference_name_renders_data(tmp_path):
+    """回归(05-06 收口人工核查抓出):调用方传短名 reference="self" /
+    "prod_sb",段内 stats 键是 "_self" / "_prod_sb"——别名必须对齐,
+    否则查不到键、有数据也画成"无数据"分支。断言:短名渲染出的 PNG
+    显著大于无数据分支(曲线真的画了),且校准档零位移在源码判读可查。"""
+    section = _synthetic_corner_opt_section()
+    out_self = plot_corner_opt_curves(section, tmp_path / "self.png",
+                                      reference="self")
+    out_prodsb = plot_corner_opt_curves(section, tmp_path / "prodsb.png",
+                                        reference="prod_sb")
+    out_none = plot_corner_opt_curves(None, tmp_path / "none.png")
+    for p in (out_self, out_prodsb, out_none):
+        assert p.is_file() and p.stat().st_size > 0
+    # 有数据图必须明显大于"无数据"占位图(三面板曲线 + 图例 + 参考线)
+    assert out_self.stat().st_size > out_none.stat().st_size * 2, \
+        "reference='self' 仍走无数据分支:stats 别名对齐失效"
+    assert out_prodsb.stat().st_size > out_none.stat().st_size * 2, \
+        "reference='prod_sb' 仍走无数据分支:stats 别名对齐失效"
+
+
+def test_plot_corner_opt_curves_missing_stats_draws_no_data(tmp_path):
+    """无数据不冒充:stats 缺该口径(如段内只有 _self 却画 prod_sb)
+    不抛异常,照常出含「无数据」标注的 PNG。"""
+    section = _synthetic_corner_opt_section()
+    section["stats"] = {"_self": section["stats"]["_self"]}
+    out = plot_corner_opt_curves(section, tmp_path / "empty.png",
+                                 reference="prod_sb")
+    assert out.is_file() and out.stat().st_size > 0

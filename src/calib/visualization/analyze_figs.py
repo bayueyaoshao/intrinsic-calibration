@@ -603,7 +603,11 @@ def plot_corner_opt_curves(corner_opt_section: dict | None, out_path: Path | str
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     section = corner_opt_section or {}
-    stats = (section.get("stats") or {}).get(reference)
+    # 调用方传短名(self / prod_sb),段内 stats 的键带下划线前缀(_self /
+    # _prod_sb)——别名对齐,否则查不到键、永远走"无数据"分支(05-06 收口
+    # 人工核查抓出的 05-05 缺陷,回归测试锁定)
+    stats_key = {"self": "_self", "prod_sb": "_prod_sb"}.get(reference, reference)
+    stats = (section.get("stats") or {}).get(stats_key)
     unit_labels = section.get("units") or []
     unit_ops = section.get("unit_ops") or {}
     methods = section.get("methods") or []
