@@ -265,7 +265,8 @@ def build_advice(directions: list[dict], px_equivs: dict,
             })
             break
 
-    # ---- 分支三:近零参数可见但像素当量可忽略 → 不治(结论 1 反面教材)----
+    # ---- 分支三:近零参数可见但像素当量可忽略 → 不治(结论 1 反面教材);
+    # 若只有部分参数低于影响线,只对低于线的判「不治」,线上的如实标不可忽略 ----
     p1_share = max((d["loads"].get("p1", 0.0) for d in directions), default=0.0)
     p2_share = max((d["loads"].get("p2", 0.0) for d in directions), default=0.0)
     px_p1, px_p2 = px_equivs.get("p1"), px_equivs.get("p2")
@@ -273,17 +274,36 @@ def build_advice(directions: list[dict], px_equivs: dict,
     visible = p1_share >= _NEARZERO_VISIBLE_SHARE or p2_share >= _NEARZERO_VISIBLE_SHARE
     if visible and px_known and min(px_known) < _PX_NEGLIGIBLE:
         parts = []
-        if px_p1 is not None:
-            parts.append(f"p1 {px_p1:.4f}px")
-        if px_p2 is not None:
-            parts.append(f"p2 {px_p2:.4f}px")
-        advice.append({
-            "direction": "近零参数 p1/p2 在载荷表可见",
-            "evidence": (f"σ 级像素当量 {' / '.join(parts)},均低于 "
-                         f"{_PX_NEGLIGIBLE}px 的影响线"),
-            "advice": ("不治:画面影响可忽略,相对百分比无意义"
-                       "(findings 结论 1 反面教材)。" + _ADVICE_NO_AUTO),
-        })
+        below = []
+        above = []
+        for name, px in (("p1", px_p1), ("p2", px_p2)):
+            if px is None:
+                continue
+            parts.append(f"{name} {px:.4f}px")
+            if px < _PX_NEGLIGIBLE:
+                below.append(name)
+            else:
+                above.append(name)
+        if above:
+            # 判据与文案必须一致:有参数在线上时,不许整体断言「均低于/不治」
+            # ——只对低于线的参数判「不治」,线上的参数按普通参数正常判读。
+            advice.append({
+                "direction": "近零参数 p1/p2 在载荷表可见",
+                "evidence": (f"σ 级像素当量 {' / '.join(parts)},"
+                             f"{'、'.join(below)}低于 {_PX_NEGLIGIBLE}px 的影响线,"
+                             f"{'、'.join(above)}不低于影响线(画面影响不可忽略)"),
+                "advice": (f"{'、'.join(below)} 不治:画面影响可忽略;"
+                           f"{'、'.join(above)} 不适用「近零不治」,按像素当量"
+                           f"天平的排序正常判读。" + _ADVICE_NO_AUTO),
+            })
+        else:
+            advice.append({
+                "direction": "近零参数 p1/p2 在载荷表可见",
+                "evidence": (f"σ 级像素当量 {' / '.join(parts)},均低于 "
+                             f"{_PX_NEGLIGIBLE}px 的影响线"),
+                "advice": ("不治:画面影响可忽略,相对百分比无意义"
+                           "(findings 结论 1 反面教材)。" + _ADVICE_NO_AUTO),
+            })
     return advice
 
 

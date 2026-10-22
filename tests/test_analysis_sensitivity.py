@@ -215,6 +215,22 @@ def test_advice_branch3_nearzero_untreated():
     assert "不自动执行" in last["advice"]
 
 
+def test_advice_branch3_one_above_line_reports_truthfully():
+    """分支三反例:p1 低于影响线、p2 在线上 → 不许整体断言「均低于/不治」;
+    证据必须逐参数如实写(谁低于、谁不低于),只对低于线的 p1 判「不治」,
+    线上的 p2 明说画面影响不可忽略。"""
+    advice = sens.build_advice(
+        [_dir(1, {"k2": 0.60, "p1": 0.08, "fx": 0.32}, 0.3)],
+        {"p1": 0.009, "p2": 0.300}, None, CalibrationConfig())
+    last = advice[-1]
+    assert "0.0090px" in last["evidence"] and "0.3000px" in last["evidence"]
+    assert "均低于" not in last["evidence"], "p2 在线上,「均低于」是一句假话"
+    assert "不低于影响线" in last["evidence"]
+    assert "p1 不治" in last["advice"]
+    assert "p2" in last["advice"] and "不适用" in last["advice"]
+    assert "不自动执行" in last["advice"]
+
+
 # ---------------------------------------------------------------------------
 # Test:what-if 档位与合成声明(裁定②)
 # ---------------------------------------------------------------------------
