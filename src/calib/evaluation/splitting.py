@@ -49,6 +49,35 @@ def pose_row_mask(obs: ObservationSet, poses: Sequence[str] | set[str]) -> np.nd
     return np.array([p in wanted for p in obs.pose_ids], dtype=bool)
 
 
+def exposures_per_pose_mask(obs: ObservationSet, n_exposures: int) -> np.ndarray:
+    """训练侧降载掩码:每个姿态只保留"文件序前 n_exposures 张"连拍。
+
+    白话(2026-10-22 降载裁定):交叉验证 / bootstrap / 留一姿态三类实验
+    的训练侧,每个姿态取文件序前 N 张就够——每姿态 1 张与连拍 8 张无实质
+    差别(docs/findings.md 结论 1:参数晃动的大头是位姿抽样不是检测噪声),
+    训练侧带全部连拍只白费约 8 倍算力。组内排序与 slice_groups_by_index
+    用同一把尺(文件名含时间戳,按文件名排序就是拍摄时间序),严禁第二份
+    排序逻辑;取"前 N 张"是确定性操作,不引入新随机源,同配置重跑逐位一致。
+
+    与切分铁律的关系:本辅助只做**训练侧组内抽样**——同一姿态内部取前
+    N 张,绝不跨训练/考题边界,姿态到训练/验证的归属一个不变("切分只
+    操作姿态 ID、连拍同进同出"的铁律原样成立:组内抽样不改变姿态归属,
+    只影响训练侧组内取几张)。调用方先用 pose_row_mask 圈定训练姿态,再与
+    本研究掩码按位与;验证侧(考题姿态)永远不带它,仍带全部连拍。
+    split_by_pose_ids 的零重叠断言照旧生效。
+    """
+    if not isinstance(n_exposures, int) or isinstance(n_exposures, bool) or n_exposures < 1:
+        raise ValueError(
+            f"训练侧每姿态连拍数不合法:{n_exposures!r}。"
+            f"evaluate.exposures_per_pose 必须是 >= 1 的整数"
+            f"(每个姿态最多取几张连拍;0 张等于没训练)。")
+    keep = np.zeros(len(obs.image_ids), dtype=bool)
+    for rows in _pose_groups(obs).values():
+        head = sorted(rows, key=lambda r: obs.image_ids[r])[:n_exposures]  # 文件名含时间戳,排序即时间序
+        keep[head] = True
+    return keep
+
+
 def obs_rows(obs: ObservationSet, mask: np.ndarray) -> ObservationSet:
     """按布尔行掩码选行,重建观测集(行序契约原样保持)。
 
@@ -203,8 +232,9 @@ def bootstrap_resample(pose_ids: Sequence[str], cfg: CalibrationConfig) -> list[
     """bootstrap 出题:按姿态有放回重采样,模拟"换一批姿态重新标定"(D-04)。
 
     第 b 次重采样用种子 _seed_for(f"boot|rep{{b}}|{{姿态数}}") 有放回抽
-    n 次(同一姿态可能抽中多次;抽中即带其全部连拍,由 experiments 层
-    落行)。返回 [{"rep": b, "pose_ids": [...], "counts": {姿态: 抽中次数}}]
+    n 次(同一姿态可能抽中多次;抽中姿态由 experiments 层落行——训练侧
+    每姿态取文件序前 exposures_per_pose 张,2026-10-22 降载裁定)。返回
+    [{"rep": b, "pose_ids": [...], "counts": {姿态: 抽中次数}}]
     ——纯 str/int 可落盘;4 个模型共用同一批分配表(共用由调用方保证,
     本函数只出一份考题)。
     """

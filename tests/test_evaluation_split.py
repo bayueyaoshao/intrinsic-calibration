@@ -26,6 +26,7 @@ from calib.evaluation.splitting import (
     _seed_for,
     assign_cv_folds,
     bootstrap_resample,
+    exposures_per_pose_mask,
     leave_one_pose_out,
     obs_rows,
     pose_row_mask,
@@ -293,3 +294,48 @@ def test_obs_rows_mask_shape_mismatch_chinese_error():
     """掩码形状与行数不符:中文报错(行序错位静默选错行的防线,T-04-01-02)。"""
     with pytest.raises(ValueError, match="掩码"):
         obs_rows(_six_pose_obs(), np.ones(5, dtype=bool))
+
+
+# ---- 行为 7:exposures_per_pose_mask——训练侧组内抽样,不跨训练/考题边界 ----
+
+def test_exposures_per_pose_mask_keeps_file_order_head():
+    """行为 7:n=1 只留每姿态文件序第 1 张;n=2 留前 2 张;n 大于重复数全留
+    (文件名故意乱序进场,取"前 N"必须按文件名排序,与分组实验同一把尺)。"""
+    obs = _make_obs({
+        "pose_a": ["a_03", "a_01", "a_02"],   # 行 0/1/2,乱序进场
+        "pose_b": ["b_02", "b_01"],           # 行 3/4
+    })
+    m1 = exposures_per_pose_mask(obs, 1)
+    assert m1.tolist() == [False, True, False, False, True], (
+        "n=1 应恰留文件序第 1 张:a_01(行 1)与 b_01(行 4)"
+    )
+    m2 = exposures_per_pose_mask(obs, 2)
+    assert m2.tolist() == [False, True, True, True, True], (
+        "n=2 应留每姿态文件序前 2 张(a_01/a_02 与 b_01/b_02)"
+    )
+    m9 = exposures_per_pose_mask(obs, 9)
+    assert m9.all(), "n 大于每姿态重复数时全部保留(有多少带多少)"
+
+
+def test_exposures_per_pose_mask_rejects_bad_n_chinese_error():
+    """行为 7:n_exposures 写 0 / true / 1.5——中文报错并点名
+    evaluate.exposures_per_pose(先拒 bool 伪装,配置层与函数体双保险)。"""
+    obs = _six_pose_obs()
+    for bad in (0, True, 1.5):
+        with pytest.raises(ValueError, match="exposures_per_pose"):
+            exposures_per_pose_mask(obs, bad)
+
+
+def test_exposures_per_pose_mask_and_pose_mask_keeps_split_disjoint():
+    """行为 7(铁律消费位回归):按位与后的掩码只落在训练侧姿态内——
+    组内抽样不改变姿态到训练/考题的归属;验证侧不带降载掩码仍带全部连拍。"""
+    obs = _six_pose_obs()
+    train_poses = {"pose_0", "pose_3", "pose_5"}
+    val_poses = set(unique_poses(obs)) - train_poses
+    train_mask = pose_row_mask(obs, train_poses) & exposures_per_pose_mask(obs, 1)
+    val_mask = pose_row_mask(obs, val_poses)
+    train_obs, val_obs = obs_rows(obs, train_mask), obs_rows(obs, val_mask)
+    # 姿态级零交集:组内抽样绝不跨训练/考题边界
+    assert set(train_obs.pose_ids).isdisjoint(set(val_obs.pose_ids))
+    assert len(train_obs.image_ids) == 3, "训练侧 = 3 个训练姿态 × 每姿态 1 张"
+    assert len(val_obs.image_ids) == 6, "验证侧 3 个考题姿态 × 2 张全带(不降载)"

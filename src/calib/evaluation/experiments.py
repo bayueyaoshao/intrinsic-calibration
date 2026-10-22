@@ -53,6 +53,7 @@ from calib.evaluation.splitting import (
     _pose_groups,
     assign_cv_folds,
     bootstrap_resample,
+    exposures_per_pose_mask,
     leave_one_pose_out,
     obs_rows,
     pose_row_mask,
@@ -343,6 +344,7 @@ def _cv_fold_worker(task: tuple) -> dict:
         f_scale,
         cv2_threads,
         warm_init,
+        n_exposures,
     ) = task
     # 线程锁必须在 worker 里再上一次:并行子进程是全新进程,入口处
     # (父进程)的 setNumThreads 管不到它们——子进程多线程归约顺序不定
@@ -350,7 +352,11 @@ def _cv_fold_worker(task: tuple) -> dict:
     cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
-        train_obs = obs_rows(obs, pose_row_mask(obs, train_poses))
+        # 训练侧降载:训练姿态圈定后再与"每姿态文件序前 N 张"掩码按位与
+        # (组内抽样,不跨训练/考题边界);验证侧不带降载掩码,仍带全部连拍
+        train_obs = obs_rows(
+            obs, pose_row_mask(obs, train_poses) & exposures_per_pose_mask(obs, n_exposures)
+        )
         val_obs = obs_rows(obs, pose_row_mask(obs, val_poses))
         calibrate_fn = make_calibrate_fn(model, scipy_cfg, loss, f_scale, warm_init=warm_init)
         result = calibrate_fn(train_obs)
@@ -413,7 +419,10 @@ def _cv_fold_worker(task: tuple) -> dict:
             ],
         }
     except (ValueError, ArithmeticError, RuntimeError) as exc:
-        n_train_views = int(pose_row_mask(obs, train_poses).sum())
+        # 失败兜底的 n_train_views 与成功路径同口径:训练姿态 × 每姿态前 N 张
+        n_train_views = int(
+            (pose_row_mask(obs, train_poses) & exposures_per_pose_mask(obs, n_exposures)).sum()
+        )
         n_val_views = int(pose_row_mask(obs, val_poses).sum())
         return {
             "row": _cv_fold_row(
@@ -444,9 +453,10 @@ def cv_pose_grouped(
 ) -> dict:
     """按姿态分组 K 折交叉验证(D-01/D-02,EVA-01 实验侧)。
 
-    白话:每轮把全体姿态随机分成 K 折,每折轮流当考题——训练侧拿其余
-    姿态的**全部连拍**重新标定一次(D-02 全视图口径),验证侧的考题姿态
-    逐个"只估位姿"打分,先平均成姿态级误差、再平均成折级 held-out。
+    白话:每轮把全体姿态随机分成 K 折,每折轮流当考题——训练侧每姿态取
+    文件序前 N 张(exposures_per_pose,默认 1;组内抽样不改变姿态归属,
+    依据 docs/findings.md 结论 1)重新标定一次,验证侧的考题姿态仍带全部
+    连拍、逐个"只估位姿"打分,先平均成姿态级误差、再平均成折级 held-out。
     正式口径 5 折 × 5 轮 = 25 个折级样本/模型,供选型统计(04-03)做
     同折配对比较(折级样本必须逐折对齐同一轮切分)。
 
@@ -501,6 +511,7 @@ def cv_pose_grouped(
             kernels[m][1],
             cfg.cv2_threads,
             warm_for.get(m),
+            eval_cfg.exposures_per_pose,
         )
         for m in models
         for e in assignment
@@ -528,7 +539,11 @@ def cv_pose_grouped(
                     fold_idx,
                     n_train_poses=len(task[3]),
                     n_val_poses=len(task[4]),
-                    n_train_views=int(pose_row_mask(obs, task[3]).sum()),
+                    # 与 worker 成功路径同口径:训练姿态 × 每姿态前 N 张
+                    n_train_views=int(
+                        (pose_row_mask(obs, task[3])
+                         & exposures_per_pose_mask(obs, task[11])).sum()
+                    ),
                     n_val_views=int(pose_row_mask(obs, task[4]).sum()),
                     failure_note=(
                         f"{model_id} 第 {round_idx} 轮第 {fold_idx} 折"
@@ -589,6 +604,7 @@ def cv_pose_grouped(
             "n_folds": int(eval_cfg.cv_n_folds),
             "n_solves": len(tasks),
             "n_failed_folds_total": int(sum(m["n_failed_folds"] for m in models_out.values())),
+            "exposures_per_pose": int(eval_cfg.exposures_per_pose),
             "seed": int(cfg.seed),
             "max_workers": int(eval_cfg.evaluate_max_workers),
         },
@@ -627,16 +643,21 @@ def _lopo_row(
 def _lopo_worker(task: tuple) -> dict:
     """单姿态求解与评分(worker,顶层函数才能被序列化传给并行子进程)。
 
-    训练侧 = 其余全部姿态(split_by_pose_ids 内置零重叠硬门禁),验证侧 =
-    唯一考题姿态只估位姿评分(外参不训练)。异常兜底与 CV 折 worker 同体例:
+    训练侧 = 其余全部姿态按姿态切分(split_by_pose_ids 内置零重叠硬门禁)
+    后,每姿态再取文件序前 n_exposures 张降载(组内抽样,不跨训练/考题
+    边界,依据 docs/findings.md 结论 1);验证侧 = 唯一考题姿态只估位姿
+    评分(外参不训练,仍带全部连拍)。异常兜底与 CV 折 worker 同体例:
     失败转契约占行,异常到不了生成器。
     """
-    (model_id, val_pose, train_poses, obs, scipy_cfg, loss, f_scale, cv2_threads, warm_init) = task
+    (model_id, val_pose, train_poses, obs, scipy_cfg, loss, f_scale, cv2_threads, warm_init,
+     n_exposures) = task
     # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
     cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
         train_obs, val_obs = split_by_pose_ids(obs, train_poses)
+        # 训练侧降载:切分(姿态归属)之后再做组内抽样,验证侧一行不动
+        train_obs = obs_rows(train_obs, exposures_per_pose_mask(train_obs, n_exposures))
         calibrate_fn = make_calibrate_fn(model, scipy_cfg, loss, f_scale, warm_init=warm_init)
         result = calibrate_fn(train_obs)
         n_train_views = len(train_obs.image_ids)
@@ -670,7 +691,11 @@ def _lopo_worker(task: tuple) -> dict:
             model_id,
             val_pose,
             n_train_poses=len(train_poses),
-            n_train_views=int(pose_row_mask(obs, train_poses).sum()),
+            # 与成功路径同口径:训练姿态 × 每姿态前 N 张
+            n_train_views=int(
+                (pose_row_mask(obs, train_poses)
+                 & exposures_per_pose_mask(obs, n_exposures)).sum()
+            ),
             failure_note=(f"{model_id} 留一姿态 {val_pose} 未跑成:{type(exc).__name__}——{exc}"),
         )
 
@@ -687,8 +712,10 @@ def lopo(
 ) -> dict:
     """留一姿态实验(D-08,EVA-05 实验侧):每次留 1 个姿态当考题。
 
-    白话:正式口径 80 个姿态出 80 道题 × 每模型——每次拿 79 个姿态训练、
-    留 1 个姿态只估位姿打分。逐姿态误差表回答"是不是某几张照片拖累了
+    白话:正式口径 80 个姿态出 80 道题 × 每模型——每次拿 79 个姿态当
+    训练侧(每姿态取文件序前 N 张,exposures_per_pose 默认 1;组内抽样
+    不改变姿态归属,依据 docs/findings.md 结论 1)、留 1 个姿态只估位姿
+    打分(仍带全部连拍)。逐姿态误差表回答"是不是某几张照片拖累了
     整体":稳健 z 分数(中位数绝对偏差法,离群点自己撑大标准差躲不过
     点名)超过阈值的姿态被点名"问题姿态",供人工复核与选型参考。
 
@@ -754,6 +781,7 @@ def lopo(
             kernels[m][1],
             cfg.cv2_threads,
             warm_for.get(m),
+            eval_cfg.exposures_per_pose,
         )
         for m in models
         for e in assignment
@@ -777,7 +805,11 @@ def lopo(
                 model_id,
                 val_pose,
                 n_train_poses=len(task[2]),
-                n_train_views=int(pose_row_mask(obs, task[2]).sum()),
+                # 与 worker 成功路径同口径:训练姿态 × 每姿态前 N 张
+                n_train_views=int(
+                    (pose_row_mask(obs, task[2])
+                     & exposures_per_pose_mask(obs, task[9])).sum()
+                ),
                 failure_note=(f"{model_id} 留一姿态 {val_pose} 未跑成:{type(e).__name__}——{e}"),
             )
         results[(model_id, val_pose)] = row
@@ -827,6 +859,7 @@ def lopo(
             "n_solves": len(tasks),
             "n_failed_total": int(sum(m["n_failed_poses"] for m in models_out.values())),
             "mad_z_threshold": float(eval_cfg.mad_z_threshold),
+            "exposures_per_pose": int(eval_cfg.exposures_per_pose),
             "seed": int(cfg.seed),
             "max_workers": int(eval_cfg.evaluate_max_workers),
         },
@@ -1334,18 +1367,23 @@ def _bootstrap_record(
 def _bootstrap_worker(task: tuple) -> dict:
     """单次重采样单模型求解(worker,顶层函数才能被序列化传给并行子进程)。
 
-    训练观测集 = 抽中姿态**去重**后带全部连拍:同一姿态抽中 3 次只算一份
+    训练观测集 = 抽中姿态**去重**后每姿态取文件序前 n_exposures 张
+    (2026-10-22 降载裁定,依据 findings 结论 1:每姿态 1 张与连拍 8 张
+    无实质差别,组内抽样不改变姿态归属)。同一姿态抽中 3 次只算一份
     ——bootstrap 考的是"换一批姿态",不是"某个姿态多考几遍",重复计权
     会人为放大被偏爱姿态的话语权。求解与 CV / 分组同一条路径(OpenCV
     初始化 → scipy 精化)。异常兜底同体例:失败转契约占行,异常到不了
     生成器(串行回退不死任务流,体例照 optimizer.py 的既定教训)。
     """
-    (model_id, rep, picked_poses, obs, scipy_cfg, loss, f_scale, cv2_threads, warm_init) = task
+    (model_id, rep, picked_poses, obs, scipy_cfg, loss, f_scale, cv2_threads, warm_init,
+     n_exposures) = task
     # 线程锁必须在 worker 里再上一次(并行子进程是全新进程,见 _cv_fold_worker)
     cv2.setNumThreads(cv2_threads)
     try:
         model = create_model(model_id)
-        train_obs = obs_rows(obs, pose_row_mask(obs, set(picked_poses)))
+        train_obs = obs_rows(
+            obs, pose_row_mask(obs, set(picked_poses)) & exposures_per_pose_mask(obs, n_exposures)
+        )
         result = make_calibrate_fn(model, scipy_cfg, loss, f_scale, warm_init=warm_init)(train_obs)
         if not result.converged or result.rms_overall is None:
             return _bootstrap_record(model_id, rep, failure_note=result.failure_note)
@@ -1386,8 +1424,10 @@ def bootstrap_pose(
     跨模型配对比较方差,各模型面对同一组考题,差值才是"模型之间的差"而
     不是"考题难度的差"(D-04)。分配表纯 str/int,可落盘复查。
 
-    抽中姿态带其全部连拍(切分只操作姿态 ID 的铁律消费位);去重语义在
-    _bootstrap_worker。
+    训练侧每姿态取文件序前 N 张(exposures_per_pose,默认 1;组内抽样
+    不改变姿态归属,依据 docs/findings.md 结论 1);验证侧语义在 bootstrap
+    里不出现(有放回重抽只出训练侧),去重与降载语义都在 _bootstrap_worker
+    (切分只操作姿态 ID 的铁律消费位)。
 
     签名说明:取整个 CalibrationConfig(体例照 cv_pose_grouped——要
     cfg.evaluate 的重采样次数/模型/并行上限与 cfg.calibrate.scipy、cfg.seed)。
@@ -1437,6 +1477,7 @@ def bootstrap_pose(
             kernels[m][1],
             cfg.cv2_threads,
             warm_for.get(m),
+            eval_cfg.exposures_per_pose,
         )
         for e in assignment
         for m in models
@@ -1535,6 +1576,7 @@ def bootstrap_pose(
             "n_solves": len(tasks),
             "n_failed_total": int(sum(m["n_failed"] for m in models_out.values())),
             "bootstrap_n": int(eval_cfg.bootstrap_n),
+            "exposures_per_pose": int(eval_cfg.exposures_per_pose),
             "seed": int(cfg.seed),
             "max_workers": int(eval_cfg.evaluate_max_workers),
         },
