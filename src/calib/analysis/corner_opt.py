@@ -597,7 +597,7 @@ def run_corner_opt(
     # 跨方法绝对偏移旁证:各方法干净检出 vs 生产 SB 干净检出(方法间互比)
     cross_clean: dict[str, dict] = {}
     for m, method in enumerate(method_labels):
-        d = uv_clean[:, m] - uv_prod[:, 0]
+        d = uv_clean[:, m] - uv_prod
         finite = np.isfinite(d).all(axis=2)
         entry: dict = {"n_frames": int(np.count_nonzero(finite)),
                        "rms_px": None, "median_px": None, "max_px": None}
