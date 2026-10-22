@@ -109,6 +109,29 @@ def test_burst_failures_expand_and_dedupe_by_pose():
     assert "最大容差 1.40px" in cands[0]["reason"], cands[0]["reason"]
 
 
+def test_burst_suspect_image_ids_win_over_whole_pose_expansion():
+    """生产端已点名到帧(suspect_image_ids)时逐张收,不整组展开全部连拍。
+
+    corners 轮断言失败时按「偏离超最大容差」点名具体跳位帧;整组展开会把
+    大张数好照片混进人工名单,稀释剔除名单的指向性。
+    """
+    manifest = _manifest([_train("img_x0", "poseB"), _train("img_x1", "poseB"),
+                          _train("img_x2", "poseB")])
+    corners = _corners_doc(failures=[
+        {"detector": "classic", "pose_id": "poseB",
+         "suspect_image_ids": ["img_x2"],
+         "spread_median_px": 0.9, "spread_max_px": 1.4,
+         "threshold_px": [0.35, 1.4]},
+    ])
+    out = collect_exclude_candidates(None, None, manifest, corners)
+    cands = out["candidates"]
+    assert [c["image_id"] for c in cands] == ["img_x2"], \
+        f"逐帧点名优先,不该整组展开 3 张:{cands}"
+    assert cands[0]["pose_id"] == "poseB"
+    assert "连拍" in cands[0]["source"]
+    assert "1.40px" in cands[0]["reason"], "逐帧点名的理由沿用整组版的数字"
+
+
 def test_ingest_multi_source_suspects_only():
     """入库体检存疑:只有被多类判定来源同时点名的才算「计数高」。"""
     manifest = _manifest([

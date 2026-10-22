@@ -97,9 +97,11 @@ def _burst_candidates(corners_report: dict | None,
                       manifest: dict | None) -> list[dict]:
     """第二路:连拍一致性断言失败张(同姿态连拍里同名角点位置波动超容差)。
 
-    断言本身在 corners 轮 detection_summary.json 的 burst_check 段;同一
-    姿态可能被两颗检测器各点名一次,按姿态去重只收一组。候选同样落
-    到该姿态的每一张连拍上。
+    断言本身在 corners 轮 detection_summary.json 的 burst_check 段。生产端
+    断言失败时已精确点名到帧(suspect_image_ids = 偏差超最大容差的跳位帧,
+    见 cli/main.py 的 _burst_failures_for):有名单就逐张收,不把同组大张数
+    的好照片混进人工名单;名单缺席(旧轮产物或手改产物)再退回整组展开。
+    同一姿态可能被两颗检测器各点名一次,按姿态去重只收一组。
     """
     burst = ((corners_report or {}).get("burst_check") or {})
     out: list[dict] = []
@@ -115,6 +117,11 @@ def _burst_candidates(corners_report: dict | None,
             f"最大 {_fmt_px(item.get('spread_max_px'))},"
             f"{_fmt_threshold(item.get('threshold_px'))}),常见原因是角点排序被"
             f"镜像/翻转污染或拍摄瞬间晃动,请对照人工复核包确认")
+        named = [str(x) for x in (item.get("suspect_image_ids") or []) if x]
+        if named:
+            out.extend(_candidate(image_id, pose, "连拍断言点名", reason)
+                       for image_id in named)
+            continue
         imgs = _images_of_pose(manifest, pose)
         if imgs:
             out.extend(_candidate(im.get("image_id"), pose, "连拍断言点名",
