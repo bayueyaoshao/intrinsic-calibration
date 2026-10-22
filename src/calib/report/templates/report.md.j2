@@ -229,7 +229,32 @@ test 三分量位移分解:
 {{ figs('⑦') }}
 ## {{ s8.title }}
 
-{{ s8.placeholder }}
+{% for r in s8.absent_rows %}> 判据缺席:{{ r.trigger }}——{{ r.action }}
+{% endfor -%}
+{% if s8.rows %}
+
+回环建议表(触发判据 → 回哪一步 → 做什么;步骤名照 docs/pipeline.md 八步):
+
+| 触发判据 | 回哪一步 | 做什么 |
+|---|---|---|
+{% for r in s8.rows %}| {{ r.trigger }} | {{ r.step }} | {{ r.action }} |
+{% endfor %}
+{% endif -%}
+{% if s8.all_pass_line %}**{{ s8.all_pass_line }}**
+{% endif -%}
+
+剔除候选清单(建议名单,人工确认后才生效;机器可读版 {{ s8.candidates_file }}):
+
+{% if s8.candidates %}
+| 照片 image_id | 摆拍位置 pose_id | 来源 | 理由(白话) |
+|---|---|---|---|
+{% for c in s8.candidates %}| {{ c.image_id or '(整组候选,见理由)' }} | {{ c.pose_id or '—' }} | {{ c.source }} | {{ c.reason }} |
+{% endfor %}
+{% else %}
+本轮没有生成任何剔除候选(零候选,空名单照常落盘在 {{ s8.candidates_file }};这是好事,说明没有照片被点名拖后腿)。
+{% endif %}
+
+{{ s8.guidance_line }}
 
 ## {{ s9.title }}
 

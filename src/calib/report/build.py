@@ -28,6 +28,13 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from calib.io.config import load_board
 from calib.io.manifest import latest_run_dir
+from calib.report.diff import collect_exclude_candidates
+from calib.report.loopback import (
+    ROW_ABSENT,
+    ROW_ADVICE,
+    ROW_ALL_PASS,
+    build_loopback_advice,
+)
 
 # 棋盘规格的唯一来源(数据契约:board.yaml 是棋盘参数唯一来源,REU-03)
 BOARD_PATH = Path("config") / "board.yaml"
@@ -800,14 +807,34 @@ def build_report_context(out_root: Path) -> dict:
     }
 
     # =====================================================================
-    # 第⑧节 回环建议(占位:由后续版本接入规则引擎)
+    # 第⑧节 回环建议(规则引擎现算:触发判据 → 回哪一步 → 做什么)
     # =====================================================================
+    # 判定段缺席(失败轮/落账 null)由规则引擎自己记「判据缺席」行,不冒充
+    advice_all = build_loopback_advice(eval_doc, analyze_doc)
+    advice_rows = [r for r in advice_all if r["kind"] == ROW_ADVICE]
+    advice_absent = [r for r in advice_all if r["kind"] == ROW_ABSENT]
+    advice_all_pass = next(
+        (r["action"] for r in advice_all if r["kind"] == ROW_ALL_PASS), None)
+
+    # 剔除候选(ITER-02,裁定①):只收集 + 说理由,人工确认后才进
+    # exclude_images(唯一的剔除名单),绝不自动改配置
+    exclude_cands = collect_exclude_candidates(
+        eval_doc, analyze_doc, manifest_doc, corners_doc)["candidates"]
+
     s8 = {
         "title": SECTION_TITLES[7],
-        "placeholder": (
-            "本节是「回哪一步、做什么」的自动建议表,由后续版本接入"
-            "(输入就是本报告第⑥⑦节的判定段)。当前请先看第⑦节各分析段的"
-            "建议原文(advice):它们只提示方向,不自动执行任何补拍或重标定。"),
+        "rows": advice_rows,
+        "absent_rows": advice_absent,
+        "all_pass_line": advice_all_pass,
+        "candidates": exclude_cands,
+        "candidates_file": "suggest_exclude.json",
+        "guidance_line": (
+            "固定操作指引:逐条人工确认上面的候选(对照第③节的人工复核包与"
+            "角点叠加图),把确认要剔除的 image_id 填进 config/calibration.yaml "
+            "的 exclude_images 名单(这是唯一的剔除名单;程序只做逻辑剔除,"
+            "绝不改动原始照片),再跑 calib run-all --from calibrate 重标——"
+            "角点与噪声产物原样复用,不必从头跑。名单生效与否,下一份报告的"
+            "「与上次对比」一节会给出数字对比。"),
     }
 
     # =====================================================================
@@ -887,10 +914,11 @@ def run_report(out_root: Path) -> dict:
     """顶层一步到位:组装 context → 渲染双模板 → 落盘本轮全部产物。
 
     命令层(calib report)只调这一个函数——06-02 往 context 加段时,
-    命令体与模板骨架都不用改。落盘四件:
+    命令体与模板骨架都不用改。落盘五件:
     report.html(排版证据链报告)/ report.md(同内容纯文本版)/
     report_data.json(context 原样快照,机器可读底账)/ figures/(从各上游
-    轮原样复制来的既有 PNG,报告只引用不重画)。
+    轮原样复制来的既有 PNG,报告只引用不重画)/ suggest_exclude.json
+    (剔除候选名单,零候选也落空表,人工确认后才进配置)。
 
     返回:{"run_dir", "round_id", "n_figures", "selected", "n_disclosures"},
     供命令层播报与清理旧轮。
@@ -937,6 +965,13 @@ def run_report(out_root: Path) -> dict:
     # (这也是 06-02 跨运行对比的取数基础)。
     (run_dir / "report_data.json").write_text(
         json.dumps(context, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+
+    # 剔除候选名单(ITER-02):机器可读版单独落一份,零候选也照常落空表
+    # (人工确认后填进 config/calibration.yaml 的 exclude_images,裁定①)
+    (run_dir / "suggest_exclude.json").write_text(
+        json.dumps({"candidates": context["s8"]["candidates"]},
+                   ensure_ascii=False, indent=2),
         encoding="utf-8")
 
     return {

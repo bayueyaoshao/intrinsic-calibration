@@ -267,7 +267,35 @@ report_data.json 里逐位找到;图表全部编号引用各上游轮既有 PNG,
 
 {# ===================== 第⑧节 回环建议 ===================== -#}
 <h2>{{ s8.title }}</h2>
-<p>{{ s8.placeholder }}</p>
+{% for r in s8.absent_rows %}
+<p class="absent">判据缺席:{{ r.trigger }}——{{ r.action }}</p>
+{% endfor %}
+{% if s8.rows %}
+<h3>回环建议表(触发判据 → 回哪一步 → 做什么;步骤名照 docs/pipeline.md 八步)</h3>
+<table>
+  <tr><th>触发判据</th><th>回哪一步</th><th>做什么</th></tr>
+  {% for r in s8.rows %}
+  <tr><td>{{ r.trigger }}</td><td>{{ r.step }}</td><td>{{ r.action }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% if s8.all_pass_line %}<p class="good">{{ s8.all_pass_line }}</p>{% endif %}
+<h3>剔除候选清单(建议名单,人工确认后才生效;机器可读版 {{ s8.candidates_file }})</h3>
+{% if s8.candidates %}
+<table>
+  <tr><th>照片 image_id</th><th>摆拍位置 pose_id</th><th>来源</th><th>理由(白话)</th></tr>
+  {% for c in s8.candidates %}
+  <tr><td>{{ c.image_id or '(整组候选,见理由)' }}</td>
+      <td>{{ c.pose_id or '—' }}</td>
+      <td>{{ c.source }}</td>
+      <td>{{ c.reason }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">本轮没有生成任何剔除候选(零候选,空名单照常落盘在
+{{ s8.candidates_file }};这是好事,说明没有照片被点名拖后腿)。</p>
+{% endif %}
+<p>{{ s8.guidance_line }}</p>
 
 {# ===================== 第⑨节 产物索引与血缘链 ===================== -#}
 <h2>{{ s9.title }}</h2>
