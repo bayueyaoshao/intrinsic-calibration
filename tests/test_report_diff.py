@@ -61,11 +61,12 @@ def _train(image_id: str, pose_id: str, suspect: bool = False,
 # 1. collect_exclude_candidates:三路候选逐路单收
 # =====================================================================
 def test_lopo_outlier_pose_expands_to_its_images():
+    """留一点名展开成该姿态全部连拍;喂生产端真实格式(字典带 pose_id/mad_z)。"""
     manifest = _manifest([
         _train("img_a0", "poseX"), _train("img_a1", "poseX"),
         _train("img_b0", "poseY"),
     ])
-    ev = _eval_doc(outlier_poses=["poseX"], mad_z={"poseX": 4.2})
+    ev = _eval_doc(outlier_poses=[{"pose_id": "poseX", "mad_z": 4.2}])
     out = collect_exclude_candidates(ev, None, manifest, None)
     cands = out["candidates"]
     assert len(cands) == 2, f"姿态 poseX 有 2 张连拍,应各出一条候选:{cands}"
@@ -75,6 +76,15 @@ def test_lopo_outlier_pose_expands_to_its_images():
         assert "留一姿态" in c["source"]
         assert "4.2" in c["reason"], "理由应带稳健 z 分数原文数字"
         assert "3.5" in c["reason"], "理由应带门槛数字(白话对照)"
+
+
+def test_lopo_outlier_pose_tolerates_bare_string_entries():
+    """兼容裸姿态名字符串条目:z 分数退回 blk 级 mad_z 对照表取数。"""
+    manifest = _manifest([_train("img_a0", "poseX")])
+    ev = _eval_doc(outlier_poses=["poseX"], mad_z={"poseX": 4.2})
+    out = collect_exclude_candidates(ev, None, manifest, None)
+    cands = out["candidates"]
+    assert len(cands) == 1 and "4.2" in cands[0]["reason"]
 
 
 def test_burst_failures_expand_and_dedupe_by_pose():

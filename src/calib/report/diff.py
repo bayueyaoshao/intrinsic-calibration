@@ -57,10 +57,22 @@ def _lopo_candidates(evaluate_report: dict | None,
     z_txt = lambda z: f"{float(z):.1f}" if z is not None else "—"
     thr_txt = (f"{float(threshold):.1f}" if threshold is not None else "3.5")
     out: list[dict] = []
-    for pose in blk.get("outlier_poses") or []:
+    for item in blk.get("outlier_poses") or []:
+        # 生产端(evaluation/experiments.py)落的是字典 {"pose_id", "mad_z"};
+        # 兼容裸姿态名字符串,防旧轮产物或手改产物串格式
+        if isinstance(item, dict):
+            pose = item.get("pose_id")
+            z_value = item.get("mad_z")
+        else:
+            pose = item
+            z_value = None
+        if not pose:
+            continue
+        if z_value is None:
+            z_value = mad_z.get(pose)
         reason = (
             f"留一姿态实验点名:撤掉这个摆拍位置重新标定时误差明显变大"
-            f"(稳健 z 分数 {z_txt(mad_z.get(pose))},门槛 {thr_txt}),"
+            f"(稳健 z 分数 {z_txt(z_value)},门槛 {thr_txt}),"
             f"这个姿态的连拍整组都值得人工复核")
         imgs = _images_of_pose(manifest, pose)
         if imgs:
