@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-22T02:14:01.552Z"
+last_updated: "2026-10-22T04:00:11.834Z"
 progress:
   total_phases: 6
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 29
-  completed_plans: 28
-  percent: 67
+  completed_plans: 29
+  percent: 83
 ---
 
 # STATE: intrinsic-calibration
@@ -22,18 +22,19 @@ progress:
 
 ## Current Position
 
-Phase: 5 (误差预算 + 诊断 + 角点提取寻优) — EXECUTING
-Plan: 5 of 6 完成(05-05 COR-02 角点退化寻优端到端)
+Phase: 5 (误差预算 + 诊断 + 角点提取寻优) — COMPLETE(6/6 计划收口)
+Plan: 6 of 6 完成(05-06 COR-03 连拍各向异性端到端 + 阶段五收口)
 
 - **Phase:** 5
-- **Plan:** 5 of 6 完成(05-05 COR-02 角点退化寻优端到端)
-- **Status:** 执行中(下一计划 05-06:COR-03 连拍各向异性 + 六块全链收口)
-- **Progress:** [██████████] 97%
-- **备注:** 05-05 落地角点合成退化寻优全链:真实数据首跑
-  run_20261022_010551(36 帧 × 8 方法 × 13 单元)校准档零位移、噪声档
-  单调,verdict 点名 classic_w7 更稳(0.0143px vs 生产 sb 0.0507px,
-  只提示不执行);全套 579 passed + 集成 13 passed,旧 analyze 轮
-  182345 已按及时清理删除
+- **Plan:** 6 of 6 完成(05-06 COR-03 连拍各向异性端到端 + 阶段五收口)
+- **Status:** Phase complete(下一步:Phase 6 报告)
+- **Progress:** [██████████] 100%
+- **备注:** 05-06 接入各向异性第六块:真实数据轮 run_20261022_025045
+  六段全有值(σu/σv 中位 0.68,纵向更散但量级仅检测器噪声 2–4 倍,
+  不支持换角点方法);检查点按 2026-10-21 隔夜授权自检 5/5 通过,
+  曲线上抓出 05-05 口径别名缺陷已修复(8517767);594 passed +
+  集成 14 passed,旧轮 010551 已按及时清理删除;findings 结论 6–11
+  落账,REQUIREMENTS 六行 Shipped
 
 ## Performance Metrics
 
@@ -54,6 +55,7 @@ Plan: 5 of 6 完成(05-05 COR-02 角点退化寻优端到端)
 | Phase 4 P06 | 跨 2 日 | CLI 闭环+集成对账+提速重构+选型重构 | 3 files(+docs) |
 | Phase 05 P04 | 6h38min | 3 tasks | 8 files |
 | Phase 05 P05 | 2h05min | 3 tasks | 5 files |
+| Phase 05 P06 | 1h30min | 4 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -95,6 +97,7 @@ Plan: 5 of 6 完成(05-05 COR-02 角点退化寻优端到端)
   (三族退化原语 float→clip→rint 量化收尾 + sha1 四元组种子 + 候选
   逐帧过滤 + A1 销险实测)+ run_corner_opt 主编排(分层抽帧/双参照/
   run_parallel 12 并行/TaskFailed 信封/双口径统计)+ analyze 块 5 接线
+
   + 双口径曲线族图;真实数据首跑 run_20261022_010551(36 帧 × 8 方法 ×
   13 单元,quick 约 44 分钟):校准档零位移、噪声档单调
   (0→0.30px),verdict 点名 classic_w7 更稳(0.0143px vs 生产 sb
@@ -166,3 +169,5 @@ Plan: 5 of 6 完成(05-05 COR-02 角点退化寻优端到端)
 - [Phase 4]: 交付与契约层落地——run_delivery 同签名体例(obs_train, obs_test, board, cfg, optimizer_config),全量重训 + test 逐张并排评分,D-16;BIC 在编排内用 bic_full_fit 算好(RSS 取自全量解,k = 内参数 + 6 × 视图数,n = bic_n_poses),select_model 只消费行内现成值不写第二份数学(D-10);evaluate.json 13 键契约 + 明细 npz 旁车(嵌套明细拍平成 模型__数组名,标量成 0 维数组),json 段只留汇总与 detail_npz 引用(汇总只是索引,D-13);组装顺序防线:明细键带数组但对应段非字典当场中文报错;判行表三图库函数只管画图,图失败不拦主产物;全链冒烟即 04-06 CLI 的调用序列样板 — EVA-02/SOL-02 收口
 - [Phase 05]: COR-02 双口径并报(裁定①)落地:stats._self 主口径(各方法对自家干净检出的偏移,量退化敏感度)+ _prod_sb 旁证(对生产 SB 干净检出的绝对偏移,跨方法可比),曲线图各一张、判读文案两列都给;未显著劣化线 = 10 × σ_detector_corner(0.0871px)随段落账——真实数据首跑 verdict 如实点名 classic_w7 更稳(未显著劣化单元自参照平均 0.0143px vs 生产 sb 0.0507px),只提示方向不自动执行(裁定③同口径) — 裁定①判读口径硬性要求;阈值由当前数据现算不抄死
 - [Phase 05]: A1 销险实测:CALIB_CB_ACCURACY 与 flags=0 在合成棋盘上检出数相同、逐角点逐位一致(「SB 追加亚像素精化」预期语义未获证实),两档仍都保留候选——真实数据首跑两档曲线确有差异,flag 在实数据上有可测效果;销险一次性脚本用完即删,结论固化进模块 docstring 与 sb_accuracy_verdict。指标口径 = 与参照的逐角点位移而非重投影(窗口吞邻角偏差重投影不可见,Pitfall 4 头号陷阱) — 结论由数据出不预设;一次性脚本按 memory 清理纪律不留痕
+- [Phase ?]: COR-03 判读定案:纵向重复散布系统性大于横向(σu/σv 中位 0.68),量级仅检测器噪声 2–4 倍,不支持换角点方法;角点方法选择杠杆在退化鲁棒性
+- [Phase ?]: analyze 六块全链收口(run_20261022_025045 六段全有值);检查点按 2026-10-21 隔夜授权自检 5/5 通过,曲线上抓出 05-05 口径别名缺陷并修复(8517767)

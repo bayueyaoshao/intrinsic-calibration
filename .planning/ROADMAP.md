@@ -13,7 +13,7 @@
 - [x] **Phase 2: 模型层 M1–M4 + 双求解后端 + 产物血缘** - 共享投影/雅可比单一数学源(与 OpenCV 一致性比对 + 数值雅可比测试)与可互换求解器 (completed 2026-10-18)
 - [x] **Phase 3: 噪声底 + Fisher/CRLB 可达精度预测** - 标定前量化"这批数据最好能做到什么程度"并检测位姿退化 (completed 2026-10-19)
 - [x] **Phase 4: 评估实验 + 模型选型 + 优化器对比** - 按姿态防泄漏的交叉验证、重复张分组/bootstrap/留一姿态实验,产出有数据支撑的模型选型 (completed 2026-10-21,选型定案 m2:test RMS 简单优先)
-- [ ] **Phase 5: 误差预算 + 诊断 + 角点提取寻优** - 实际误差 vs CRLB、误差方向分解、敏感度排序、角点合成退化实验
+- [x] **Phase 5: 误差预算 + 诊断 + 角点提取寻优** - 实际误差 vs CRLB、误差方向分解、敏感度排序、角点合成退化实验 (completed 2026-10-22)
 - [ ] **Phase 6: 报告组装 + CLI 全流水线 + 可复用性硬化** - 一条命令产出可复现的证据链报告,换数据/换棋盘零代码
 
 ## Phase Details
@@ -178,7 +178,7 @@ Plans:
   4. 敏感度排序(协方差/特征分解)落盘,并针对最大敏感维度给出可操作建议(补拍位姿/加约束)
   5. 角点合成退化实验(加噪/模糊/低对比栅格,含 winSize 扫描与 SB 候选)产出定位误差曲线,以数据锁定当前条件最优角点配置;同姿态连拍角点 x/y 方向重复性各向异性分析落盘
 
-**Plans:** 5/6 plans executed
+**Plans:** 6/6 plans complete
 Plans:
 **Wave 1**
 
@@ -202,7 +202,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 05-06-PLAN.md — COR-03 连拍各向异性 + 六块全链真实数据收口 + pipeline.md/findings/需求状态同步 + 人工核查(含 checkpoint)
+- [x] 05-06-PLAN.md — COR-03 连拍各向异性 + 六块全链真实数据收口 + pipeline.md/findings/需求状态同步 + 人工核查(含 checkpoint)
 
 ### Phase 6: 报告组装 + CLI 全流水线 + 可复用性硬化
 
@@ -228,7 +228,7 @@ Plans:
 | 2. 模型层 M1–M4 + 双求解后端 + 产物血缘 | 6/6 | Complete    | 2026-10-18 |
 | 3. 噪声底 + Fisher/CRLB 可达精度预测 | 6/6 | Complete    | 2026-10-19 |
 | 4. 评估实验 + 模型选型 + 优化器对比 | 6/6 | Complete    | 2026-10-21 |
-| 5. 误差预算 + 诊断 + 角点提取寻优 | 5/6 | In Progress|  |
+| 5. 误差预算 + 诊断 + 角点提取寻优 | 6/6 | Complete   | 2026-10-22 |
 | 6. 报告组装 + CLI 全流水线 + 可复用性硬化 | 0/TBD | Not started | - |
 
 ## Phase Closing Checklist (applies to every phase)

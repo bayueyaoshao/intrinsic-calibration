@@ -17,7 +17,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **COR-01**: 角点检测与亚像素精化,候选方法/参数集可配置;窗口扫描范围从实测方格像素边长推导(比例化),不写死像素值
 - [x] **COR-02**: 角点提取寻优——合成退化实验(加噪/模糊/低对比)下对比候选方法定位误差,以数据证明当前条件最优
-- [ ] **COR-03**: 角点提取误差 x/y 方向分解——同姿态连拍同名角点重复性的各向异性分析
+- [x] **COR-03**: 角点提取误差 x/y 方向分解——同姿态连拍同名角点重复性的各向异性分析
 
 ### 噪声与可达精度 (NOI)
 
@@ -125,11 +125,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EVA-05 | Phase 4 | Shipped (Phase 4)(04-03 MAD 离群判据;04-04 lopo 逐姿态表 + 点名图) |
 | SOL-02 | Phase 4 | Shipped (Phase 4)(04-02 16 组合网格 + 推荐配置 + 多起点一致性;真实数据定案四模型均 linear 核) |
 | ANA-01 | Phase 5 | Shipped (Phase 5)(05-01 run_budget 库层:独立重算复核 + 逐参数预算行 + 实测低于下界硬报错 + k1–k3 口径声明;05-02 接 calib analyze 端到端真实数据) |
-| ANA-02 | Phase 5 | Complete |
-| ANA-03 | Phase 5 | Complete |
-| ANA-04 | Phase 5 | Complete |
-| COR-02 | Phase 5 | Complete |
-| COR-03 | Phase 5 | Pending |
+| ANA-02 | Phase 5 | Shipped (Phase 5)(05-03 radius_footprint/assign_bands 分带纯函数 + 残差方向分解 run_residual_structure;05-02/05-03 接 calib analyze 端到端,覆盖足迹与外推披露落账) |
+| ANA-03 | Phase 5 | Shipped (Phase 5)(05-04 test 三分量反解 run_test_xyz + 可观测性条件数;05-04 接 calib analyze 端到端,65 张 test 全分解零失败) |
+| ANA-04 | Phase 5 | Shipped (Phase 5)(05-04 bootstrap 重复敏感度 run_sensitivity + advice 建议规则 + uniqueness 解不唯一证据;05-04 接 calib analyze 端到端) |
+| COR-02 | Phase 5 | Shipped (Phase 5)(05-05 角点退化寻优库层 + A1 销险;05-05 接 calib analyze 块 5,quick 档双口径真实数据定案) |
+| COR-03 | Phase 5 | Shipped (Phase 5)(05-06 连拍各向异性 run_anisotropy:temporal 过滤 + 防零除 + 分带/象限切片;05-06 接 calib analyze 块 6,六块全链收口) |
 | REP-01 | Phase 6 | Pending |
 | REP-02 | Phase 6 | Pending |
 | REP-03 | Phase 6 | Pending |
