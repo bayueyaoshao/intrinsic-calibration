@@ -158,7 +158,7 @@ m2 结果(run_20261021_131613,slices.models.m2.crlb_alert):
 
 ---
 
-以下结论 6–11 由 `calib analyze` 误差归因六块全链产出(2026-10-22 收口,同一轮产物:analyze run_20261022_025045;六个分析段各带血缘旁车,数字全部从该轮 analyze.json 读出)。
+以下结论 6–11 由 `calib analyze` 误差归因六块全链产出(2026-10-22 收口,同一轮产物:analyze run_20261022_044356;六个分析段各带血缘旁车,数字全部从该轮 analyze.json 读出)。注:文中引用的上游 evaluate run_20261021_131613 已被降载新轮 run_20261022_071708 取代并清理——选型与 delivery 数字两轮逐位一致;但结论 3/5 的 bootstrap 方差分解数字出自旧口径(50 次重抽),新轮为 10 次,实验规模不同,引用时以本节记录为准。
 
 ## 6. 误差预算对账:实测是同口径噪声下界的约 102 / 1108 / 1444 倍,逐行零违例;参数利用率 cx/cy 最差(2026-10-22)
 
@@ -175,7 +175,7 @@ m2 结果(run_20261021_131613,slices.models.m2.crlb_alert):
 - 瓶颈不在检测噪声:哪怕把角点检测做到理论完美,内参也只能定到现状的约 1%;改善空间在系统性误差与观测组织(结论 7/9)。
 - cx/cy 利用率最差与结论 7 的覆盖短板互为印证:主点参数最依赖画面边缘的观测,而边缘恰好没拍到。
 
-血缘:analyze run_20261022_025045(budget 段 recheck/rows/lines;明细旁车 analysis/budget.npz 逐行底账);上游 evaluate run_20261021_131613(crlb_alert 同口径落账)、noise run_20261018_165412(检测器级 σ 0.008708px)。
+血缘:analyze run_20261022_044356(budget 段 recheck/rows/lines;明细旁车 analysis/budget.npz 逐行底账);上游 evaluate run_20261021_131613(crlb_alert 同口径落账)、noise run_20261018_165412(检测器级 σ 0.008708px)。
 
 ## 7. r 覆盖足迹:最远观测 r=0.685,四角区(0.69–0.80)零观测纯外推;残差随 r 单调走高(2026-10-22)
 
@@ -192,7 +192,7 @@ m2 结果(run_20261021_131613,slices.models.m2.crlb_alert):
 - 分带 RMS 单调走高 + 外推区零观测,与结论 9 的敏感度排序(k2/k3 第一)互相印证:画面边缘是这批数据最值钱的补拍方向。
 - 外推区判定写进了产物(analyze.json 的 extrapolation_note),报告阶段必须原文披露,不允许"四角也没问题"式的沉默外推。
 
-血缘:analyze run_20261022_025045(residual_structure 段 coverage/bands/extrapolation_note;明细旁车 residual_structure.npz);角点坐标 corners run_20261020_102709;r 归一化基准 evaluate run_20261021_131613 delivery final_params(与结论 5 同口径)。
+血缘:analyze run_20261022_044356(residual_structure 段 coverage/bands/extrapolation_note;明细旁车 residual_structure.npz);角点坐标 corners run_20261020_102709;r 归一化基准 evaluate run_20261021_131613 delivery final_params(与结论 5 同口径)。
 
 ## 8. test 三分量:65/65 全分解零失败;Z 方向误差用 z 分数判读,条件数健康(2026-10-22)
 
@@ -209,7 +209,7 @@ m2 结果(run_20261021_131613,slices.models.m2.crlb_alert):
 - 固定声明随段落账:test 集参加过模型选型,成绩带轻微乐观偏差;Z 判读看 z 分数,不看毫米原始值。
 - 这一段是结论 2(m2 选型)的独立复核视角:选型误差在位姿三分量维度上没有隐藏的坏方向。
 
-血缘:analyze run_20261022_025045(test_xyz 段 per_direction/observability/notes;明细旁车 test_xyz.npz);test 角点 corners run_20261020_102709(corners_test_sb.npz)。
+血缘:analyze run_20261022_044356(test_xyz 段 per_direction/observability/notes;明细旁车 test_xyz.npz);test 角点 corners run_20261020_102709(corners_test_sb.npz)。
 
 ## 9. 参数敏感度与补拍建议:最大杠杆是够到画面四角的新姿态;解不唯一 1.99px 如实在账(2026-10-22)
 
@@ -226,7 +226,7 @@ m2 结果(run_20261021_131613,slices.models.m2.crlb_alert):
 - 建议只提示方向,不自动执行任何补拍/重标定(回环归下一阶段)——这是产物里写死的纪律,不是临时约定。
 - 与结论 4/7 闭环:补拍方向(边缘新姿态)同时是覆盖判据(结论 7)和敏感度排序(本条)的共同答案,三份独立证据指向同一动作。
 
-血缘:analyze run_20261022_025045(sensitivity 段 advice/uniqueness/what_if_note;明细旁车 sensitivity.npz);方差分解上游 evaluate run_20261021_131613(bootstrap.models.m2)。
+血缘:analyze run_20261022_044356(sensitivity 段 advice/uniqueness/what_if_note;明细旁车 sensitivity.npz);方差分解上游 evaluate run_20261021_131613(bootstrap.models.m2)。
 
 ## 10. 角点提取寻优定案:现行 SB 有数据背书但非全场最稳,classic_w7 在退化档更稳(0.0143px vs 0.0507px)——切换与否人工定(2026-10-22)
 
@@ -245,7 +245,7 @@ m2 结果(run_20261021_131613,slices.models.m2.crlb_alert):
 - 定案口径:SB 的优势在噪声档(0.087px @ noise_16,同期 classic_w7 0.138px),classic_w7 的优势在模糊/对比档;本数据采集质量好(噪声为主),所以 SB 整体仍有背书,但**若未来场景以模糊/低对比为主,classic_w7 是数据点名的更稳选项**。
 - 换角点方法会改动全部下游产物(角点是全链的第一环),必须整链重跑并由人工拍板——建议文案只到"可考虑切换"为止。
 
-血缘:analyze run_20261022_025045(corner_opt 段 stats 双口径/verdict_note/sb_accuracy_verdict/threshold_px;明细旁车 corner_opt.npz 逐角点位移);原料图像 input_data/train(corners run_20261020_102709 的血缘回溯)。
+血缘:analyze run_20261022_044356(corner_opt 段 stats 双口径/verdict_note/sb_accuracy_verdict/threshold_px;明细旁车 corner_opt.npz 逐角点位移);原料图像 input_data/train(corners run_20261020_102709 的血缘回溯)。
 
 ## 11. 连拍各向异性:纵向重复散布系统性地大于横向(σu/σv 中位 0.68),但量级只有检测器噪声的几倍——不支持换角点方法(2026-10-22)
 
@@ -264,4 +264,4 @@ m2 结果(run_20261021_131613,slices.models.m2.crlb_alert):
 - 纵向更散的机理与处置属开放判读(产物只报数据不下强结论):可能与传感器行读出、棋盘印刷或 SB 检测的行/列扫描方向有关;量级在亚百分之几像素级,**不构成换角点方法的依据**——真正的选择杠杆在退化鲁棒性(结论 10),不在横纵对称性。
 - 防呆设计落账:折算姿态没有真实连拍重复,混入会伪造各向异性(来源硬过滤 + 排除计数);σv 近零的行被检测器 σ 下限接住(最大比值 81.4 为有限值,无 inf 泄漏)——两条防线都有测试锁定。
 
-血缘:analyze run_20261022_025045(anisotropy 段 summary/by_band/by_quadrant/plain_language/cross_ref;明细旁车 anisotropy.npz 逐姿态逐角点);原料 noise run_20261018_165412(temporal_sigma_per_corner.npz,80 姿态全 temporal 来源);r 归一化基准 evaluate run_20261021_131613 delivery final_params。
+血缘:analyze run_20261022_044356(anisotropy 段 summary/by_band/by_quadrant/plain_language/cross_ref;明细旁车 anisotropy.npz 逐姿态逐角点);原料 noise run_20261018_165412(temporal_sigma_per_corner.npz,80 姿态全 temporal 来源);r 归一化基准 evaluate run_20261021_131613 delivery final_params。
