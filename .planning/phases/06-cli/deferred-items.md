@@ -27,3 +27,23 @@
 - `main.py` 的 `run_all()` 播报仍写「后续阶段(防作弊考试/误差归因/汇总报告)由后续
   版本实现,run-all 到第⑤步 crlb.json 为止」——evaluate/analyze/report 三个命令
   实际已落地,该文案过时。属 06-03/06-04(run-all 接全流程)的文件范围,本次不越界。
+  **(2026-10-23 更新:已由 06-03 提交 937a220 解决,run-all 重写为八步全流程,
+  本条可销。)**
+
+## 2026-10-23(执行 06-03 全量白天档回归时发现)
+
+- **tests/test_report_loopback.py 收集期报错**:`from calib.report.loopback import ...`
+  抛 ModuleNotFoundError,`-m "not realdata"` 全量白天档无法整趟收集(619/670 后中断)。
+  - **非 06-03 范围**:该文件与 `src/calib/report/loopback.py` 同属 06-02(报告回环),
+    执行纪律明文不碰 06-02 范围。判定为 06-02 并行执行中的中间态(测试文件已落、
+    实现模块未落),06-02 收口后应自愈。
+  - **06-03 的处置**:快速档回归用 `--ignore=tests/test_report_loopback.py` 绕开,
+    其余 619 例照跑。
+  - **(同日已自愈)**:数分钟后 06-02 落盘 `src/calib/report/loopback.py`,
+    该文件单独补跑 8 passed,收集错误消失,无需后续处理。
+- **同轮快速档的 4 个 test_report_build.py 失败**:06-03 的 `-m "not realdata"`
+  全量白天档(绕开 loopback 文件)跑出 4 failed / 615 passed,可见失败行全部落在
+  `tests/test_report_build.py`(第 4 个失败行被输出管道截断)——同样是 06-02 并行
+  执行中的中间态(06-03 的套件 02:41 收集,06-02 的 5125a81/7c23090 在 02:42/02:47
+  才落盘)。06-02 收口(d5a75fc)后单独复跑该文件 **5 passed 全绿**,无需处理。
+  另:此前登记的 test_noise_injection 注入测试本轮未再出现失败。
