@@ -1968,6 +1968,20 @@ def analyze() -> None:
     # 理论下界的铁律硬报错必须冒泡到外层失败契约,退出码 1,不静默);
     # 块 2 起用 _stage 逐块兜底(照 evaluate 体例:单块失败该段记 None,
     # 不中断其余分析块;块 6 连拍各向异性纯消费上游,同样逐块兜底)----
+    # 块 1 排最先:口径门禁便宜且必须先过——铁律一旦违例当场失败退出,
+    # 不许白算后面 15–40 分钟的角点寻优再把已算完的段落整体丢弃。
+    try:
+        budget_section, budget_detail = run_budget(
+            model_id, evaluate_report,
+            evaluate_run / "experiments" / "slices.npz",
+            sigma_detector, model, object_points, ref_rvec, ref_tvec)
+    except Exception as e:  # 故意宽接:失败契约(T-05-07),失败也落盘
+        note = f"误差归因中途失败:{type(e).__name__}——{e}"
+        save_analyze_report(out_dir, make_failure_analyze(lineage, note), lineage)
+        typer.echo(f"误差归因失败(失败报告已照常落盘,各分析段为 null):{note}")
+        typer.echo(f"  失败报告:{out_dir / 'analyze.json'}")
+        raise typer.Exit(code=1) from e
+
     def _stage(name: str, run):
         try:
             return run()
@@ -1975,9 +1989,6 @@ def analyze() -> None:
             typer.echo(f"  {name}未跑成(该段记 None,不中断其余分析块):"
                        f"{type(e).__name__}——{e}")
             return None
-
-    budget_section: dict | None = None
-    budget_detail: dict | None = None
 
     def _block_residual():
         """块 2 取数 + 分解(取数也在块内:上游角点装不下只垮这一块)。
@@ -2086,17 +2097,6 @@ def analyze() -> None:
     block6 = _stage("连拍各向异性", _block_anisotropy)
     if block6 is not None:
         anisotropy, anisotropy_detail, anisotropy_uv_train = block6
-    try:
-        budget_section, budget_detail = run_budget(
-            model_id, evaluate_report,
-            evaluate_run / "experiments" / "slices.npz",
-            sigma_detector, model, object_points, ref_rvec, ref_tvec)
-    except Exception as e:  # 故意宽接:失败契约(T-05-07),失败也落盘
-        note = f"误差归因中途失败:{type(e).__name__}——{e}"
-        save_analyze_report(out_dir, make_failure_analyze(lineage, note), lineage)
-        typer.echo(f"误差归因失败(失败报告已照常落盘,各分析段为 null):{note}")
-        typer.echo(f"  失败报告:{out_dir / 'analyze.json'}")
-        raise typer.Exit(code=1) from e
 
     # ---- 组装落盘:缺席段进 meta.missing_sections,明细键按段有无挂载 ----
     partial = [name for name, sec in (
