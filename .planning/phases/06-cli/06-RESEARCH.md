@@ -139,10 +139,11 @@ ROADMAP 阶段六成功标准 5 条原文(规划必读):①run-all 从 input_dat
 | A3 | "残差热图"用现有 radial_bands(残差随半径分带曲线)+ coverage_footprint(空间分带)即可覆盖 | 若用户要逐像素热图,REP-01 需新增一张图(半小时级工作量) |
 | A4 | ITER-02"一键"= 填 exclude_images 后 `run-all --from calibrate` 一条命令 | 若用户期望全自动改配置重跑,需扩 CLI 开关(建议拒绝:人工拍板是既定纪律) |
 
-## 开放问题
+## 开放问题(2026-10-22 用户已裁定,RESOLVED)
 
-1. REP-01 的"残差热图"是否必须新画逐像素热图?(见 A3,建议 discuss 确认)
-2. 跨运行 diff 的"上次"定义:上一份 report 轮,还是上一份 evaluate 轮?(建议前者——report_data.json 就是为它建的)
+1. REP-01 的"残差热图":**现有图算数**——分带曲线 + r⁴ 覆盖足迹图已能看出边缘变差与外推区无观测,报告直接引用,不新画逐像素热图(裁定 A3)
+2. 跨运行 diff 的"上次"定义:**取上一份 report 轮**(report_data.json 就是为它建的,与建议一致)
+3. ITER-02"一键重标"形态:**配置填剔除名单 + `run-all --from calibrate`**,复用角点/噪声产物(裁定 A4)
 
 ## 阶段六计划切分建议(4 个计划)
 
