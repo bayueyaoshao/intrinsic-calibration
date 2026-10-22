@@ -337,6 +337,7 @@ def run_budget(
             }
         )
 
+    lineage_doc = _require(evaluate_report, "lineage", "evaluate.json 的 lineage 段")
     section = {
         "schema": SCHEMA_BUDGET,
         "model_id": model_id,
@@ -356,7 +357,7 @@ def run_budget(
         "rows": rows,
         "crlb_caliber_note": CRLB_CALIBER_NOTE,
         "sources": {
-            "evaluate_round": evaluate_report["lineage"]["round_id"],
+            "evaluate_round": _require(lineage_doc, "round_id", "lineage 的 round_id"),
             "n_groups": int(n_groups),
             "sigma_source": "noise.json:sigma_detector_corner",
         },

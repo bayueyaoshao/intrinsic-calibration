@@ -293,6 +293,25 @@ def test_budget_missing_slices_raises_chinese(tmp_path):
     assert "selection.selected" in message
 
 
+def test_budget_missing_lineage_raises_chinese(tmp_path):
+    """evaluate.json 缺 lineage 段、或 lineage 缺 round_id(旧轮产物/手改
+    文件):当场中文报错指路,不许抛裸 KeyError——上游取数一律走 _require。"""
+    case = _build_case(tmp_path)
+    report_no_lineage = {k: v for k, v in case["report"].items() if k != "lineage"}
+    with pytest.raises(AssertionError, match="lineage"):
+        run_budget(
+            "m2", report_no_lineage, case["npz"], SIGMA, case["model"],
+            case["object_points"], REF_RVEC, REF_TVEC,
+        )
+    report_no_round = dict(case["report"])
+    report_no_round["lineage"] = {}
+    with pytest.raises(AssertionError, match="round_id"):
+        run_budget(
+            "m2", report_no_round, case["npz"], SIGMA, case["model"],
+            case["object_points"], REF_RVEC, REF_TVEC,
+        )
+
+
 def test_budget_shape_mismatch_raises(tmp_path):
     """形状契约:group_bound_px 与 group_uv 对不上当场报错(逐行下界必须
     与逐角点重投影一一对应)。"""
