@@ -156,3 +156,112 @@ def collect_exclude_candidates(evaluate_report: dict | None = None,
     candidates += _burst_candidates(corners_report, manifest)
     candidates += _ingest_candidates(manifest)
     return {"candidates": candidates}
+
+
+# ---------------------------------------------------------------- 跨运行对比
+
+# 对比键清单(锚点 = 上一份 report 轮的 report_data.json,裁定②):
+# (报告里显示的指标名, metrics_raw 键, 变好方向)
+# 方向语义按指标含义写死:test RMS、预算比值、噪声底都是越低越好;
+# 当选模型是名字,没有好坏,只报「持平 / 换成谁」。
+_DIFF_KEYS = (
+    ("当选模型", "selected", "name"),
+    ("test 整体 RMS(px)", "test_rms_px", "lower"),
+    ("预算比值·重投影位移中位(实测 ÷ 理论下界)", "budget_ratio_median", "lower"),
+    ("预算比值·重投影位移95分位(实测 ÷ 理论下界)", "budget_ratio_p95", "lower"),
+    ("预算比值·重投影位移最大(实测 ÷ 理论下界)", "budget_ratio_max", "lower"),
+    ("噪声底·检测器口径 σ(px)", "sigma_detector_corner_px", "lower"),
+)
+
+# 数值「持平」的相对容差:变化小于千分之一视为持平(四位小数显示下
+# 本来就看不出差别,报「变好/变差」反而误导)
+_TIE_REL = 1e-3
+
+
+def _fmt_value(key: str, value) -> str:
+    """对比值 → 定稿字符串(组装层定稿纪律:模板只排版)。"""
+    if value is None:
+        return "—"
+    if key == "selected":
+        return str(value)
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _change_word(kind: str, current, previous) -> str:
+    """变化一栏的方向词(语义按指标含义写死,见 _DIFF_KEYS 第三列)。"""
+    if previous is None:
+        return "上次无此数据"
+    if current is None:
+        return "本次无此数据"
+    if kind == "name":
+        return "持平" if current == previous else f"换成 {current}"
+    try:
+        cur_f, prev_f = float(current), float(previous)
+    except (TypeError, ValueError):
+        return "持平" if current == previous else "有变化"
+    if abs(cur_f - prev_f) <= _TIE_REL * max(abs(prev_f), 1e-12):
+        return "持平"
+    went_down = cur_f < prev_f
+    if kind == "lower":
+        return "变好(降低)" if went_down else "变差(升高)"
+    return "变好(升高)" if not went_down else "变差(降低)"
+
+
+def compare_with_previous(current: dict, previous: dict | None) -> dict:
+    """本次 vs 上次的关键指标对比(ITER-03),纯函数零 IO。
+
+    参数是两份 report_data.json 底账快照(context 原样落盘的那份);
+    previous 给 None 表示没有上一份报告轮(首次运行)。上一份是旧版
+    底账、缺某个键时,那一行照出、变化栏记「上次无此数据」,不崩也不
+    冒充持平。
+
+    双方实验规模不同(如 bootstrap 重抽样次数)时给规模备注,提醒
+    「规模不同,数值差异不能直接当回归读」——不冒充回归,也不冒充持平。
+
+    返回:{"status": "ok" | "首次运行", "note", "rows", "scale_note"},
+    rows 每行 {label, current, previous, change},全部是定稿字符串。
+    """
+    if not previous:
+        return {
+            "status": "首次运行",
+            "note": ("这是本项目第一份报告(没有上一份报告轮可比);"
+                     "从下一份报告开始,这里会出现本次与上次的关键指标对比,"
+                     "先看本次防作弊考试的成绩,再对照看比上次好没好。"),
+            "rows": [],
+            "scale_note": None,
+        }
+
+    cur_raw = current.get("metrics_raw") or {}
+    prev_raw = previous.get("metrics_raw") or {}
+    rows = []
+    for label, key, kind in _DIFF_KEYS:
+        cur_v, prev_v = cur_raw.get(key), prev_raw.get(key)
+        if cur_v is None and prev_v is None:
+            continue  # 两边都没有,没有可比的内容,不排空行
+        rows.append({
+            "label": label,
+            "current": _fmt_value(key, cur_v),
+            "previous": _fmt_value(key, prev_v),
+            "change": _change_word(kind, cur_v, prev_v),
+        })
+
+    # 实验规模差异备注(如实解释,不冒充回归)
+    parts = []
+    cur_boot = cur_raw.get("n_bootstrap_resamples")
+    prev_boot = prev_raw.get("n_bootstrap_resamples")
+    if cur_boot is not None and prev_boot is not None and cur_boot != prev_boot:
+        parts.append(f"bootstrap 重抽样次数不同(上次 {prev_boot} 次 / "
+                     f"本次 {cur_boot} 次)")
+    cur_profile = cur_raw.get("profile")
+    prev_profile = prev_raw.get("profile")
+    if cur_profile and prev_profile and cur_profile != prev_profile:
+        parts.append(f"实验档位不同(上次 {prev_profile} / 本次 {cur_profile})")
+    scale_note = (f"实验规模差异备注:{';'.join(parts)}——规模不同,两组数字"
+                  f"不能直接当回归读,先对齐规模再比(规模原文见各自底账的 "
+                  f"metrics_raw)。") if parts else None
+
+    return {"status": "ok", "note": None,
+            "rows": rows, "scale_note": scale_note}

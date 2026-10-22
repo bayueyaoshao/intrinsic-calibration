@@ -17,7 +17,7 @@ import json
 import test_report_build
 
 from calib.report.build import build_report_context
-from calib.report.diff import collect_exclude_candidates
+from calib.report.diff import collect_exclude_candidates, compare_with_previous
 from calib.report.loopback import PIPELINE_STEPS
 
 # ---------------------------------------------------------------- 合成判定段
@@ -167,3 +167,136 @@ def test_s8_advice_candidates_and_suggest_file(tmp_path, monkeypatch):
         (run_dir / "suggest_exclude.json").read_text(encoding="utf-8"))
     assert suggest == {"candidates": s8["candidates"]}
     assert (run_dir / "report_data.json").is_file()
+
+
+# =====================================================================
+# 3. compare_with_previous:跨运行对比(ITER-03)
+# =====================================================================
+def _snapshot(selected="m2", test_rms=0.17, sigma=0.0087,
+              ratios=(101.0, 1100.0, 1400.0), boot=10, profile="quick") -> dict:
+    """合成一份 report_data.json 底账快照(只含 diff 读的键)。"""
+    return {
+        "created": "2026-10-23T00:00:00+00:00",
+        "metrics_raw": {
+            "selected": selected,
+            "test_rms_px": test_rms,
+            "sigma_detector_corner_px": sigma,
+            "budget_ratio_median": ratios[0],
+            "budget_ratio_p95": ratios[1],
+            "budget_ratio_max": ratios[2],
+            "n_bootstrap_resamples": boot,
+            "profile": profile,
+        },
+    }
+
+
+def test_compare_all_keys_with_direction_words():
+    current = _snapshot(test_rms=0.16, ratios=(95.0, 1050.0, 1350.0))
+    out = compare_with_previous(current, _snapshot())
+    assert out["status"] == "ok"
+    assert len(out["rows"]) == 6, f"六个对比键一行不少:{out['rows']}"
+    by_label = {r["label"]: r for r in out["rows"]}
+    # 方向语义按指标含义写死:越低越好的指标,降 = 变好
+    assert by_label["当选模型"]["change"] == "持平"
+    assert by_label["当选模型"]["current"] == "m2"
+    assert by_label["test 整体 RMS(px)"]["change"] == "变好(降低)"
+    assert by_label["test 整体 RMS(px)"]["current"] == "0.1600"
+    assert by_label["test 整体 RMS(px)"]["previous"] == "0.1700"
+    for label in tuple(by_label):
+        if label.startswith("预算比值"):
+            assert by_label[label]["change"] == "变好(降低)", label
+    assert by_label["噪声底·检测器口径 σ(px)"]["change"] == "持平"
+    assert out["scale_note"] is None, "规模相同时不给规模备注"
+
+
+def test_compare_model_change_reports_swap():
+    out = compare_with_previous(_snapshot(selected="m3"), _snapshot(selected="m2"))
+    row = next(r for r in out["rows"] if r["label"] == "当选模型")
+    assert row["change"] == "换成 m3", f"换模型要如实报换了谁:{row}"
+
+
+def test_compare_missing_previous_key_not_crash():
+    """上一份是旧版底账、缺某个键:那一行照出,变化栏记「上次无此数据」。"""
+    prev = _snapshot()
+    del prev["metrics_raw"]["budget_ratio_p95"]
+    prev["metrics_raw"]["budget_ratio_max"] = None
+    out = compare_with_previous(_snapshot(), prev)
+    by_label = {r["label"]: r for r in out["rows"]}
+    row = by_label["预算比值·重投影位移95分位(实测 ÷ 理论下界)"]
+    assert row["previous"] == "—" and row["change"] == "上次无此数据"
+    row_max = by_label["预算比值·重投影位移最大(实测 ÷ 理论下界)"]
+    assert row_max["change"] == "上次无此数据"
+    assert len(out["rows"]) == 6, "缺键不崩,其余键照常对比"
+
+
+def test_compare_first_run_branch():
+    out = compare_with_previous(_snapshot(), None)
+    assert out["status"] == "首次运行"
+    assert out["note"], "首次运行要给一句中文说明"
+    assert out["rows"] == [] and out["scale_note"] is None
+
+
+def test_compare_scale_difference_note_not_regression():
+    """实验规模不同(bootstrap 次数)→ 备注解释差异,不冒充回归。"""
+    out = compare_with_previous(_snapshot(boot=30, profile="full"),
+                                _snapshot(boot=10, profile="quick"))
+    note = out["scale_note"]
+    assert note, "规模不同必须给备注"
+    assert "10 次 / 本次 30 次" in note
+    assert "quick / 本次 full" in note
+    assert "不能直接当回归读" in note
+
+
+# =====================================================================
+# 4. 「与上次对比」节接入报告(合成树整链:上一轮锚点 → 真实数字对比)
+# =====================================================================
+def test_report_diff_section_against_previous_round(tmp_path, monkeypatch):
+    """预置一份上一轮底账 → 新报告的「与上次对比」节出现真实数字对比。"""
+    test_report_build.build_minimal_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    prev_dir = tmp_path / "output" / "report" / "run_20250101_000000"
+    prev_dir.mkdir(parents=True)
+    (prev_dir / "report_data.json").write_text(
+        json.dumps(_snapshot(test_rms=0.17, ratios=(101.0, 1100.0, 1400.0),
+                             boot=10, profile="quick"), ensure_ascii=False),
+        encoding="utf-8")
+
+    test_report_build.report_cmd()
+    runs = sorted((tmp_path / "output" / "report").glob("run_*"))
+    run_dir = runs[-1]
+    data = json.loads(
+        (run_dir / "report_data.json").read_text(encoding="utf-8"))
+    s_diff = data["s_diff"]
+    assert s_diff["status"] == "ok"
+    assert s_diff["previous_round"] == "run_20250101_000000"
+    assert s_diff["previous_created"] == "2026-10-23T00:00:00+00:00"
+
+    by_label = {r["label"]: r for r in s_diff["rows"]}
+    assert len(s_diff["rows"]) == 6
+    # 合成树 m2 test RMS 0.31 vs 上一轮 0.17 → 如实报变差(不粉饰)
+    row = by_label["test 整体 RMS(px)"]
+    assert row["current"] == "0.3100" and row["previous"] == "0.1700"
+    assert row["change"] == "变差(升高)"
+    # bootstrap 规模差异备注:合成树 30 次 vs 上一轮 10 次
+    assert "10 次 / 本次 30 次" in s_diff["scale_note"]
+
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    md = (run_dir / "report.md").read_text(encoding="utf-8")
+    for text in (s_diff["title"], "run_20250101_000000",
+                 row["current"], row["change"], "变差"):
+        assert text in html, f"HTML「与上次对比」节缺:{text}"
+        assert text in md, f"Markdown「与上次对比」节缺:{text}"
+
+
+def test_report_first_run_renders_first_time_note(tmp_path, monkeypatch):
+    """没有任何上一轮 → 「与上次对比」节渲染首次运行说明,不崩。"""
+    test_report_build.build_minimal_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    ctx = build_report_context(tmp_path / "output")
+    assert ctx["s_diff"]["status"] == "首次运行"
+    html = test_report_build._render(ctx, "report.html.j2", autoescape=True)
+    md = test_report_build._render(ctx, "report.md.j2", autoescape=False)
+    for text in (ctx["s_diff"]["title"], "第一份报告"):
+        assert text in html, f"HTML 缺首次运行说明:{text}"
+        assert text in md, f"Markdown 缺首次运行说明:{text}"

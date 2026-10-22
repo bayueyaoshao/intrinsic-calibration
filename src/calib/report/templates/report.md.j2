@@ -169,6 +169,20 @@ test 独立考题排名(按整体 RMS 升序):
 {% if s6.three_criteria_note %}{{ s6.three_criteria_note }}
 {% endif %}
 {{ figs('⑥') }}
+## {{ s_diff.title }}
+
+{% if s_diff.status == '首次运行' %}
+{{ s_diff.note }}
+{% else %}
+对比锚点:上一份报告轮 **{{ s_diff.previous_round }}**(生成时间 {{ s_diff.previous_created }});只读它的底账 report_data.json 对齐关键指标,不重算任何上游。
+
+| 指标 | 本次 | 上次 | 变化 |
+|---|---|---|---|
+{% for r in s_diff.rows %}| {{ r.label }} | {{ r.current }} | {{ r.previous }} | {{ r.change }} |
+{% endfor %}
+{% if s_diff.scale_note %}> {{ s_diff.scale_note }}
+{% endif %}
+{% endif %}
 ## {{ s7.title }}
 
 {% if s7.absent_note %}> 缺席披露:{{ s7.absent_note }}

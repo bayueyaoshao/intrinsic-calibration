@@ -212,6 +212,25 @@ report_data.json 里逐位找到;图表全部编号引用各上游轮既有 PNG,
 {% if s6.three_criteria_note %}<p class="muted">{{ s6.three_criteria_note }}</p>{% endif %}
 {{ figs('⑥') }}
 
+{# ===================== 与上次对比(⑥ 之后:先看本次考试,再看比上次好没好) ===================== -#}
+<h2>{{ s_diff.title }}</h2>
+{% if s_diff.status == '首次运行' %}
+<p class="muted">{{ s_diff.note }}</p>
+{% else %}
+<p class="muted">对比锚点:上一份报告轮 <strong>{{ s_diff.previous_round }}</strong>
+(生成时间 {{ s_diff.previous_created }});只读它的底账 report_data.json 对齐关键指标,
+不重算任何上游。</p>
+<table>
+  <tr><th>指标</th><th>本次</th><th>上次</th><th>变化</th></tr>
+  {% for r in s_diff.rows %}
+  <tr><td>{{ r.label }}</td><td>{{ r.current }}</td><td>{{ r.previous }}</td>
+      <td {% if '变好' in r.change %}class="good"
+          {% elif '变差' in r.change %}class="bad"{% endif %}>{{ r.change }}</td></tr>
+  {% endfor %}
+</table>
+{% if s_diff.scale_note %}<p class="absent">{{ s_diff.scale_note }}</p>{% endif %}
+{% endif %}
+
 {# ===================== 第⑦节 误差归因 ===================== -#}
 <h2>{{ s7.title }}</h2>
 {% if s7.absent_note %}<p class="absent">缺席披露:{{ s7.absent_note }}</p>{% endif %}

@@ -28,7 +28,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from calib.io.config import load_board
 from calib.io.manifest import latest_run_dir
-from calib.report.diff import collect_exclude_candidates
+from calib.report.diff import collect_exclude_candidates, compare_with_previous
 from calib.report.loopback import (
     ROW_ABSENT,
     ROW_ADVICE,
@@ -193,6 +193,32 @@ def _plan_figures(rounds: dict, selected: str | None) -> list[dict]:
             "_src": str(source),  # 私有键:命令层复制用,模板不渲染
         })
     return figures
+
+
+def _previous_report_doc(out_root: Path) -> tuple[str | None, dict | None]:
+    """找上一份报告轮的底账快照(ITER-03 的对比锚点 = 上一份 report 轮,
+    2026-10-22 裁定②)。
+
+    从最新往旧找,取第一份带 report_data.json 的轮;上一份底账坏了
+    (JSON 读不动)不算致命,退而找更旧的,全坏 = 没有锚点(按首次
+    运行处理)。只经 json.load 读取,绝不 eval(威胁 T-06-03)。
+    本函数在组装期调用,此时本轮还没落盘,最新在盘的那轮就是「上一份」。
+    """
+    report_dir = Path(out_root) / "report"
+    if not report_dir.is_dir():
+        return None, None
+    runs = sorted((p for p in report_dir.iterdir()
+                   if p.is_dir() and p.name.startswith("run_")),
+                  reverse=True)
+    for run in runs:
+        snapshot = run / "report_data.json"
+        if not snapshot.is_file():
+            continue
+        try:
+            return run.name, _load_json(snapshot)
+        except (OSError, ValueError):
+            continue
+    return None, None
 
 
 def build_report_context(out_root: Path) -> dict:
@@ -880,16 +906,25 @@ def build_report_context(out_root: Path) -> dict:
         "mm_per_px": float(mm_per_px) if mm_per_px is not None else None,
         "budget_ratio_median": (float(ratios.get("重投影位移中位"))
                                 if ratios.get("重投影位移中位") is not None else None),
+        "budget_ratio_p95": (float(ratios.get("重投影位移95分位"))
+                             if ratios.get("重投影位移95分位") is not None else None),
+        "budget_ratio_max": (float(ratios.get("重投影位移最大"))
+                             if ratios.get("重投影位移最大") is not None else None),
         "crlb_median_se_views640_detector_px": (
             float(statistics.median(sel_det["se"]))
             if sel_det.get("status") == "ok" and sel_det.get("se") else None),
         "cv_mean_heldout_px": (
             float(cv_m2["mean_heldout_px"])
             if cv_m2.get("mean_heldout_px") is not None else None),
+        # 实验规模(跨运行 diff 用来说明「规模不同不冒充回归」)
+        "n_bootstrap_resamples": (
+            int(boot_meta["n_resamples"])
+            if boot_meta.get("n_resamples") is not None else None),
+        "profile": (eval_doc.get("meta") or {}).get("profile"),
         "rounds": {stage: rounds[stage]["name"] for stage, _f, _c in _UPSTREAM},
     }
 
-    return {
+    context = {
         "schema": "report-context-v1",
         "created": datetime.now(UTC).isoformat(timespec="seconds"),
         "board": ({
@@ -908,6 +943,19 @@ def build_report_context(out_root: Path) -> dict:
         "disclosures": disclosures,
         "metrics_raw": metrics_raw,
     }
+
+    # ---- 「与上次对比」(ITER-03):锚点 = 上一份 report 轮的底账快照 ----
+    # 排在⑥防作弊考试之后渲染(叙事顺:先看本次考试,再看比上次好没好),
+    # 不占九节骨架编号;上一份轮名与生成时间随行披露,防拿旧轮冒充(T-06-03)。
+    prev_name, prev_doc = _previous_report_doc(out_root)
+    s_diff = compare_with_previous(context, prev_doc)
+    s_diff["title"] = "与上次对比"
+    s_diff["previous_round"] = prev_name or "—"
+    s_diff["previous_created"] = (
+        prev_doc.get("created") if isinstance(prev_doc, dict) else None) or "—"
+    context["s_diff"] = s_diff
+
+    return context
 
 
 def run_report(out_root: Path) -> dict:
