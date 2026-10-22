@@ -38,7 +38,7 @@ import pytest
 
 from calib.noise.artifacts import REPORT_KEYS, load_noise_report
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.realdata]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NOISE_TIMEOUT_S = 10800  # 注入实验实测约两小时,超时上限给足 3 小时

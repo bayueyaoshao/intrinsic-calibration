@@ -40,7 +40,7 @@ import pytest
 
 from calib.analysis.artifacts import ANALYZE_KEYS, load_analyze_report
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.realdata]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ANALYZE_DIR = REPO_ROOT / "output" / "analyze"

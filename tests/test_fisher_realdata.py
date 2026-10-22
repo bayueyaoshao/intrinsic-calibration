@@ -42,7 +42,7 @@ import pytest
 
 from calib.io.config import load_calibration
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.realdata]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FISHER_TIMEOUT_S = 7200  # 交叉验证要逐模型重解 OpenCV(640 视图分钟级),给足 2 小时

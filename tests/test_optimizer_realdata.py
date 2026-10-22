@@ -42,7 +42,7 @@ from calib.io.config import load_board, load_calibration
 from calib.solve.observation import load_observation_set
 from calib.util.lineage import make_lineage
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.realdata]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOARD_PATH = REPO_ROOT / "config" / "board.yaml"

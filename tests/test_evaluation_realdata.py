@@ -51,7 +51,7 @@ from scipy.stats import chi2
 from calib.evaluation.artifacts import EVALUATE_KEYS, load_evaluate_report
 from calib.io.config import load_calibration
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.realdata]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOARD_PATH = REPO_ROOT / "config" / "board.yaml"

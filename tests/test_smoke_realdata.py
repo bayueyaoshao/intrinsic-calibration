@@ -45,7 +45,7 @@ import pytest
 
 from calib.noise.artifacts import CRLB_KEYS, REPORT_KEYS
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.realdata]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
