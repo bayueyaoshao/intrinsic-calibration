@@ -116,3 +116,14 @@ def test_ingest_bad_input_wrapped_as_chinese_error(tmp_path, monkeypatch):
     assert "照片入库体检失败" in result.output
     assert "请先检查" in result.output
     assert "Traceback" not in result.output
+
+
+def test_report_bad_input_wrapped_as_chinese_error(tmp_path, monkeypatch):
+    """report 命令同款收口(T-06-07):空目录里七路上游一个都没有,
+    坏输入收口为中文一句 + 退出码 1,不吐 traceback(修复前直接吐堆栈)。"""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["report"])
+    assert result.exit_code == 1
+    assert "汇总证据出报告失败" in result.output
+    assert "请先" in result.output, "指引要先补跑上游命令"
+    assert "Traceback" not in result.output

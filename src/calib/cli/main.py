@@ -2398,12 +2398,11 @@ def analyze() -> None:
                f"{len(paths['detail_npz'])} 份:analysis/)")
 
 
-@app.command(help="⑧ 汇总证据出报告:每一步的结论、图表、数据全部留痕可追溯")
-def report() -> None:
+def _run_report() -> None:
     """组装并落盘 HTML+Markdown 证据链报告与机器可读底账 report_data.json。
 
     只读各阶段最新一轮既有产物,组装与渲染全部交给 report/build.py 的一个
-    顶层函数(本命令体只管调用、清理与播报);缺哪路主文件就中文报错退出,
+    顶层函数(本函数只管调用、清理与播报);缺哪路主文件就中文报错退出,
     提示先跑对应命令。落 output/report/run_<时间戳>/ 四件:report.html、
     report.md、report_data.json、figures/;新轮落盘成功后删更旧的轮,
     只留最新两轮(上一轮是后续跨运行对比的读锚)。
@@ -2434,6 +2433,24 @@ def report() -> None:
                "可信;有 FAIL 先读第⑥⑦节对应表的 FAIL 项说明列;缺席披露只说明"
                "「这段结论暂时没有」,不代表数值为 0——报告绝不冒充数值。")
     typer.echo(f"  报告产物:{run_dir}")
+
+
+@app.command(help="⑧ 汇总证据出报告:每一步的结论、图表、数据全部留痕可追溯")
+def report() -> None:
+    """第⑧步命令入口:坏输入收口为中文一句 + 退出码 1,不吐堆栈(T-06-07)。
+
+    最常见的坏输入是还没跑过上游命令(七路取数主文件缺任何一路)。
+    实现体在 _run_report,库函数照旧抛 ValueError,这里只管命令入口的
+    报错呈现;连读盘失败(OSError)一并收口,坏输入一律不走堆栈。
+    """
+    try:
+        _run_report()
+    except (ValueError, OSError) as e:
+        typer.echo(f"汇总证据出报告失败:{e}")
+        typer.echo("  请先检查 config/ 配置与上游产物"
+                   "(缺哪一路就按流水线顺序补跑对应命令),"
+                   "修正后重跑 calib report。")
+        raise typer.Exit(code=1) from e
 
 
 # ---------------------------------------------------------------- 一键全流程
