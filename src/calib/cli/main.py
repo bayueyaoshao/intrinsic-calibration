@@ -28,6 +28,7 @@ from calib.analysis.artifacts import (
     save_analyze_report,
 )
 from calib.analysis.budget import run_budget
+from calib.analysis.corner_opt import run_corner_opt
 from calib.analysis.residual_structure import run_residual_structure
 from calib.analysis.sensitivity import run_sensitivity
 from calib.analysis.test_xyz import run_test_xyz
@@ -85,6 +86,7 @@ from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
 from calib.visualization.analyze_figs import (
     plot_budget_bars,
+    plot_corner_opt_curves,
     plot_coverage_footprint,
     plot_radial_bands,
     plot_sensitivity_ranking,
@@ -1822,9 +1824,10 @@ def analyze() -> None:
     (quick 档实验明细只有当选模型,一切明细键按它拼)→ 血缘登记:全部
     上游产物一次登记进指纹,防串轮 → 六块执行区:块 1 误差预算直调
     (刻意不套逐块兜底——实测低于理论下界的铁律硬报错必须冒泡到外层,
-    失败契约落盘后退出码 1);块 2–4 残差方向分解 / test 三分量分解 /
-    参数敏感度排序(单块失败该段记 None,不中断其余分析块);
-    块 5–6 留位(由 05-05~05-06 计划逐块接入)→
+    失败契约落盘后退出码 1);块 2–5 残差方向分解 / test 三分量分解 /
+    参数敏感度排序 / 角点退化寻优(块 5 是唯一重计算块,把真实照片
+    逐张加噪/模糊/降对比后用候选配置重新提角点;单块失败该段记 None,
+    不中断其余分析块);块 6 留位(由 05-06 计划接入)→
     analyze.json + analysis/*.npz 明细旁车 + 证据图落盘
     (图失败只播报不拦主产物)→ 中途失败也照常落盘失败契约再退出码 1 →
     打印中文汇总与人工核查四要素指引。
@@ -1959,7 +1962,7 @@ def analyze() -> None:
     # ---- 六块执行区:块 1 误差预算直调(刻意不套逐块兜底——实测低于
     # 理论下界的铁律硬报错必须冒泡到外层失败契约,退出码 1,不静默);
     # 块 2 起用 _stage 逐块兜底(照 evaluate 体例:单块失败该段记 None,
-    # 不中断其余分析块);块 5–6 显式置 None 留位 ----
+    # 不中断其余分析块);块 6 显式置 None 留位(由 05-06 计划接入)----
     def _stage(name: str, run):
         try:
             return run()
@@ -2029,8 +2032,33 @@ def analyze() -> None:
     if block4 is not None:
         sensitivity, sensitivity_detail = block4
 
-    corner_opt = None           # 块 5 角点寻优实验(由 05-05 计划接入)
+    corner_opt_detail: dict | None = None
+
+    def _block_corner_opt():
+        """块 5 取数 + 角点退化寻优(全命令唯一重计算块,分钟到十分钟级)。
+
+        取数也在块内:train 观测集沿用 evaluate 的排除名单体例;数据清单
+        沿角点血缘取同一份(训练侧照片记录给 worker 读原图施加退化,
+        原图只读、退化图不落盘,种子可复现)。
+        """
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        train_records = [r for r in manifest["images"] if r["split"] == "train"]
+        obs_train = load_observation_set(
+            corners_run / "corners_train_sb.npz", manifest_path, board,
+            split="train", exclude_images=tuple(cfg.exclude_images))
+        return run_corner_opt(
+            model_id, evaluate_report, obs_train, train_records, board, cfg,
+            sigma_detector)
+
+    corner_opt: dict | None = None
     anisotropy = None           # 块 6 连拍各向异性(由 05-06 计划接入)
+    typer.echo("  块 5 角点退化寻优是本命令唯一重计算块(真实照片逐张加噪/"
+               "模糊/降对比后重新提角点;quick 档约 15–40 分钟,"
+               f"并行上限 {cfg.analyze.analyze_max_workers} 进程)……")
+    block5 = _stage("角点退化寻优", _block_corner_opt)
+    if block5 is not None:
+        corner_opt, corner_opt_detail = block5
     try:
         budget_section, budget_detail = run_budget(
             model_id, evaluate_report,
@@ -2091,6 +2119,8 @@ def analyze() -> None:
         report["_test_xyz_detail"] = test_xyz_detail
     if sensitivity is not None:
         report["_sensitivity_detail"] = sensitivity_detail
+    if corner_opt is not None:
+        report["_corner_opt_detail"] = corner_opt_detail
     paths = save_analyze_report(out_dir, report, lineage)
 
     # ---- 证据图(附加产物:单张失败只播报,不拦主产物)----
@@ -2138,6 +2168,19 @@ def analyze() -> None:
             except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
                 typer.echo(f"  {fig_name}未生成(不影响数据产物):"
                            f"{type(e).__name__}——{e}")
+    if corner_opt is not None:
+        # 双口径各一张(裁定①):主口径曲线 + 旁证曲线,文件名自带口径
+        for fig_name, ref_key, file_name in (
+            ("角点寻优曲线(主口径)", "self", "corner_opt_self.png"),
+            ("角点寻优曲线(旁证口径)", "prod_sb", "corner_opt_prodsb.png"),
+        ):
+            try:
+                plot_corner_opt_curves(
+                    corner_opt, figures_dir / file_name, reference=ref_key)
+                n_figs += 1
+            except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
+                typer.echo(f"  {fig_name}未生成(不影响数据产物):"
+                           f"{type(e).__name__}——{e}")
 
     # ---- 中文汇总 + 人工核查四要素指引 ----
     typer.echo("误差归因完成,analyze.json 与预算证据已写盘。")
@@ -2177,9 +2220,17 @@ def analyze() -> None:
             f"(只提示方向不自动执行);bootstrap 最大位移 "
             f"{uniq['bootstrap_max_disp_px']:.2f}px、多起点判定 "
             f"{uniq['multistart_verdict']}{what_if_bit}")
+    if corner_opt is not None:
+        tasks_bit = (f";失败任务 {corner_opt['n_failed_tasks']} 个"
+                     if corner_opt["n_failed_tasks"] else "")
+        typer.echo(
+            f"  角点退化寻优:{corner_opt['n_frames']} 帧 × "
+            f"{corner_opt['n_methods']} 方法 × {corner_opt['n_units']} 退化单元"
+            f"(双口径 stats._self / _prod_sb 并排{tasks_bit});"
+            f"判读:{corner_opt['verdict_note'][:80]}……全文见 corner_opt 段")
     if partial:
         typer.echo(f"  待接入的分析段({len(partial)} 个,报告记 None):"
-                   f"{'、'.join(partial)}——由 05-05~05-06 计划逐块接入")
+                   f"{'、'.join(partial)}——由 05-06 计划接入")
     typer.echo("  人工核查四要素指引:")
     typer.echo(f"  1) 看哪个文件:{paths['analyze_json']}(主契约)与 "
                f"{out_dir / 'analysis' / 'budget.npz'}(逐行底账)与 "
@@ -2209,6 +2260,12 @@ def analyze() -> None:
         where_to_look += (";sensitivity 段(advice 应对建议规则表——只提示方向"
                           "不自动执行、uniqueness 解不唯一证据、what_if 补拍预演"
                           "仅 full 档产出,quick 档见 what_if_note)")
+    if corner_opt is not None:
+        where_to_look += (";corner_opt 段(stats._self 主口径 / _prod_sb 旁证"
+                          "双口径并排——每方法每退化单元的 rms/median/max 与 "
+                          "r 分带切片、verdict_note 中文判读、sb_accuracy_verdict "
+                          "A1 销险结论、threshold_px 未显著劣化线;"
+                          "analysis/corner_opt.npz 是逐角点位移底账)")
     typer.echo(f"  3) 具体看哪里:{where_to_look}。")
     typer.echo("  4) 好坏判据:零违例(n_pointwise_violations = 0)且三个统计量"
                "比值全部不低于硬告警线(约 0.42)才算 pass;本数据的基准是实测"
@@ -2217,7 +2274,13 @@ def analyze() -> None:
                "哪天比值跌破线或出现违例,就是口径错配或数据被污染的信号,"
                "命令会当场硬报错而不是静默出表。"
                "Z 分量判读看 z 分数列而非原始量级;敏感度结论以像素当量为准;"
-               "建议不自动执行。")
+               "建议不自动执行。"
+               + ("角点寻优看两件事——校准档 noise_0.0 的自参照 RMS 必须"
+                  "恰好为 0(参照没对齐曲线全不可信);各退化档自参照 RMS "
+                  "低于 threshold_px(10 × 检测器级 σ)算未显著劣化,生产位"
+                  "sb 若在可比集里误差最小,当前配置就有数据背书,否则"
+                  "verdict_note 会点名更稳的档位——只提示方向,切不切人工定。"
+                  if corner_opt is not None else ""))
     typer.echo(f"  分析产物:{out_dir}")
     typer.echo(f"  汇总报告:{paths['analyze_json']}(明细旁车 "
                f"{len(paths['detail_npz'])} 份:analysis/)")

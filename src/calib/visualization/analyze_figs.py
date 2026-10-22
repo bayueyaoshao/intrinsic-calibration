@@ -577,3 +577,116 @@ def plot_what_if(what_if_section: dict | None, out_path: Path | str) -> Path:
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
+
+
+def plot_corner_opt_curves(corner_opt_section: dict | None, out_path: Path | str,
+                           reference: str = "self") -> Path:
+    """把角点退化寻优段画成"退化强度 → 定位误差"曲线图(PNG),返回图路径。
+
+    输入是 analyze.json 的 corner_opt 段(只消费段内现成键,不从数组倒推)。
+    三张子图对应三个退化族(加噪 / 模糊 / 低对比),横轴 = 退化强度档位,
+    纵轴 = 逐角点位移(px);每条方法一条线——RMS 实线圆点、中位数虚线
+    方点;生产配置(SB flags=0)加粗并点名"当前生产配置";虚线横参考 =
+    未显著劣化线(10 × 检测器级 σ,随段落数值)。
+
+    reference 二选一(裁定①双口径各出一张图):
+        "self"    = 主口径 _self,各方法对自家干净检出的偏移(退化敏感度);
+        "prod_sb" = 旁证口径 _prod_sb,对生产 SB 干净检出的绝对偏移
+                    (跨方法可比)。
+    full 档的最坏交叉单元(噪+糊两个操作)不进单因素曲线——它是双因素
+    叠加档,画进单因素图会横轴无解,交叉档结论以 analyze.json 为准。
+
+    段缺席(None)时不冒充数据:画"无数据"文字标注(evaluate_figs 同一体例)。
+    图是可视化,数字结论以 analyze.json 的 corner_opt 段为准。
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    section = corner_opt_section or {}
+    stats = (section.get("stats") or {}).get(reference)
+    unit_labels = section.get("units") or []
+    unit_ops = section.get("unit_ops") or {}
+    methods = section.get("methods") or []
+    threshold = section.get("threshold_px")
+    fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.8), sharey=True)
+
+    if not stats or not methods:
+        for ax in axes:
+            ax.text(0.5, 0.5, "无数据", ha="center", va="center",
+                    fontsize=14, color="#777777", transform=ax.transAxes)
+            ax.set_axis_off()
+        fig.suptitle("角点退化寻优曲线(段缺席)", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    ref_titles = {
+        "self": "主口径 _self:对自家干净检出的偏移(退化敏感度)",
+        "prod_sb": "旁证 _prod_sb:对生产 SB 干净检出的绝对偏移(跨方法可比)",
+    }
+    family_axis = {"noise": "加噪 σ(灰阶)", "blur": "高斯模糊 σ(px)",
+                   "contrast": "对比度增益(1.0 = 不动)"}
+    plotted_any = False
+    for ax, family in zip(axes, ("noise", "blur", "contrast")):
+        # 该族的(档位, 单元标签),按档位升序;多操作交叉单元不进单因素图
+        points = sorted(
+            (float(ops[0][1]), label) for label in unit_labels
+            for ops in [unit_ops.get(label) or []]
+            if len(ops) == 1 and ops[0][0] == family)
+        if not points:
+            ax.text(0.5, 0.5, "本族无退化档", ha="center", va="center",
+                    fontsize=11, color="#777777", transform=ax.transAxes)
+            ax.set_title(f"退化族:{family}", fontsize=10)
+            continue
+        for m_idx, method in enumerate(methods):
+            per_unit = stats.get(method) or {}
+            rms_pts = [(x, (per_unit.get(label) or {}).get("rms_px"))
+                       for x, label in points]
+            med_pts = [(x, (per_unit.get(label) or {}).get("median_px"))
+                       for x, label in points]
+            is_prod = method == section.get("production_method")
+            color = f"C{m_idx % 10}"
+            width = 2.8 if is_prod else 1.5
+            layer = 5 if is_prod else 2
+            legend = f"{method}(当前生产配置)" if is_prod else method
+            rms_ok = [(x, v) for x, v in rms_pts if v is not None]
+            med_ok = [(x, v) for x, v in med_pts if v is not None]
+            if rms_ok:
+                ax.plot([p[0] for p in rms_ok], [p[1] for p in rms_ok],
+                        "-o", color=color, linewidth=width, alpha=0.95 if is_prod else 0.75,
+                        zorder=layer, label=legend)
+                plotted_any = True
+            if med_ok:
+                ax.plot([p[0] for p in med_ok], [p[1] for p in med_ok],
+                        "--s", color=color, linewidth=width * 0.7,
+                        alpha=0.85 if is_prod else 0.6, zorder=layer - 1)
+        if threshold:
+            ax.axhline(float(threshold), linestyle=":", color="#d62728",
+                       linewidth=1.2, zorder=1,
+                       label=f"未显著劣化线 {float(threshold):.3f}px")
+        ax.set_title(f"退化族:{family}", fontsize=10)
+        ax.set_xlabel(family_axis[family], fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    axes[0].set_ylabel("逐角点位移(px)")
+    # 图例只放一份(取全部子图的句柄去重),放最右侧子图外沿
+    handles, labels = axes[-1].get_legend_handles_labels()
+    seen: dict[str, object] = {}
+    for h, l in zip(handles, labels):
+        seen.setdefault(l, h)
+    if seen:
+        axes[-1].legend(seen.values(), seen.keys(), fontsize=7,
+                        loc="upper left", title=f"{ref_titles.get(reference, reference)}",
+                        title_fontsize=7)
+    subtitle = ("RMS 实线圆点 / 中位数虚线方点;粗线 = 当前生产配置;"
+                "图是可视化,数字结论以 analyze.json 为准")
+    fig.suptitle(f"角点退化寻优曲线:{subtitle}", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    if not plotted_any:
+        # 有段无数据(全部单元未检出)不冒充曲线
+        for ax in axes:
+            ax.text(0.5, 0.5, "无有效观测", ha="center", va="center",
+                    fontsize=12, color="#777777", transform=ax.transAxes)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path

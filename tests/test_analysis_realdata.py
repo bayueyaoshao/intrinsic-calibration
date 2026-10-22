@@ -16,6 +16,10 @@ fisher/evaluate 上游产物,日常开发用 `uv run pytest -m "not integration"
 3. findings 结论 4 对账:硬告警线与 evaluate.json crlb_alert 逐位一致
    (约 0.4207);三统计量比值在基准(约 102 / 1108 / 1444 倍)±5% 内。
 4. 判读:逐行最小比值约 2.8(±0.1);verdict == "pass"。
+5. COR-02 角点寻优(05-05 接入):quick 档 36 抽样帧 × 双口径
+   (stats._self 主口径 / _prod_sb 旁证)× 三族退化单元,校准档
+   自参照 RMS 恰为 0;明细旁车 analysis/corner_opt.npz 与双口径
+   曲线图在盘。
 另:明细旁车 analysis/budget.npz(逐行底账 14080 行)与证据图
 figures/budget_bars.png 在盘;CLI 播报层由单元测试覆盖,本文件不重复。
 
@@ -133,20 +137,20 @@ def analyze_tree() -> dict:
 
 
 def test_analyze_sections_shape_and_selected_model(analyze_tree: dict):
-    """契约形状:budget / residual_structure / test_xyz / sensitivity 四段
-    有值,块 5–6 显式缺位(None)并进 meta.missing_sections;目标模型与
-    evaluate 选型结论一致(m2)。"""
+    """契约形状:budget / residual_structure / test_xyz / sensitivity /
+    corner_opt 五段有值,块 6 显式缺位(None)并进 meta.missing_sections;
+    目标模型与 evaluate 选型结论一致(m2)。"""
     report = analyze_tree["report"]
     budget = report["budget"]
     assert isinstance(budget, dict) and budget, "budget 段缺席(误差归因没跑成)"
     residual = report["residual_structure"]
     assert isinstance(residual, dict) and residual, \
         "residual_structure 段缺席(残差方向分解没跑成)"
-    for key in ("corner_opt", "anisotropy"):
-        assert report[key] is None, \
-            f"{key} 段应由后续计划接入,当前必须显式为 None"
-    assert set(report["meta"]["missing_sections"]) == {
-        "corner_opt", "anisotropy"}
+    assert isinstance(report["corner_opt"], dict) and report["corner_opt"], \
+        "corner_opt 段缺席(角点退化寻优没跑成,见该轮 CLI 播报的失败理由)"
+    assert report["anisotropy"] is None, \
+        "anisotropy 段应由 05-06 计划接入,当前必须显式为 None"
+    assert set(report["meta"]["missing_sections"]) == {"anisotropy"}
     assert report["meta"]["selected_model"] == "m2", \
         f"目标模型应与 evaluate 选型结论一致,实际 {report['meta']['selected_model']!r}"
     assert budget["schema"] == "analyze-budget-v1"
@@ -155,6 +159,7 @@ def test_analyze_sections_shape_and_selected_model(analyze_tree: dict):
     assert residual["schema"] == "analyze-residual-v1"
     assert report["test_xyz"]["schema"] == "analyze-test-xyz-v1"
     assert report["sensitivity"]["schema"] == "analyze-sensitivity-v1"
+    assert report["corner_opt"]["schema"] == "analyze-corner-opt-v1"
     assert "delivery" in report["meta"]["r_normalization_basis"], \
         "r 归一化基准必须随 meta 透传(跨轮比较先对齐口径)"
     assert residual["r_normalization_baseline_check"]["status"] == "consistent", \
@@ -242,8 +247,8 @@ def test_analyze_residual_sidecars_and_figures(analyze_tree: dict):
           "+ radial_bands.png + coverage_footprint.png 在盘")
 
 
-def test_analyze_blocks_234_use_stage_and_budget_stays_direct():
-    """源码断言(接线体例):块 2/3/4 包在 _stage 里(单块失败记 None
+def test_analyze_blocks_2345_use_stage_and_budget_stays_direct():
+    """源码断言(接线体例):块 2/3/4/5 包在 _stage 里(单块失败记 None
     照常出报告),块 1 预算依旧直调不套兜底(铁律违例必须退出码 1)——
     两种失败语义不许混。"""
     import inspect
@@ -252,9 +257,10 @@ def test_analyze_blocks_234_use_stage_and_budget_stays_direct():
 
     source = inspect.getsource(cli_main.analyze)
     for call in ('_stage("残差方向分解"', '_stage("test 三分量分解"',
-                 '_stage("参数敏感度排序"'):
+                 '_stage("参数敏感度排序"', '_stage("角点退化寻优"'):
         assert call in source, f"{call} 缺席:诊断块必须走 _stage 逐块兜底"
     assert "run_residual_structure" in source and "run_budget(" in source
+    assert "run_corner_opt(" in source, "块 5 必须调 run_corner_opt"
     # budget 直调:run_budget 的调用行不许出现在 _stage 调用行上
     for line in source.splitlines():
         if "run_budget(" in line:
@@ -342,6 +348,59 @@ def test_analyze_xyz_sensitivity_sidecars_and_figures(analyze_tree: dict):
         "quick 档不做 what-if,补拍预演图不该存在"
     print(f"\n[产物] test_xyz.npz(dX {detail['dX'].shape})+ sensitivity.npz "
           "+ test_xyz.png + sensitivity_ranking.png 在盘(what_if.png 无,quick 档)")
+
+
+def test_analyze_corner_opt_section(analyze_tree: dict):
+    """COR-02 真实数据(quick 档):36 抽样帧、三族退化单元含校准档、
+    方法候选含生产 SB 与窗口阶梯;校准档自参照 RMS 恰为 0(参照对齐
+    自证);判读文案点名生产配置与未显著劣化判据;A1 销险结论随段落账;
+    明细旁车 corner_opt.npz 行数 = 帧×方法×重复×单元,双口径图都在盘。"""
+    section = analyze_tree["report"]["corner_opt"]
+    assert section["profile"] == "quick"
+    assert section["n_frames"] == 36, \
+        f"quick 档应抽 36 帧,实际 {section['n_frames']}"
+    units = section["units"]
+    assert "noise_0.0" in units and section["calibration_unit"] == "noise_0.0"
+    assert "noise_64.0" in units and "blur_4.0" in units and "contrast_0.2" in units, \
+        "三族最坏档都应在盘(配置三族渐进档)"
+    methods = section["methods"]
+    assert "sb" in methods and section["production_method"] == "sb"
+    assert "sb_acc" in methods, "A1 销险:sb_acc 候选必须在盘"
+    assert any(m.startswith("classic_w") for m in methods), \
+        "窗口阶梯候选至少应有一档进方法表"
+
+    # 校准档零位移:同方法同图同代码路径,恒等退化必须逐位回到自身
+    self_sb = section["stats"]["_self"]["sb"]
+    assert self_sb["noise_0.0"]["rms_px"] == pytest.approx(0.0, abs=1e-12), \
+        "校准档自参照 RMS 必须恰为 0——不为 0 说明参照没对齐,曲线全不可信"
+    # 双口径并排 + 阈值 + 判读 + A1 销险
+    assert set(section["stats"].keys()) == {"_self", "_prod_sb"}
+    assert section["threshold_px"] == pytest.approx(0.08708, abs=1e-3), \
+        "未显著劣化线 = 10 × 检测器级 σ(随段落账)"
+    verdict = section["verdict_note"]
+    assert verdict and "生产" in verdict and "未显著劣化" in verdict
+    assert "只提示方向" in verdict or "数据背书" in verdict, \
+        "判读必须落在两分支之一:有数据背书 / 只提示方向不自动执行"
+    assert "CALIB_CB_ACCURACY" in section["sb_accuracy_verdict"]
+    print(f"\n[COR-02] {section['n_frames']} 帧 × {len(methods)} 方法 × "
+          f"{len(units)} 单元;失败任务 {section['n_failed_tasks']};"
+          f"判读:{verdict[:90]}……")
+
+    # 明细旁车:行数 = 帧 × 方法 × 重复 × 单元,双口径位移数组同形
+    run_dir = analyze_tree["run_dir"]
+    npz_path = run_dir / "analysis" / "corner_opt.npz"
+    assert npz_path.is_file(), "corner_opt.npz 逐角点位移底账必须在盘"
+    with np.load(npz_path, allow_pickle=False) as data:
+        n_expected = (section["n_frames"] * len(methods)
+                      * section["n_reps"] * len(units))
+        assert data["disp_self"].shape[0] == n_expected, \
+            f"明细行数应 {n_expected},实际 {data['disp_self'].shape[0]}"
+        assert data["disp_prodsb"].shape == data["disp_self"].shape
+    assert (run_dir / "figures" / "corner_opt_self.png").is_file()
+    assert (run_dir / "figures" / "corner_opt_prodsb.png").is_file(), \
+        "双口径两张曲线图都在盘(裁定①:图也分口径)"
+    print(f"[产物] corner_opt.npz({n_expected} 行)+ corner_opt_self.png "
+          "+ corner_opt_prodsb.png 在盘")
 
 
 def test_analyze_budget_recheck_consistent_and_zero_violations(analyze_tree: dict):
