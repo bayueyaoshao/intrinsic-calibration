@@ -21,6 +21,14 @@ def _fmt_px(value) -> str:
         return "—"
 
 
+def _fmt_threshold(value) -> str:
+    """连拍容差 → 白话字符串(上游真实落账是 [中位容差, 最大容差] 二元
+    列表,见 corners/canonical.py 的 burst_consistency;裸标量兜底照读)。"""
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return f"中位容差 {_fmt_px(value[0])} / 最大容差 {_fmt_px(value[1])}"
+    return f"容差 {_fmt_px(value)}"
+
+
 def _candidate(image_id: str | None, pose_id: str | None,
                source: str, reason: str) -> dict:
     """一条剔除候选:照片名 + 摆拍位置 + 来源 + 中文理由(给人工确认用)。"""
@@ -104,8 +112,8 @@ def _burst_candidates(corners_report: dict | None,
         reason = (
             f"连拍一致性断言点名:同一姿态的连拍里,同名角点的位置波动超出"
             f"容差(组内波动中位 {_fmt_px(item.get('spread_median_px'))} / "
-            f"最大 {_fmt_px(item.get('spread_max_px'))},容差 "
-            f"{_fmt_px(item.get('threshold_px'))}),常见原因是角点排序被"
+            f"最大 {_fmt_px(item.get('spread_max_px'))},"
+            f"{_fmt_threshold(item.get('threshold_px'))}),常见原因是角点排序被"
             f"镜像/翻转污染或拍摄瞬间晃动,请对照人工复核包确认")
         imgs = _images_of_pose(manifest, pose)
         if imgs:

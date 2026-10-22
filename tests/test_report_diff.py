@@ -92,9 +92,11 @@ def test_burst_failures_expand_and_dedupe_by_pose():
     manifest = _manifest([_train("img_x0", "poseB"), _train("img_x1", "poseB")])
     corners = _corners_doc(failures=[
         {"detector": "classic", "pose_id": "poseB",
-         "spread_median_px": 0.9, "spread_max_px": 1.4, "threshold_px": 1.0},
+         "spread_median_px": 0.9, "spread_max_px": 1.4,
+         "threshold_px": [0.35, 1.4]},
         {"detector": "sb", "pose_id": "poseB",
-         "spread_median_px": 0.8, "spread_max_px": 1.2, "threshold_px": 1.0},
+         "spread_median_px": 0.8, "spread_max_px": 1.2,
+         "threshold_px": [0.35, 1.4]},
     ])
     out = collect_exclude_candidates(None, None, manifest, corners)
     cands = out["candidates"]
@@ -102,6 +104,9 @@ def test_burst_failures_expand_and_dedupe_by_pose():
     assert {c["image_id"] for c in cands} == {"img_x0", "img_x1"}
     assert "连拍" in cands[0]["source"]
     assert "1.4" in cands[0]["reason"], "理由应带组内波动数字"
+    # 容差锁真实形状(生产端落 [中位容差, 最大容差] 二元列表,不是标量)
+    assert "中位容差 0.35px" in cands[0]["reason"], cands[0]["reason"]
+    assert "最大容差 1.40px" in cands[0]["reason"], cands[0]["reason"]
 
 
 def test_ingest_multi_source_suspects_only():
@@ -158,6 +163,8 @@ def test_s8_advice_candidates_and_suggest_file(tmp_path, monkeypatch):
     assert cand["source"] == "连拍断言点名"
     assert cand["image_id"] is None and cand["pose_id"] == 'p<x>&"q'
     assert "人工补全名单" in cand["reason"]
+    # 容差按二元列表渲染成白话(不是裸列表「[0.35, 1.4]」)
+    assert "中位容差 0.35px / 最大容差 1.40px" in cand["reason"], cand["reason"]
     assert "exclude_images" in s8["guidance_line"]
     assert "calib run-all --from calibrate" in s8["guidance_line"]
 

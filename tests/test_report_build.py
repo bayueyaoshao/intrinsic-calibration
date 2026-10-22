@@ -84,7 +84,7 @@ def build_minimal_tree(root: Path) -> None:
             "n_groups_checked": {"classic": 3, "sb": 3}, "n_failures": 1,
             "failures": [{"detector": "classic", "pose_id": "p<x>&\"q",
                           "spread_median_px": 0.9, "spread_max_px": 1.4,
-                          "threshold_px": 1.0}]}})
+                          "threshold_px": [0.35, 1.4]}]}})
     _w(root, "output/noise/run_a/noise.json", {
         "sigma_detector_corner": 0.0087, "sigma_temporal_corner": 0.2995,
         "per_source_counts": {"temporal": 3, "immerkaer_transfer": 3},

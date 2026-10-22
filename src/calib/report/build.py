@@ -85,6 +85,15 @@ def _fmt(value, nd: int = 4) -> str:
     return f"{f:.{nd - 1}e}"
 
 
+def _fmt_threshold_px(value) -> str:
+    """连拍容差 → 白话字符串(上游真实落账是 [中位容差, 最大容差] 二元
+    列表,见 corners/canonical.py 的 burst_consistency;裸标量兜底照读)。"""
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (f"中位容差 {_fmt(value[0], 2)}px / "
+                f"最大容差 {_fmt(value[1], 2)}px")
+    return f"容差 {_fmt(value, 2)}"
+
+
 def _pct(value) -> str:
     """占比 → 百分比字符串(None → 「—」)。"""
     if value is None:
@@ -473,7 +482,7 @@ def build_report_context(out_root: Path) -> dict:
         {"detector": f.get("detector"), "pose_id": f.get("pose_id"),
          "spread": (f"组内波动中位 {_fmt(f.get('spread_median_px'), 2)}px / "
                     f"最大 {_fmt(f.get('spread_max_px'), 2)}px"
-                    f"(容差 {f.get('threshold_px') or '—'})")}
+                    f"({_fmt_threshold_px(f.get('threshold_px'))})")}
         for f in burst.get("failures") or []
     ]
 
