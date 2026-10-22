@@ -109,6 +109,13 @@ class SubpixConfig:
     min_win: int = 3
     max_iter: int = 30
     epsilon: float = 0.01
+    # 指定窗口(COR-02 退化寻优实验专用,None = 不指定,走常规推导):
+    # 常规推导把窗口顶到"最大安全值"(floor(方格像素边长/2) − 1),寻优
+    # 实验的窗口阶梯里更小的档位无法通过 min_win 扫出差异;逐档指定窗口
+    # 是实验需要,但头号陷阱防线一点不松——指定档在 detect_classic 内
+    # 仍必须满足 2w+1 < 本帧方格像素边长(同一断言),违反当场报错。
+    # 本键只由 analysis/corner_opt.py 按配置阶梯构造变体,yaml 不读不写。
+    force_win: int | None = None
 
 
 @dataclass(frozen=True)

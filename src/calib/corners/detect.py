@@ -160,7 +160,20 @@ def detect_classic(gray: np.ndarray, cols: int, rows: int, cfg: CornersConfig) -
     # 逐角点模式下各点用自己的窗口值;同窗口的角点分一组、一组调用一次
     # (精化函数一次只收一个窗口)。精化调用全文件只有 _subpix_refine 一处,
     # 且只挂在经典分支——SB 路线严禁经过这里(见 detect_sb 的说明)。
-    if cfg.subpix.window_granularity == "corner":
+    if cfg.subpix.force_win is not None:
+        # 指定窗口档(COR-02 退化寻优实验的候选变体,yaml 不读不写):
+        # 实验要逐档扫窗口,但常规推导恒取"最大安全值",小档位扫不出
+        # 差异。指定档必须过同一道头号陷阱断言(2w+1 < 本帧方格像素
+        # 边长),违反当场报错——指定窗口是实验参数,不是绕过防线的后门。
+        forced = int(cfg.subpix.force_win)
+        assert 2 * forced + 1 < sq_px, (
+            f"指定窗口断言失败:搜索区 {2 * forced + 1} 像素未严格小于方格像素"
+            f"边长 {sq_px:.2f}(force_win={forced})。窗口跨过相邻角点会产生"
+            f"重投影误差里看不见的系统性定位偏差(头号陷阱),该窗口档不应"
+            f"进入寻优候选。"
+        )
+        wins = np.full(corners.shape[0], forced, dtype=int)
+    elif cfg.subpix.window_granularity == "corner":
         wins = derive_window_per_corner(corners, cols, rows, cfg.subpix.min_win)
     else:
         wins = np.full(corners.shape[0],
