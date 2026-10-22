@@ -48,6 +48,9 @@ markers = [
     # integration:标记需要真实数据(input_data/ 下 705 张照片)的慢速测试;
     # 日常开发用 -m "not integration" 跳过,合并前跑全量
     "integration: 需要真实 input_data 数据的慢速集成测试",
+    # realdata:标记要跑真数据解算的最慢一档(每个文件十几分钟);
+    # 白天快速档用 -m "not realdata" 跳过,夜间全量档命令不变、照跑
+    "realdata: 真数据集成测试,慢,夜间跑",
 ]
 
 [tool.ruff]
