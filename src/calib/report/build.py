@@ -19,15 +19,21 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import statistics
 from datetime import UTC, datetime
 from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from calib.io.config import load_board
 from calib.io.manifest import latest_run_dir
 
 # 棋盘规格的唯一来源(数据契约:board.yaml 是棋盘参数唯一来源,REU-03)
 BOARD_PATH = Path("config") / "board.yaml"
+
+# 双模板所在目录(随包分发;模板只做排版,数字一律来自 context)
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 # 七路上游:阶段目录名 → 主文件名 + 通俗名。七份主文件都是报告的直接取数
 # 主文件,缺任何一份都中文报错退出;轮内小段的缺席才走披露(不冒充数值)。
@@ -831,8 +837,7 @@ def build_report_context(out_root: Path) -> dict:
     s9 = {
         "title": SECTION_TITLES[8],
         "chain": chain,
-        "figures": [{k: v for k, v in fig.items() if not k.startswith("_")}
-                    for fig in figures],
+        "figures": figures,
         "reuse_line": (
             "换一批数据时:把旧 output/ 移走,新照片按目录契约放进 input_data/,"
             "改好 config/ 两个配置文件后按流水线顺序重跑即可——本报告的全部"
@@ -875,4 +880,69 @@ def build_report_context(out_root: Path) -> dict:
         "s6": s6, "s7": s7, "s8": s8, "s9": s9,
         "disclosures": disclosures,
         "metrics_raw": metrics_raw,
+    }
+
+
+def run_report(out_root: Path) -> dict:
+    """顶层一步到位:组装 context → 渲染双模板 → 落盘本轮全部产物。
+
+    命令层(calib report)只调这一个函数——06-02 往 context 加段时,
+    命令体与模板骨架都不用改。落盘四件:
+    report.html(排版证据链报告)/ report.md(同内容纯文本版)/
+    report_data.json(context 原样快照,机器可读底账)/ figures/(从各上游
+    轮原样复制来的既有 PNG,报告只引用不重画)。
+
+    返回:{"run_dir", "round_id", "n_figures", "selected", "n_disclosures"},
+    供命令层播报与清理旧轮。
+    """
+    out_root = Path(out_root)
+    context = build_report_context(out_root)
+
+    round_id = "run_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    run_dir = out_root / "report" / round_id
+    fig_dir = run_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    # 图表:按清单从各上游轮原样复制(文件名各自不同,不会互相覆盖)
+    n_figures = 0
+    for fig in context["s9"]["figures"]:
+        src = fig.get("_src")
+        if src and Path(src).is_file():
+            shutil.copy2(src, fig_dir / fig["file"])
+            n_figures += 1
+
+    # HTML 必须开自动转义(autoescape):上游产物里若混入 < 和 &,
+    # 不能让它们破坏页面结构(威胁 T-06-01);StrictUndefined 让模板
+    # 引用不存在的键时当场报错,而不是悄悄渲染成空。
+    env_html = Environment(
+        loader=FileSystemLoader(TEMPLATES_DIR),
+        autoescape=True,
+        undefined=StrictUndefined,
+    )
+    # Markdown 是纯文本格式,开转义反而会把正文里的 & 改写成 &amp;——
+    # 不开;防篡改同样成立:模板零本数据集数字,数字全部来自 context。
+    env_md = Environment(
+        loader=FileSystemLoader(TEMPLATES_DIR),
+        autoescape=False,
+        undefined=StrictUndefined,
+    )
+    (run_dir / "report.html").write_text(
+        env_html.get_template("report.html.j2").render(**context),
+        encoding="utf-8")
+    (run_dir / "report.md").write_text(
+        env_md.get_template("report.md.j2").render(**context),
+        encoding="utf-8")
+
+    # 底账快照:context 原样落盘——报告里的每个数字都能在这里逐位找到
+    # (这也是 06-02 跨运行对比的取数基础)。
+    (run_dir / "report_data.json").write_text(
+        json.dumps(context, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+
+    return {
+        "run_dir": run_dir,
+        "round_id": round_id,
+        "n_figures": n_figures,
+        "selected": context["metrics_raw"]["selected"],
+        "n_disclosures": len(context["disclosures"]),
     }

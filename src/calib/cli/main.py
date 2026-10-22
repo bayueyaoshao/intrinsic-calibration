@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +81,7 @@ from calib.noise.transfer import (
     fit_interp,
     save_transfer_curve,
 )
+from calib.report.build import run_report
 from calib.solve.baseline import build_object_points
 from calib.solve.matrix import run_calibration_matrix
 from calib.solve.observation import excluded_image_ids, load_observation_set
@@ -2349,7 +2351,40 @@ def analyze() -> None:
 
 @app.command(help="⑧ 汇总证据出报告:每一步的结论、图表、数据全部留痕可追溯")
 def report() -> None:
-    _not_implemented(8, "汇总证据出报告")
+    """组装并落盘 HTML+Markdown 证据链报告与机器可读底账 report_data.json。
+
+    只读各阶段最新一轮既有产物,组装与渲染全部交给 report/build.py 的一个
+    顶层函数(本命令体只管调用、清理与播报);缺哪路主文件就中文报错退出,
+    提示先跑对应命令。落 output/report/run_<时间戳>/ 四件:report.html、
+    report.md、report_data.json、figures/;新轮落盘成功后删更旧的轮,
+    只留最新两轮(上一轮是后续跨运行对比的读锚)。
+    """
+    typer.echo("第⑧步 汇总证据出报告:读七路上游最新轮,只组装不重算……")
+    result = run_report(OUTPUT_ROOT)
+    run_dir = result["run_dir"]
+
+    # 只留最新两轮:本轮 + 上一轮。删除永远发生在新快照落盘成功之后,
+    # 绝不先删后写——半路失败也不损失任何既有轮。
+    runs = sorted(p for p in (OUTPUT_ROOT / "report").glob("run_*") if p.is_dir())
+    for old in runs[:-2]:
+        shutil.rmtree(old)
+        typer.echo(f"  已清理更旧的报告轮:{old.name}(只留最新两轮)")
+
+    typer.echo(f"  当选模型:{result['selected'] or '—(见报告披露)'};"
+               f"图表 {result['n_figures']} 张;缺席披露 {result['n_disclosures']} 条")
+    typer.echo("  人工核查四要素指引:")
+    typer.echo(f"  1) 看哪个文件:{run_dir / 'report.html'}(浏览器直接打开;"
+               f"同目录 report.md 是纯文本版,report_data.json 是机器可读底账)。")
+    typer.echo("  2) 文件作用:九节证据链报告——结论速览、数据与体检、角点、噪声底、"
+               "理论极限、防作弊考试、误差归因、回环建议、产物索引与血缘链;"
+               "报告里每个数字都能在 report_data.json 里逐位找到同值。")
+    typer.echo("  3) 具体看哪里:第①节开头「三判据判行」一行(泛化/稳定/逼近 CRLB "
+               "三项 PASS/FAIL 与综合判定);哪一节缺席,节首就有「缺席披露」行;"
+               "⑨节披露清单汇总全部缺席与失败轮。")
+    typer.echo("  4) 好坏判据:三判据全 PASS 且缺席披露为零,说明本批数据下结论齐整"
+               "可信;有 FAIL 先读第⑥⑦节对应表的 FAIL 项说明列;缺席披露只说明"
+               "「这段结论暂时没有」,不代表数值为 0——报告绝不冒充数值。")
+    typer.echo(f"  报告产物:{run_dir}")
 
 
 @app.command(help="run-all:一条命令按流水线顺序跑完已实现的全流程(未实现的阶段会说明)")

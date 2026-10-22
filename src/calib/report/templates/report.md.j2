@@ -1,0 +1,263 @@
+{#- 相机内参标定证据链报告(Markdown 版)。
+    与 HTML 模板同 context 同九节;纯文本格式不开自动转义(开转义会把正文
+    里的 & 改写成 &amp;),防篡改同样成立:本模板零本数据集数字,全部数字
+    与文案来自 context(report_data.json 与本报告逐位同源)。 -#}
+{% macro figs(marker) %}
+{% for fig in s9.figures if fig.section == marker %}
+![{{ fig.idx }} {{ fig.caption }}](figures/{{ fig.file }})
+
+*{{ fig.idx }} {{ fig.caption }}(来源:{{ fig.source }})*
+
+{% endfor %}
+{% endmacro -%}
+# 相机内参标定证据链报告
+
+生成时间:{{ created }}。本报告的每个数字都能在底账快照 report_data.json
+里逐位找到;图表全部编号引用各上游轮既有 PNG,报告层不新画。
+
+## 术语白话速查(先读这一段,正文术语首现不再重复解释)
+
+- **CRLB(理论精度下界)**:只考虑角点检测噪声时,每个内参的标准差物理上压不破的下界;实际标定越贴近下界,说明这批数据的潜力被用得越足。
+- **RMS(均方根误差)**:把一批误差先平方、取平均、再开方得到的「平均误差大小」;对个别大误差更敏感,是重投影误差的常用记分法。
+- **held-out(留出考试)**:留出一部分照片不参加训练、只用来打分,防止模型靠死记硬背训练题自夸。
+- **bootstrap(重抽样)**:反复换抽样姿势重新标定,看参数会挪动多大,量出经验上的晃动幅度。
+- **BIC(选型尺)**:给模型复杂度记罚分的打分尺,越小越好;防止靠堆参数刷成绩。
+- **血缘(血缘链)**:每个产物都登记「由哪些上游文件算出来」,像家谱一样可一路回查到原始照片。
+
+## {{ s1.title }}
+
+{% if s1.absent_note %}> 缺席披露:{{ s1.absent_note }}
+{% endif -%}
+{% if s1.verdict_line %}**{{ s1.verdict_line }}**
+{% endif -%}
+{% if s1.selected %}
+当选模型:**{{ s1.selected }}**{% if s1.params_source %}(内参来源:{{ s1.params_source }}){% endif %}
+{% endif -%}
+{% if s1.params_table %}
+| 参数 | 取值 | CRLB 理论下界 se | bootstrap 经验 σ | 重复张分组 σ |
+|---|---|---|---|---|
+{% for r in s1.params_table %}| {{ r.param }} | {{ r.value }} | {{ r.crlb_se }} | {{ r.bootstrap_std }} | {{ r.slice_std }} |
+{% endfor %}
+{{ s1.crlb_caliber_note }}
+{% endif -%}
+{% if s1.test_rms_line %}{{ s1.test_rms_line }}
+{% endif -%}
+{% if s1.physical_line %}{{ s1.physical_line }}
+{% endif -%}
+{% if s1.verdict_items %}
+| 判据 | 判定 | 说明 |
+|---|---|---|
+{% for v in s1.verdict_items %}| {{ v.name }} | {{ v.state }} | {{ v.note }} |
+{% endfor %}
+{% endif -%}
+{% if s1.reason %}选型理由:{{ s1.reason }}
+{% endif -%}
+{% if s1.walk_notes %}
+{% for w in s1.walk_notes %}{% if w %}- {{ w }}
+{% endif %}{% endfor %}
+{% endif -%}
+{% if s1.agreement_note %}{{ s1.agreement_note }}
+{% endif %}
+
+## {{ s2.title }}
+
+{% if s2.absent_note %}> 缺席披露:{{ s2.absent_note }}
+{% endif -%}
+{% for r in s2.rows %}- **{{ r.k }}**:{{ r.v }}
+{% endfor -%}
+{% if s2.visibility_rows %}
+
+两种检测器的检出率(检出成功率 = 成功找到全部角点的照片占比):
+
+| 数据组 | 经典 classic | 新款 sb |
+|---|---|---|
+{% for r in s2.visibility_rows %}| {{ r.split }} | {{ r.classic }} | {{ r.sb }} |
+{% endfor %}
+{% endif %}
+
+## {{ s3.title }}
+
+{% if s3.absent_note %}> 缺席披露:{{ s3.absent_note }}
+{% endif -%}
+{% if s3.det_rows %}
+| 数据组 | 逐检测器 检出数/总数(成功率) |
+|---|---|
+{% for r in s3.det_rows %}| {{ r.split }} | {{ r.cells | join(';') }} |
+{% endfor %}
+{% endif -%}
+{% if s3.sb_production_line %}{{ s3.sb_production_line }}
+{% endif -%}
+{% if s3.burst_line %}{{ s3.burst_line }}
+{% endif -%}
+{% if s3.burst_rows %}
+| 检测器 | 姿态 | 组内波动(超出容差才点名) |
+|---|---|---|
+{% for r in s3.burst_rows %}| {{ r.detector }} | {{ r.pose_id }} | {{ r.spread }} |
+{% endfor %}
+{% endif -%}
+{% if s3.corner_opt_note %}角点寻优定案:{{ s3.corner_opt_note }}
+{% endif -%}
+{% if s3.corner_opt_absent_note %}> 缺席披露:{{ s3.corner_opt_absent_note }}
+{% endif %}
+{{ figs('③') }}
+## {{ s4.title }}
+
+{% if s4.absent_note %}> 缺席披露:{{ s4.absent_note }}
+{% endif -%}
+{% for r in s4.rows %}- **{{ r.k }}**:{{ r.v }}
+{% endfor %}
+{{ figs('④') }}
+## {{ s5.title }}
+
+{% if s5.absent_note %}> 缺席披露:{{ s5.absent_note }}
+{% endif -%}
+{{ s5.intro }}
+{% if s5.rows %}
+| 模型 | CRLB 中位数 se(px) | 条件数 | 档位 |
+|---|---|---|---|
+{% for r in s5.rows %}| {{ r.model }} | {{ r.median_se }} | {{ r.cond }} | {{ r.flag }} |
+{% endfor %}
+{{ s5.obs_note }}
+{% endif -%}
+{% for line in s5.selected_lines %}{{ line }}
+{% endfor %}
+{{ figs('⑤') }}
+## {{ s6.title }}
+
+{% if s6.absent_note %}> 缺席披露:{{ s6.absent_note }}
+{% endif -%}
+{% if s6.verdict_line %}**{{ s6.verdict_line }}**
+{% endif -%}
+{{ s6.intro }}
+{% if s6.thresholds_line %}{{ s6.thresholds_line }}
+{% endif -%}
+{% if s6.rank_rows %}
+
+test 独立考题排名(按整体 RMS 升序):
+
+| 模型 | test 整体 RMS(px) | 备注 |
+|---|---|---|
+{% for r in s6.rank_rows %}| {{ r.model }} | {{ r.test_rms }} | {{ r.mark }} |
+{% endfor %}
+{{ s6.rank_note }}
+{% endif -%}
+{% if s6.verdict_rows %}
+
+三判据判行表:
+
+| 模型 | held-out(px) | train(px) | 过拟合比 | 位移当量(px) | BIC | 判定 | FAIL 项 |
+|---|---|---|---|---|---|---|---|
+{% for r in s6.verdict_rows %}| {{ r.model }} | {{ r.heldout }} | {{ r.train }} | {{ r.overfit }} | {{ r.disp }} | {{ r.bic }} | {{ r.overall }} | {{ r.failed }} |
+{% endfor %}
+{% endif -%}
+{% if s6.exp_lines %}
+
+四类实验规模(各自量一种「换数据后会不会变」):
+
+{% for line in s6.exp_lines %}- {{ line }}
+{% endfor %}
+{% endif -%}
+{% if s6.delivery_lines %}
+
+交付内参(全体训练照片上重训的最终参数):
+
+{% for line in s6.delivery_lines %}- {{ line }}
+{% endfor %}
+{% endif -%}
+{% if s6.agreement_note %}{{ s6.agreement_note }}
+{% endif -%}
+{% if s6.three_criteria_note %}{{ s6.three_criteria_note }}
+{% endif %}
+{{ figs('⑥') }}
+## {{ s7.title }}
+
+{% if s7.absent_note %}> 缺席披露:{{ s7.absent_note }}
+{% endif -%}
+{% if s7.verdict_line %}**{{ s7.verdict_line }}**
+{% endif -%}
+{% if s7.intro %}{{ s7.intro }}
+{% endif -%}
+{% if s7.budget_rows %}
+| 参数 | 重复张分组 σ(px) | bootstrap σ | 换姿态 σ | 多起点位移 | CRLB 下界 se | 利用率 |
+|---|---|---|---|---|---|---|
+{% for r in s7.budget_rows %}| {{ r.param }} | {{ r.empirical_px }} | {{ r.bootstrap }} | {{ r.pose_sampling }} | {{ r.multistart }} | {{ r.crlb_se }} | {{ r.utilization }} |
+{% endfor %}
+{% endif -%}
+{% if s7.ratios_line %}{{ s7.ratios_line }}
+{% endif -%}
+{% if s7.recheck_line %}{{ s7.recheck_line }}
+{% endif -%}
+{% if s7.coverage_line %}{{ s7.coverage_line }}
+{% endif -%}
+{% if s7.extrapolation_note %}> {{ s7.extrapolation_note }}
+{% endif -%}
+{% if s7.band_rows %}
+
+残差随半径分带(离画面中心越远要求越严):
+
+| 半径带 | 残差数 | RMS(px) | 最大(px) |
+|---|---|---|---|
+{% for r in s7.band_rows %}| {{ r.band }} | {{ r.n }} | {{ r.rms }} | {{ r.max }} |
+{% endfor %}
+{% endif -%}
+{% if s7.test_xyz_lines %}
+
+test 三分量位移分解:
+
+{% for line in s7.test_xyz_lines %}- {{ line }}
+{% endfor %}
+{% endif -%}
+{% for line in s7.test_xyz_notes %}- {{ line }}
+{% endfor -%}
+{% if s7.advice_items %}
+
+应对建议(只提示方向,不自动执行):
+
+| 方向 | 证据 | 建议 |
+|---|---|---|
+{% for a in s7.advice_items %}| {{ a.direction }} | {{ a.evidence }} | {{ a.advice }} |
+{% endfor %}
+{% endif -%}
+{% if s7.uniqueness_line %}{{ s7.uniqueness_line }}
+{% endif -%}
+{% if s7.uniqueness_note %}{{ s7.uniqueness_note }}
+{% endif -%}
+{% if s7.anisotropy_line %}{{ s7.anisotropy_line }}
+{% endif -%}
+{% if s7.anisotropy_plain %}{{ s7.anisotropy_plain }}
+{% endif %}
+{{ figs('⑦') }}
+## {{ s8.title }}
+
+{{ s8.placeholder }}
+
+## {{ s9.title }}
+
+### 血缘链(七路上游,每轮产物由哪些文件算出来的)
+
+| 阶段 | 轮次 | 主文件 | 生成时间 | 上游状态 |
+|---|---|---|---|---|
+{% for c in s9.chain %}| {{ c.stage }} | {{ c.run }} | {{ c.main_file }} | {{ c.created }} | {{ c.upstream_status }} |
+{% endfor %}
+
+### 图表总索引(编号与正文引用一致;源图已复制进 figures/)
+
+{% for fig in s9.figures %}- **{{ fig.idx }}**({{ fig.section }}){{ fig.caption }}——来源:{{ fig.source }} {{ fig.file }}
+{% endfor %}
+{% if not s9.figures %}> 本轮没有任何一张图表在盘上,图表索引为空。
+{% endif %}
+
+{% if disclosures %}
+### 披露清单(缺席段、失败轮、已清理上游;如实记录,不冒充数值)
+
+{% for d in disclosures %}- **{{ d.kind }}**({{ d.where }}):{{ d.text }}
+{% endfor %}
+{% else %}
+本轮无缺席披露:七路上游全部到齐、无失败轮、血缘链登记的上游文件都在盘。
+{% endif %}
+
+{{ s9.reuse_line }}
+
+---
+
+由 calib report 生成;底账 report_data.json 与本报告逐位同源,跨运行对比以底账为准。
