@@ -1,5 +1,6 @@
 """误差归因阶段的出图:ANA-01 预算图 + ANA-02 残差两张空间图
-+ ANA-03 三分量对比图 + ANA-04 敏感度排序图与补拍预演图。
++ ANA-03 三分量对比图 + ANA-04 敏感度排序图与补拍预演图
++ COR-02 角点寻优双口径曲线 + COR-03 各向异性地图与直方图。
 
 matplotlib Agg 后端直接写 PNG(离线批处理:不弹窗、不依赖显示服务),
 模块头三件套照 evaluate_figs.py(Agg 先于 pyplot、中文字体、unicode_minus)。
@@ -687,6 +688,162 @@ def plot_corner_opt_curves(corner_opt_section: dict | None, out_path: Path | str
         for ax in axes:
             ax.text(0.5, 0.5, "无有效观测", ha="center", va="center",
                     fontsize=12, color="#777777", transform=ax.transAxes)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# COR-03:连拍各向异性地图 + 直方图
+# ---------------------------------------------------------------------------
+
+def plot_anisotropy_map(anisotropy_section: dict | None,
+                        uv_all: np.ndarray | None,
+                        out_path: Path | str) -> Path:
+    """把连拍各向异性画成 88 角点的画面地图(PNG),返回图路径。
+
+    输入:anisotropy 段(逐角点中位各向异性 per_corner_median_aniso、
+    r 归一化基准 fx/fy/cx/cy 与画面尺寸都是段内现成键)+ train 全部观测
+    角点像素坐标 uv_all(V, 点数, 2,由调用方传入)。图上叠:
+    - 观测足迹浅色底(拍到过哪里,与 05-03 覆盖足迹图同一画法);
+    - 逐角点散点着色,色标 = σu/σv(横纵重复散布之比,越接近 1 越对称);
+    - r 等值线(虚线椭圆,与覆盖足迹图同档位);
+    - 画面象限分界线(主点 cx/cy 的横竖虚线,与 by_quadrant 的分界一致)。
+
+    段缺席(None)或 uv_all 为空时不冒充数据:画"无数据"文字标注。
+    图是可视化,数字结论以 analyze.json 的 anisotropy 段为准。
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    section = anisotropy_section or {}
+    per_corner = section.get("per_corner_median_aniso") or []
+    pts = np.asarray(uv_all, dtype=np.float64) if uv_all is not None \
+        else np.zeros((0, 2), dtype=np.float64)
+    fig, ax = plt.subplots(figsize=(8.5, 6.0))
+
+    if not per_corner or pts.ndim != 3 or pts.shape[0] == 0 \
+            or "r_normalization_params" not in section:
+        ax.text(0.5, 0.5, "无数据", ha="center", va="center",
+                fontsize=14, color="#777777", transform=ax.transAxes)
+        ax.set_axis_off()
+        fig.suptitle("连拍各向异性地图:横纵重复散布之比(σu/σv)", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    norm = section["r_normalization_params"]
+    fx, fy = float(norm["fx"]), float(norm["fy"])
+    cx, cy = float(norm["cx"]), float(norm["cy"])
+    width, height = (int(x) for x in section.get("image_size") or (0, 0))
+    n_points = len(per_corner)
+    corner_pos = np.median(pts[:, :n_points, :], axis=0)     # (88, 2)
+    values = np.asarray(
+        [np.nan if v is None else float(v) for v in per_corner],
+        dtype=np.float64)
+
+    # ---- 观测足迹浅色底(与 05-03 覆盖足迹图同一画法)----
+    ax.scatter(pts[:, :, 0].ravel(), pts[:, :, 1].ravel(), s=4,
+               color="#1f77b4", alpha=0.15, zorder=1, label="观测足迹(浅色底)")
+
+    # ---- 逐角点各向异性散点着色 ----
+    sc = ax.scatter(corner_pos[:, 0], corner_pos[:, 1], c=values, s=46,
+                    cmap="viridis", vmin=0.5, vmax=max(1.5, float(
+                        np.nanmax(values[np.isfinite(values)])
+                        if np.isfinite(values).any() else 1.5)),
+                    zorder=3, label="角点(颜色 = σu/σv)")
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.85)
+    cbar.set_label("各向异性 σu/σv(1 = 横纵对称)")
+
+    # ---- r 等值线(虚线椭圆,与覆盖足迹图同档位)----
+    theta = np.linspace(0.0, 2.0 * np.pi, 181)
+    for i, r_val in enumerate(_R_CONTOUR_VALUES):
+        ax.plot(cx + fx * r_val * np.cos(theta), cy + fy * r_val * np.sin(theta),
+                linestyle="--", linewidth=0.9, color="#7f7f7f", zorder=2,
+                label=f"r = {r_val:g} 等值线" if i == 0 else None)
+    ax.plot([], [], linestyle="--", color="#7f7f7f",
+            label="r 等值线(0.4 / 0.5 / 0.685 / 0.75)")
+
+    # ---- 画面象限分界线(与 by_quadrant 的 cx/cy 分界一致)----
+    ax.axvline(cx, linestyle=":", color="#555555", linewidth=1.0, zorder=2,
+               label="象限分界(主点 cx/cy)")
+    ax.axhline(cy, linestyle=":", color="#555555", linewidth=1.0, zorder=2)
+
+    if width > 0 and height > 0:
+        x_lo = min(0.0, float(np.nanmin(pts[:, :, 0]))) - 0.05 * width
+        x_hi = max(float(width - 1), float(np.nanmax(pts[:, :, 0]))) + 0.05 * width
+        y_lo = min(0.0, float(np.nanmin(pts[:, :, 1]))) - 0.05 * height
+        y_hi = max(float(height - 1), float(np.nanmax(pts[:, :, 1]))) + 0.05 * height
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_hi, y_lo)  # 图像坐标 v 朝下,倒轴照片方向才对
+        ax.set_aspect("equal", adjustable="box")  # 像素等比,不动数据范围
+
+    basis = str(section.get("r_normalization_basis") or "未知基准")
+    ax.set_xlabel("u(px)")
+    ax.set_ylabel("v(px)")
+    ax.set_title(f"各向异性地图:每个角点横纵重复散布之比\n"
+                 f"r 归一化基准:{basis}", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=7)
+    fig.suptitle("连拍各向异性地图:横纵重复散布之比(σu/σv)", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def plot_anisotropy_hist(anisotropy_section: dict | None,
+                         out_path: Path | str) -> Path:
+    """把各向异性分布画成直方图(PNG),返回图路径。
+
+    输入是 analyze.json 的 anisotropy 段(aniso_hist 边界与计数都是段内
+    现成键,run 侧全域 40 桶不截尾)。1.0 参考竖线 = 横纵完全对称,
+    1.5 参考竖线 = 显著各向异性判读线(与 summary.significant_line 同值)。
+
+    段缺席(None)或无直方图数据时不冒充数据:画"无数据"文字标注。
+    图是可视化,数字结论以 analyze.json 的 anisotropy 段为准。
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    section = anisotropy_section or {}
+    hist = section.get("aniso_hist") or {}
+    counts = hist.get("counts") or []
+    fig, ax = plt.subplots(figsize=(8.5, 5.0))
+
+    if not counts or not hist.get("edges"):
+        ax.text(0.5, 0.5, "无数据", ha="center", va="center",
+                fontsize=14, color="#777777", transform=ax.transAxes)
+        ax.set_axis_off()
+        fig.suptitle("连拍各向异性分布:全部有效(姿态, 角点)的 σu/σv",
+                     fontsize=12)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        return out_path
+
+    edges = np.asarray(hist["edges"], dtype=np.float64)
+    counts_arr = np.asarray(counts, dtype=np.float64)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    ax.bar(centers, counts_arr, width=np.diff(edges), color="#1f77b4",
+           alpha=0.75, label="有效(姿态, 角点)个数")
+    ax.axvline(1.0, linestyle="--", color="#2ca02c", linewidth=1.3,
+               label="1.0 = 横纵完全对称")
+    sig = float((section.get("summary") or {}).get("significant_line") or 1.5)
+    ax.axvline(sig, linestyle="--", color="#d62728", linewidth=1.3,
+               label=f"{sig:g} = 显著各向异性判读线")
+    median = (section.get("summary") or {}).get("median")
+    if median is not None:
+        ax.axvline(float(median), linestyle=":", color="#ff7f0e", linewidth=1.5,
+                   label=f"中位 {float(median):.2f}")
+    ax.set_xlabel("各向异性 σu/σv(横向散布 ÷ 纵向散布)")
+    ax.set_ylabel("个数")
+    n_values = hist.get("n_values")
+    ax.set_title(f"各向异性分布(共 {n_values} 个有效值,全域不截尾)\n"
+                 "接近 1 = 横纵对称;越大于 1 = 横向越散", fontsize=9)
+    ax.legend(loc="best", fontsize=8)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.suptitle("连拍各向异性分布:全部有效(姿态, 角点)的 σu/σv", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path

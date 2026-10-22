@@ -20,6 +20,9 @@ fisher/evaluate 上游产物,日常开发用 `uv run pytest -m "not integration"
    (stats._self 主口径 / _prod_sb 旁证)× 三族退化单元,校准档
    自参照 RMS 恰为 0;明细旁车 analysis/corner_opt.npz 与双口径
    曲线图在盘。
+6. COR-03 连拍各向异性(05-06 接入):纯消费时域 npz 的 80 个真连拍
+   姿态(无 immerkaert_transfer 来源行可排除),σu/σv 逐点比值有值;
+   明细旁车 analysis/anisotropy.npz 与地图/直方图两张证据图在盘。
 另:明细旁车 analysis/budget.npz(逐行底账 14080 行)与证据图
 figures/budget_bars.png 在盘;CLI 播报层由单元测试覆盖,本文件不重复。
 
@@ -138,7 +141,7 @@ def analyze_tree() -> dict:
 
 def test_analyze_sections_shape_and_selected_model(analyze_tree: dict):
     """契约形状:budget / residual_structure / test_xyz / sensitivity /
-    corner_opt 五段有值,块 6 显式缺位(None)并进 meta.missing_sections;
+    corner_opt / anisotropy 六段全有值,meta.missing_sections 为空;
     目标模型与 evaluate 选型结论一致(m2)。"""
     report = analyze_tree["report"]
     budget = report["budget"]
@@ -148,9 +151,11 @@ def test_analyze_sections_shape_and_selected_model(analyze_tree: dict):
         "residual_structure 段缺席(残差方向分解没跑成)"
     assert isinstance(report["corner_opt"], dict) and report["corner_opt"], \
         "corner_opt 段缺席(角点退化寻优没跑成,见该轮 CLI 播报的失败理由)"
-    assert report["anisotropy"] is None, \
-        "anisotropy 段应由 05-06 计划接入,当前必须显式为 None"
-    assert set(report["meta"]["missing_sections"]) == {"anisotropy"}
+    assert isinstance(report["anisotropy"], dict) and report["anisotropy"], \
+        "anisotropy 段缺席(连拍各向异性没跑成,见该轮 CLI 播报的失败理由)"
+    assert report["meta"]["missing_sections"] == [], \
+        "六块全链接入后不应再有缺席段,实际 " \
+        f"{report['meta']['missing_sections']}"
     assert report["meta"]["selected_model"] == "m2", \
         f"目标模型应与 evaluate 选型结论一致,实际 {report['meta']['selected_model']!r}"
     assert budget["schema"] == "analyze-budget-v1"
@@ -160,6 +165,7 @@ def test_analyze_sections_shape_and_selected_model(analyze_tree: dict):
     assert report["test_xyz"]["schema"] == "analyze-test-xyz-v1"
     assert report["sensitivity"]["schema"] == "analyze-sensitivity-v1"
     assert report["corner_opt"]["schema"] == "analyze-corner-opt-v1"
+    assert report["anisotropy"]["schema"] == "analyze-anisotropy-v1"
     assert "delivery" in report["meta"]["r_normalization_basis"], \
         "r 归一化基准必须随 meta 透传(跨轮比较先对齐口径)"
     assert residual["r_normalization_baseline_check"]["status"] == "consistent", \
@@ -248,7 +254,7 @@ def test_analyze_residual_sidecars_and_figures(analyze_tree: dict):
 
 
 def test_analyze_blocks_2345_use_stage_and_budget_stays_direct():
-    """源码断言(接线体例):块 2/3/4/5 包在 _stage 里(单块失败记 None
+    """源码断言(接线体例):块 2–6 包在 _stage 里(单块失败记 None
     照常出报告),块 1 预算依旧直调不套兜底(铁律违例必须退出码 1)——
     两种失败语义不许混。"""
     import inspect
@@ -257,10 +263,12 @@ def test_analyze_blocks_2345_use_stage_and_budget_stays_direct():
 
     source = inspect.getsource(cli_main.analyze)
     for call in ('_stage("残差方向分解"', '_stage("test 三分量分解"',
-                 '_stage("参数敏感度排序"', '_stage("角点退化寻优"'):
+                 '_stage("参数敏感度排序"', '_stage("角点退化寻优"',
+                 '_stage("连拍各向异性"'):
         assert call in source, f"{call} 缺席:诊断块必须走 _stage 逐块兜底"
     assert "run_residual_structure" in source and "run_budget(" in source
     assert "run_corner_opt(" in source, "块 5 必须调 run_corner_opt"
+    assert "run_anisotropy(" in source, "块 6 必须调 run_anisotropy(纯消费)"
     # budget 直调:run_budget 的调用行不许出现在 _stage 调用行上
     for line in source.splitlines():
         if "run_budget(" in line:
@@ -401,6 +409,73 @@ def test_analyze_corner_opt_section(analyze_tree: dict):
         "双口径两张曲线图都在盘(裁定①:图也分口径)"
     print(f"[产物] corner_opt.npz({n_expected} 行)+ corner_opt_self.png "
           "+ corner_opt_prodsb.png 在盘")
+
+
+def test_analyze_anisotropy_section(analyze_tree: dict):
+    """COR-03 真实数据:80 个姿态全部是真连拍(immerkaert_transfer 来源
+    零行可排除,Pitfall 9 过滤器空转留痕)、无坏值行;σu/σv 比值全部
+    落在物理合理区间 (0, 10);分带/象限切片非空且逐带计数对得上;
+    白话判读带物理量级;互证行点各向异性名;明细旁车 anisotropy.npz
+    行数 = 姿态 × 角点,与地图/直方图两张证据图都在盘。"""
+    section = analyze_tree["report"]["anisotropy"]
+    assert section["n_poses_total"] == 80, \
+        f"时域 npz 应有 80 个姿态,实际 {section['n_poses_total']}"
+    assert section["n_temporal_poses"] == 80, \
+        f"应全部为真连拍来源,实际 {section['n_temporal_poses']}"
+    assert section["n_excluded_sources"] == 0, \
+        "本数据无 immerkaert_transfer 来源行,排除计数应为 0(过滤器留痕)"
+    assert section["excluded_source_list"] == []
+    assert section["n_excluded_nan"] == 0, \
+        "本数据时域 npz 无 NaN 行,坏值排除计数应为 0"
+    assert section["sigma_detector_floor_px"] == pytest.approx(0.008708, abs=1e-4), \
+        "防零除下限必须是检测器级 σ(CRLB 口径铁律)"
+
+    s = section["summary"]
+    assert s["median"] is not None and 0.0 < s["median"] < 10.0, \
+        f"σu/σv 中位比应在物理合理区间,实际 {s['median']}"
+    assert s["p90"] is not None and s["max"] is not None and s["max"] >= s["p90"] >= s["median"]
+    assert s["sigma_u_median"] > 0 and s["sigma_v_median"] > 0
+    assert s["significant_line"] == 1.5
+    assert s["n_aniso_gt_1p5"] >= 0
+    for pos in s["aniso_gt_1p5_positions"]:
+        assert {"point_idx", "row", "col", "median_aniso"} <= set(pos)
+
+    # 分带与象限切片:行数与边界一致、逐带计数有值
+    edges = section["band_edges"]
+    assert len(section["by_band"]) == len(edges) - 1
+    assert len(section["by_quadrant"]) == 4
+    n_values_bands = sum(b["n_values"] for b in section["by_band"])
+    n_values_quads = sum(q["n_values"] for q in section["by_quadrant"])
+    n_expected = 80 * 88 - section["n_excluded_nan"]
+    assert n_values_bands == n_expected, \
+        f"分带计数合计应 {n_expected},实际 {n_values_bands}"
+    assert n_values_quads == n_expected, \
+        f"象限计数合计应 {n_expected},实际 {n_values_quads}"
+
+    # 白话判读 + 互证行
+    plain = section["plain_language"]
+    assert "接近 1" in plain and "物理量级" in plain, \
+        "白话判读必须有像素判读与物理量级参照两段"
+    assert "sb" in section["cross_ref"], \
+        "互证行应引用角点寻优生产配置 sb 的 u/v 分量方向"
+
+    # 明细旁车 + 证据图
+    run_dir = analyze_tree["run_dir"]
+    npz_path = run_dir / "analysis" / "anisotropy.npz"
+    assert npz_path.is_file(), "anisotropy.npz 逐姿态逐角点底账必须在盘"
+    with np.load(npz_path, allow_pickle=False) as data:
+        assert data["aniso"].shape == (80, 88), \
+            f"明细应 (80, 88)(姿态 × 角点),实际 {data['aniso'].shape}"
+        assert data["sigma_uv"].shape == (80, 88, 2)
+        assert data["valid_mask"].shape == (80, 88)
+        assert data["pose_ids"].shape == (80,)
+    assert (run_dir / "figures" / "anisotropy_map.png").is_file()
+    assert (run_dir / "figures" / "anisotropy_hist.png").is_file()
+    print(f"\n[COR-03] 80 姿态 × 88 角点;σu/σv 中位 {s['median']:.2f},"
+          f"显著(>1.5){s['n_aniso_gt_1p5']} 处;"
+          f"判读:{plain[:70]}……")
+    print("[产物] anisotropy.npz(80×88)+ anisotropy_map.png "
+          "+ anisotropy_hist.png 在盘")
 
 
 def test_analyze_budget_recheck_consistent_and_zero_violations(analyze_tree: dict):

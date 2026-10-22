@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 import typer
 
+from calib.analysis.anisotropy import run_anisotropy
 from calib.analysis.artifacts import (
     SCHEMA_VERSION_ANALYZE,
     make_failure_analyze,
@@ -85,6 +86,8 @@ from calib.solve.observation import excluded_image_ids, load_observation_set
 from calib.solve.scoring import review_suspects
 from calib.util.lineage import make_lineage
 from calib.visualization.analyze_figs import (
+    plot_anisotropy_hist,
+    plot_anisotropy_map,
     plot_budget_bars,
     plot_corner_opt_curves,
     plot_coverage_footprint,
@@ -1816,7 +1819,7 @@ def evaluate() -> None:
 
 @app.command(help="⑦ 误差归因:实际误差 vs 理论极限,差在哪个方向、哪一环、还有没有优化空间")
 def analyze() -> None:
-    """流水线第⑦步:误差归因一条龙(误差预算先行,诊断块逐计划接入)。
+    """流水线第⑦步:误差归因一条龙(误差预算先行,六块全链)。
 
     步骤:读配置 → 上游六轮定位(corners / noise / calibration / fisher /
     evaluate 各找最新一轮,数据清单沿角点血缘取同轮那份;缺文件或失败轮
@@ -1824,10 +1827,11 @@ def analyze() -> None:
     (quick 档实验明细只有当选模型,一切明细键按它拼)→ 血缘登记:全部
     上游产物一次登记进指纹,防串轮 → 六块执行区:块 1 误差预算直调
     (刻意不套逐块兜底——实测低于理论下界的铁律硬报错必须冒泡到外层,
-    失败契约落盘后退出码 1);块 2–5 残差方向分解 / test 三分量分解 /
+    失败契约落盘后退出码 1);块 2–6 残差方向分解 / test 三分量分解 /
     参数敏感度排序 / 角点退化寻优(块 5 是唯一重计算块,把真实照片
-    逐张加噪/模糊/降对比后用候选配置重新提角点;单块失败该段记 None,
-    不中断其余分析块);块 6 留位(由 05-06 计划接入)→
+    逐张加噪/模糊/降对比后用候选配置重新提角点)/ 连拍各向异性(块 6
+    纯消费:原料是阶段三已落盘的逐角点重复性,只按 temporal 来源过滤
+    统计横纵散布之比;单块失败该段记 None,不中断其余分析块)→
     analyze.json + analysis/*.npz 明细旁车 + 证据图落盘
     (图失败只播报不拦主产物)→ 中途失败也照常落盘失败契约再退出码 1 →
     打印中文汇总与人工核查四要素指引。
@@ -1952,8 +1956,9 @@ def analyze() -> None:
         ref_rvec = np.asarray(data["rvecs"][0], dtype=np.float64)
         ref_tvec = np.asarray(data["tvecs"][0], dtype=np.float64)
 
-    typer.echo(f"开始误差归因:目标模型 {model_id}(误差预算先行,"
-               f"残差方向分解随行,其余诊断块逐计划接入)……")
+    typer.echo(f"开始误差归因:目标模型 {model_id}(六块全链:误差预算 → "
+               f"残差方向分解 → test 三分量 → 参数敏感度 → 角点退化寻优 → "
+               f"连拍各向异性)……")
     typer.echo(f"  档位:{profile_note}")
     typer.echo(f"  上游:corners {corners_run.name} / noise {noise_run.name} / "
                f"calibration {calib_run.name} / fisher {fisher_run.name} / "
@@ -1962,7 +1967,7 @@ def analyze() -> None:
     # ---- 六块执行区:块 1 误差预算直调(刻意不套逐块兜底——实测低于
     # 理论下界的铁律硬报错必须冒泡到外层失败契约,退出码 1,不静默);
     # 块 2 起用 _stage 逐块兜底(照 evaluate 体例:单块失败该段记 None,
-    # 不中断其余分析块);块 6 显式置 None 留位(由 05-06 计划接入)----
+    # 不中断其余分析块;块 6 连拍各向异性纯消费上游,同样逐块兜底)----
     def _stage(name: str, run):
         try:
             return run()
@@ -2052,13 +2057,35 @@ def analyze() -> None:
             sigma_detector)
 
     corner_opt: dict | None = None
-    anisotropy = None           # 块 6 连拍各向异性(由 05-06 计划接入)
     typer.echo("  块 5 角点退化寻优是本命令唯一重计算块(真实照片逐张加噪/"
                "模糊/降对比后重新提角点;quick 档约 15–40 分钟,"
                f"并行上限 {cfg.analyze.analyze_max_workers} 进程)……")
     block5 = _stage("角点退化寻优", _block_corner_opt)
     if block5 is not None:
         corner_opt, corner_opt_detail = block5
+
+    def _block_anisotropy():
+        """块 6 取数 + 连拍各向异性(纯消费块:原料是阶段三已落盘的逐角点
+        重复性;train 观测集给空间切片的角点像素坐标,取数也在块内,
+        角点装不下只垮这一块)。检测器级 σ 下限由 noise.json 读入传入,
+        corner_opt 段在盘时给互证行引用其 u/v 分量方向。"""
+        obs_train = load_observation_set(
+            corners_run / "corners_train_sb.npz", manifest_path, board,
+            split="train", exclude_images=tuple(cfg.exclude_images))
+        section, detail = run_anisotropy(
+            model_id, evaluate_report,
+            noise_run / "temporal_sigma_per_corner.npz", obs_train, board,
+            cfg, sigma_detector_floor=sigma_detector,
+            corner_opt_section=corner_opt)
+        uv_train = np.asarray(obs_train.image_points, dtype=np.float64)
+        return section, detail, uv_train
+
+    anisotropy: dict | None = None
+    anisotropy_detail: dict | None = None
+    anisotropy_uv_train: np.ndarray | None = None
+    block6 = _stage("连拍各向异性", _block_anisotropy)
+    if block6 is not None:
+        anisotropy, anisotropy_detail, anisotropy_uv_train = block6
     try:
         budget_section, budget_detail = run_budget(
             model_id, evaluate_report,
@@ -2121,6 +2148,8 @@ def analyze() -> None:
         report["_sensitivity_detail"] = sensitivity_detail
     if corner_opt is not None:
         report["_corner_opt_detail"] = corner_opt_detail
+    if anisotropy is not None:
+        report["_anisotropy_detail"] = anisotropy_detail
     paths = save_analyze_report(out_dir, report, lineage)
 
     # ---- 证据图(附加产物:单张失败只播报,不拦主产物)----
@@ -2181,6 +2210,20 @@ def analyze() -> None:
             except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
                 typer.echo(f"  {fig_name}未生成(不影响数据产物):"
                            f"{type(e).__name__}——{e}")
+    if anisotropy is not None:
+        for fig_name, plot_it in (
+            ("各向异性地图", lambda: plot_anisotropy_map(
+                anisotropy, anisotropy_uv_train,
+                figures_dir / "anisotropy_map.png")),
+            ("各向异性直方图", lambda: plot_anisotropy_hist(
+                anisotropy, figures_dir / "anisotropy_hist.png")),
+        ):
+            try:
+                plot_it()
+                n_figs += 1
+            except Exception as e:  # noqa: BLE001  故意宽接:图是附加产物
+                typer.echo(f"  {fig_name}未生成(不影响数据产物):"
+                           f"{type(e).__name__}——{e}")
 
     # ---- 中文汇总 + 人工核查四要素指引 ----
     typer.echo("误差归因完成,analyze.json 与预算证据已写盘。")
@@ -2228,9 +2271,17 @@ def analyze() -> None:
             f"{corner_opt['n_methods']} 方法 × {corner_opt['n_units']} 退化单元"
             f"(双口径 stats._self / _prod_sb 并排{tasks_bit});"
             f"判读:{corner_opt['verdict_note'][:80]}……全文见 corner_opt 段")
+    if anisotropy is not None:
+        a_sum = anisotropy["summary"]
+        typer.echo(
+            f"  连拍各向异性:{anisotropy['n_temporal_poses']} 个真连拍姿态"
+            f"(来源排除 {anisotropy['n_excluded_sources']} 个、坏值排除 "
+            f"{anisotropy['n_excluded_nan']} 行);σu/σv 中位比 "
+            f"{a_sum['median']:.2f},显著各向异性(>1.5)"
+            f"{a_sum['n_aniso_gt_1p5']} 处;白话判读见 anisotropy.plain_language")
     if partial:
-        typer.echo(f"  待接入的分析段({len(partial)} 个,报告记 None):"
-                   f"{'、'.join(partial)}——由 05-06 计划接入")
+        typer.echo(f"  记缺席的分析段({len(partial)} 个,报告记 None):"
+                   f"{'、'.join(partial)}——单块失败不中断,原因见上方回声")
     typer.echo("  人工核查四要素指引:")
     typer.echo(f"  1) 看哪个文件:{paths['analyze_json']}(主契约)与 "
                f"{out_dir / 'analysis' / 'budget.npz'}(逐行底账)与 "
@@ -2266,6 +2317,11 @@ def analyze() -> None:
                           "r 分带切片、verdict_note 中文判读、sb_accuracy_verdict "
                           "A1 销险结论、threshold_px 未显著劣化线;"
                           "analysis/corner_opt.npz 是逐角点位移底账)")
+    if anisotropy is not None:
+        where_to_look += (";anisotropy 段(summary 的 σu/σv 中位比与显著处数、"
+                          "by_band/by_quadrant 分带分象限点名、plain_language "
+                          "白话判读、cross_ref 与角点寻优的对账;"
+                          "analysis/anisotropy.npz 是逐姿态逐角点底账)")
     typer.echo(f"  3) 具体看哪里:{where_to_look}。")
     typer.echo("  4) 好坏判据:零违例(n_pointwise_violations = 0)且三个统计量"
                "比值全部不低于硬告警线(约 0.42)才算 pass;本数据的基准是实测"
@@ -2280,7 +2336,12 @@ def analyze() -> None:
                   "低于 threshold_px(10 × 检测器级 σ)算未显著劣化,生产位"
                   "sb 若在可比集里误差最小,当前配置就有数据背书,否则"
                   "verdict_note 会点名更稳的档位——只提示方向,切不切人工定。"
-                  if corner_opt is not None else ""))
+                  if corner_opt is not None else "")
+               + ("各向异性看一件事——σu/σv 接近 1 = 横竖方向定位能力对称,"
+                  "显著 >1.5 的区域 by_quadrant/by_band 会点名具体画面位置;"
+                  "若某方向的偏移与角点寻优的 u/v 分量结论互相印证,才考虑"
+                  "换角点方法(建议不自动执行)。"
+                  if anisotropy is not None else ""))
     typer.echo(f"  分析产物:{out_dir}")
     typer.echo(f"  汇总报告:{paths['analyze_json']}(明细旁车 "
                f"{len(paths['detail_npz'])} 份:analysis/)")

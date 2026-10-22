@@ -259,6 +259,30 @@ def test_analyze_rejects_failed_round_upstream(tmp_path, monkeypatch):
     assert "失败轮" in str(exc_info.value)
 
 
+def test_analyze_anisotropy_block_fallback(tmp_path, monkeypatch, capsys):
+    """块 6 兜底体例(直调注入):run_anisotropy 内部失败时命令照常返回
+    (退出码 0),anisotropy 段显式 None 并进 missing_sections,CLI 播报
+    「连拍各向异性未跑成」中文理由——单块失败不中断其余分析块。"""
+    _build_upstream_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("各向异性失败(测试注入)")
+
+    monkeypatch.setattr(cli_main, "run_anisotropy", _boom)
+    analyze()  # 不抛即成功(逐块兜底,退出码 0)
+
+    out_dir = _latest_analyze_run(tmp_path)
+    doc = json.loads((out_dir / "analyze.json").read_text(encoding="utf-8"))
+    assert doc["failure_note"] is None, "单块失败不是失败契约,主报告照常出"
+    assert doc["budget"] is not None and doc["corner_opt"] is None
+    assert doc["anisotropy"] is None, "兜底后 anisotropy 段必须显式 None"
+    assert "anisotropy" in set(doc["meta"]["missing_sections"])
+    out = capsys.readouterr().out
+    assert "连拍各向异性未跑成" in out, "播报必须点名该块与中文失败理由"
+    assert "不中断其余分析块" in out
+
+
 def test_analyze_signature_zero_params_and_lineage_covers_rounds():
     """D-12 源码断言:命令签名零算法参数;上游六轮全部登记进
     make_lineage 的 upstream 字典(血缘一次登记防串轮)。"""

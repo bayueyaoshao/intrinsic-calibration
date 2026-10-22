@@ -1,11 +1,11 @@
-"""COR-03 连拍各向异性库层测试(05-06 Task 1:temporal 过滤/防零除/分带复用)。
+"""COR-03 连拍各向异性测试(05-06:库层 temporal 过滤/防零除/分带复用 + 出图)。
 
 全部用合成 npz(tmp_path 落盘再读回,走与生产一致的 allow_pickle=False
 读回路径)+ 合成 train 观测集:σ 场已知比值、来源可控、NaN 可注入,
 每条判读都能手算对账。另含两道源码防线:分带器必须 import
 residual_structure 的 assign_bands(严禁第二份实现),以及源码里不得
-出现任何检测/投影字样(纯消费块红线)。出图函数测试随 Task 2
-(图函数与 CLI 接线一并落地)在本文件补齐。
+出现任何检测/投影字样(纯消费块红线)。出图函数四分支(有/无数据 ×
+地图/直方图)逐一落 PNG 验证。
 """
 
 from __future__ import annotations
@@ -377,5 +377,42 @@ def test_corner_count_mismatch_chinese_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 9) 出图函数测试见 Task 2(图函数与 CLI 接线一并落地后补)
+# 9) 出图函数:四分支(有数据/无数据 × 地图/直方图)都出 PNG
 # ---------------------------------------------------------------------------
+
+def _mini_section() -> dict:
+    """最小 anisotropy 段:8 个角点、两张照片,键结构与 run_anisotropy 一致。"""
+    per_corner = [1.0, 1.2, 0.9, 1.6, 1.1, 0.8, 1.3, None]
+    uv = np.empty((2, 8, 2), dtype=np.float64)
+    for i in range(8):
+        uv[:, i, 0] = 120.0 + 60.0 * (i % 4)
+        uv[:, i, 1] = 120.0 + 120.0 * (i // 4)
+    return {
+        "per_corner_median_aniso": per_corner,
+        "r_normalization_params": {"fx": 800.0, "fy": 800.0,
+                                   "cx": 240.0, "cy": 180.0},
+        "r_normalization_basis": "delivery final_params(与 ANA-02 同口径)",
+        "image_size": [480, 360],
+        "aniso_hist": {
+            "edges": list(np.linspace(0.5, 2.0, 41)),
+            "counts": [3, 5, 4, 2, 1] + [0] * 35,
+            "n_values": 15,
+        },
+        "summary": {"median": 1.1, "significant_line": 1.5,
+                    "n_aniso_gt_1p5": 1},
+    }, uv
+
+
+def test_plot_anisotropy_map_and_hist_with_and_without_data(tmp_path):
+    """地图与直方图各有"有数据/无数据"两分支:四张都落 PNG,文件非空。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    from calib.visualization.analyze_figs import plot_anisotropy_hist, plot_anisotropy_map
+
+    section, uv = _mini_section()
+    p_map = plot_anisotropy_map(section, uv, tmp_path / "map.png")
+    p_hist = plot_anisotropy_hist(section, tmp_path / "hist.png")
+    p_map_none = plot_anisotropy_map(None, None, tmp_path / "map_none.png")
+    p_hist_none = plot_anisotropy_hist({}, tmp_path / "hist_none.png")
+    for p in (p_map, p_hist, p_map_none, p_hist_none):
+        assert p.exists() and p.stat().st_size > 0
