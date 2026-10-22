@@ -511,7 +511,7 @@ def _write_evaluate(tmp_path: Path, text: str) -> Path:
 
 
 def test_evaluate_defaults_when_section_missing(tmp_path):
-    """evaluate 段整体缺省:25 个键全部走内置默认(契约一次定死)。"""
+    """evaluate 段整体缺省:26 个键全部走内置默认(契约一次定死)。"""
     p = tmp_path / "calibration.yaml"
     p.write_text("data:\n  train: a\n  test: b\n", encoding="utf-8")
     ev = load_calibration(p).evaluate
@@ -519,6 +519,8 @@ def test_evaluate_defaults_when_section_missing(tmp_path):
     assert ev.optimizer_losses == ("linear", "soft_l1", "huber", "cauchy")
     assert ev.cv_n_folds == 5
     assert ev.cv_n_rounds == 5
+    # 训练侧每姿态连拍数(2026-10-22 降载):默认 1 = 每姿态 1 张
+    assert ev.exposures_per_pose == 1
     assert ev.bootstrap_n == 200
     assert ev.slice_enabled is True
     assert ev.lopo_enabled is True
@@ -777,6 +779,26 @@ def test_evaluate_quick_lopo_zero_rejected(tmp_path):
     with pytest.raises(ValueError) as exc_info:
         load_calibration(p)
     assert "evaluate.quick_lopo_n" in str(exc_info.value)
+
+
+def test_evaluate_exposures_per_pose_bad_values_rejected(tmp_path):
+    """训练侧每姿态连拍数写 0 / -1 / true / 1.5:都会让训练侧为空或不是数,
+    配置层当场中文报错并点名 evaluate.exposures_per_pose(true 是 bool 伪装
+    整数的手写笔误,先拒)。"""
+    for bad in ("0", "-1", "true", "1.5"):
+        p = _write_evaluate(tmp_path, f"  exposures_per_pose: {bad}\n")
+        with pytest.raises(ValueError) as exc_info:
+            load_calibration(p)
+        assert "evaluate.exposures_per_pose" in str(exc_info.value), (
+            f"exposures_per_pose 写 {bad} 必须被拦下并点名键名"
+        )
+
+
+def test_evaluate_exposures_per_pose_legal_values_parse(tmp_path):
+    """合法值正常解析:1 = 每姿态 1 张(默认口径);8 = 带全部连拍(改前口径)。"""
+    for good, expected in (("1", 1), ("8", 8)):
+        p = _write_evaluate(tmp_path, f"  exposures_per_pose: {good}\n")
+        assert load_calibration(p).evaluate.exposures_per_pose == expected
 
 
 def test_evaluate_improve_min_out_of_range_rejected(tmp_path):

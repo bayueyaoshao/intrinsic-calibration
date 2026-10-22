@@ -44,6 +44,7 @@ from calib.evaluation.splitting import (
     bootstrap_resample,
     obs_rows,
     pose_row_mask,
+    slice_groups_by_index,
     unique_poses,
 )
 from calib.io.config import BoardSpec, CalibrationConfig
@@ -121,7 +122,11 @@ def test_cv_fold_samples_and_zero_overlap(cv_setup):
     """行为 1:小样 2 轮 × 2 折 × 2 模型跑通;每模型折级样本数 = 轮 × 折 = 4;
     每折训练/验证姿态零交集且并集 = 全体(明细里的分配表逐折断言)。"""
     s = cv_setup
-    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
+    # 训练侧保持每姿态 2 张(改前全连拍规模):本测试考的是折级记账与零
+    # 重叠,不考降载旋钮;小样合成数据上每姿态 1 张(3 行训练)会让 m2
+    # 触发"实用收敛"误报(小样数据现象),与被测语义无关
+    cfg = replace(s["cfg"], evaluate=replace(s["cfg"].evaluate, exposures_per_pose=2))
+    report = cv_pose_grouped(s["obs"], s["board"], cfg, s["optimizer_config"])
     assert report["schema"] == "cv-v1"
     assert set(report["models"]) == {"m1", "m2"}
 
@@ -180,7 +185,10 @@ def test_cv_pose_level_aggregation(cv_setup, monkeypatch):
         return np.zeros(3), np.zeros(3), registry[uv_view.tobytes()]
 
     monkeypatch.setattr(experiments_mod, "solve_pose_only", fake_solve_pose_only)
-    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
+    # 训练侧保持每姿态 2 张(改前全连拍规模):本测试考的是验证侧聚合算术,
+    # 不考降载旋钮(理由同 test_cv_fold_samples_and_zero_overlap)
+    cfg = replace(s["cfg"], evaluate=replace(s["cfg"].evaluate, exposures_per_pose=2))
+    report = cv_pose_grouped(s["obs"], s["board"], cfg, s["optimizer_config"])
 
     # 期望值从确定性分配表手算:姿态级 = 两张 RMS 的平均(相距 0.1,均值在正中)
     assignment = assign_cv_folds(unique_poses(s["obs"]), s["cfg"])
@@ -206,9 +214,15 @@ def test_cv_pose_level_aggregation(cv_setup, monkeypatch):
 
 def test_cv_validation_extrinsics_never_trained(cv_setup, monkeypatch):
     """行为 3(防泄漏第二层):验证姿态评分只经 solve_pose_only(计数 =
-    模型 × 折 × 每折验证姿态 × 每姿态张数);训练求解的观测集行数 =
-    训练姿态 × 2、不含任何验证姿态,且每次精化都带 rms_linear_ref。"""
+    模型 × 折 × 每折验证姿态 × 每姿态张数);训练求解的观测集不含任何
+    验证姿态,且每次精化都带 rms_linear_ref。"""
     s = cv_setup
+    # 训练侧保持每姿态 2 张(改前全连拍规模):评分计数的前提是全部折都
+    # 跑成(失败折不评分,见失败契约),小样合成数据上每姿态 1 张会让 m2
+    # 的折大面积触发"实用收敛"误报,与被测语义无关(理由同
+    # test_cv_fold_samples_and_zero_overlap);默认 1 张下的训练侧行数口径
+    # 由 test_cv_train_side_rows_scale_with_exposures_per_pose 另考
+    cfg = replace(s["cfg"], evaluate=replace(s["cfg"].evaluate, exposures_per_pose=2))
     pnp_calls: list[bytes] = []
     real_pnp = experiments_mod.solve_pose_only
 
@@ -227,7 +241,7 @@ def test_cv_validation_extrinsics_never_trained(cv_setup, monkeypatch):
 
     monkeypatch.setattr(experiments_mod, "solve_with_scipy", spy_solve)
 
-    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
+    report = cv_pose_grouped(s["obs"], s["board"], cfg, s["optimizer_config"])
     assert report["schema"] == "cv-v1"
 
     assignment = assign_cv_folds(unique_poses(s["obs"]), s["cfg"])
@@ -551,7 +565,10 @@ def test_lopo_outlier_pose_flagged(make_true_views):
         corner_source=("sb",) * 12,
     )
     base = CalibrationConfig()
-    cfg = replace(base, evaluate=replace(base.evaluate, models=("m1",), evaluate_max_workers=1))
+    # 训练侧保持每姿态 2 张(改前全连拍规模):5 像素偏移的点名阈值是按
+    # 全连拍训练规模调好的;本测试考的是离群点名接线,不考降载旋钮
+    cfg = replace(base, evaluate=replace(base.evaluate, models=("m1",), evaluate_max_workers=1,
+                                         exposures_per_pose=2))
     report = lopo(obs, board, cfg, {"m1": {"loss": "linear"}})
     summary = report["models"]["m1"]
     assert [o["pose_id"] for o in summary["outlier_poses"]] == ["pose_02"], (
@@ -692,22 +709,25 @@ def test_slices_hard_alert_fires_through_wiring(slice_setup, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _boot_cfg(base_cfg, *, n_reps, models=("m1", "m2"), max_workers=1):
-    """bootstrap 小配置:重采样次数/模型集/并行上限按需缩水(快)。"""
+def _boot_cfg(base_cfg, *, n_reps, models=("m1", "m2"), max_workers=1, exposures_per_pose=1):
+    """bootstrap 小配置:重采样次数/模型集/并行上限/训练侧连拍数按需缩水(快)。"""
     return replace(
         base_cfg,
         evaluate=replace(
-            base_cfg.evaluate, models=models, bootstrap_n=n_reps, evaluate_max_workers=max_workers
+            base_cfg.evaluate, models=models, bootstrap_n=n_reps, evaluate_max_workers=max_workers,
+            exposures_per_pose=exposures_per_pose,
         ),
     )
 
 
-def test_bootstrap_records_every_rep_and_picks_all_burst_views(cv_setup, monkeypatch):
+def test_bootstrap_records_every_rep_and_takes_first_exposure_per_pose(cv_setup, monkeypatch):
     """行为 1:4 次重采样 × 2 模型小样跑通,共求解 8 次;两个模型共用同一批
-    分配(D-04:每个重采样号上两模型抽中的姿态集合一致);抽中姿态带全部
-    连拍且不重复(训练行数 = 抽中姿态去重数 × 2);每次参数向量全记录,
-    param_std/param_ci/var_bootstrap 与明细数组对账;var_slice/pose_sampling_var
-    是占位键(本任务只出 bootstrap 侧,slices 方差由 04-05/04-06 组装)。"""
+    分配(D-04:每个重采样号上两模型抽中的姿态集合一致);抽中姿态去重后
+    每姿态取文件序前 1 张(默认 exposures_per_pose=1,2026-10-22 降载新
+    口径:训练行数 = 抽中姿态去重数,不再是去重数 × 2);每次参数向量全
+    记录,param_std/param_ci/var_bootstrap 与明细数组对账;
+    var_slice/pose_sampling_var 是占位键(本任务只出 bootstrap 侧,slices
+    方差由 04-05/04-06 组装)。"""
     s = cv_setup
     cfg = _boot_cfg(s["cfg"], n_reps=4)
 
@@ -736,10 +756,10 @@ def test_bootstrap_records_every_rep_and_picks_all_burst_views(cv_setup, monkeyp
                 f"重采样 {entry['rep']} 的分配应被 {m} 恰用一次(共用同一批,D-04)"
             )
 
-    # 抽中姿态带全部连拍:训练行数 = 抽中姿态去重数 × 每姿态 2 张
+    # 抽中姿态去重后每姿态取文件序前 1 张(降载默认):训练行数 = 去重姿态数
     for _m, pose_ids, n_rows in captured:
-        assert n_rows == len(set(pose_ids)) * 2, (
-            "训练观测集必须去重带全连拍(抽中 3 次的姿态只算一份,2 张全带)"
+        assert n_rows == len(set(pose_ids)), (
+            "训练观测集必须去重且每姿态只取 1 张(抽中 3 次的姿态只算一份)"
         )
 
     for m in ("m1", "m2"):
@@ -1046,3 +1066,99 @@ def overall_test_rms_by_model_rejects_broken_detail_in_chinese():
                 "test_rms": np.array([0.1, 0.2]),
             }
         })
+
+
+# ---------------------------------------------------------------------------
+# 降载旋钮 exposures_per_pose(2026-10-22):旋钮生效 / 确定性 / slices 豁免
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_exposures_per_pose_knob_scales_train_rows(cv_setup, monkeypatch):
+    """旋钮生效:exposures_per_pose=2 → 每次求解训练行数 = 去重姿态数 × 2;
+    meta 记录 exposures_per_pose(产物可追溯训练口径)。"""
+    s = cv_setup
+    cfg = _boot_cfg(s["cfg"], n_reps=3, exposures_per_pose=2)
+
+    captured: list[tuple[str, int]] = []
+    real_solve = experiments_mod.solve_with_scipy
+
+    def spy_solve(obs, model, cfg_, init=None, loss="linear", rms_linear_ref=None):
+        captured.append((model.model_id, len(obs.pose_ids)))
+        return real_solve(obs, model, cfg_, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
+
+    monkeypatch.setattr(experiments_mod, "solve_with_scipy", spy_solve)
+    report = bootstrap_pose(s["obs"], s["board"], cfg, s["optimizer_config"])
+
+    assert report["meta"]["exposures_per_pose"] == 2, "meta 必须记录训练侧口径"
+    assignment = bootstrap_resample(unique_poses(s["obs"]), cfg)
+    got_by_rep: dict[int, int] = {}
+    for (m, n_rows), e in zip(captured, [entry for entry in assignment for _ in ("m1", "m2")]):
+        got_by_rep[e["rep"]] = n_rows
+    for e in assignment:
+        assert got_by_rep[e["rep"]] == len(set(e["pose_ids"])) * 2, (
+            f"重采样 {e['rep']} 的训练行数应是 去重姿态数 × 2,实际 {got_by_rep[e['rep']]}"
+        )
+
+
+def test_bootstrap_train_side_takes_file_order_first_view_deterministically(cv_setup, monkeypatch):
+    """确定性:每姿态多张只取文件序第 1 张(img_XX 双数号 = 每姿态文件序
+    第 1 张);同种子两次 bootstrap_pose 逐位一致(降载不引入新随机源)。"""
+    s = cv_setup
+    cfg = _boot_cfg(s["cfg"], n_reps=2)
+
+    captured_ids: list[tuple[str, ...]] = []
+    real_solve = experiments_mod.solve_with_scipy
+
+    def spy_solve(obs, model, cfg_, init=None, loss="linear", rms_linear_ref=None):
+        captured_ids.append(tuple(obs.image_ids))
+        return real_solve(obs, model, cfg_, init=init, loss=loss, rms_linear_ref=rms_linear_ref)
+
+    monkeypatch.setattr(experiments_mod, "solve_with_scipy", spy_solve)
+    report = bootstrap_pose(s["obs"], s["board"], cfg, s["optimizer_config"])
+
+    # 每姿态文件序第 1 张:image_ids 按文件名排序后,pose_k 的第 1 张是双数号
+    first_of_pose = {}
+    for pose, img in zip(s["obs"].pose_ids, s["obs"].image_ids):
+        first_of_pose[pose] = min(first_of_pose.get(pose, img), img)
+    expected_universe = set(first_of_pose.values())
+    assert expected_universe == {f"img_{k:02d}" for k in range(0, 12, 2)}
+    for ids in captured_ids:
+        assert set(ids) <= expected_universe, (
+            f"训练侧只允许出现每姿态文件序第 1 张,混入了:{sorted(set(ids) - expected_universe)}"
+        )
+        assert len(set(ids)) == len(ids), "同一张照片在一次训练侧里不该出现两次"
+
+    r2 = bootstrap_pose(s["obs"], s["board"], cfg, s["optimizer_config"])
+    _assert_reports_equal(report, r2)
+
+
+def test_cv_train_side_rows_scale_with_exposures_per_pose(cv_setup):
+    """CV 侧:折级训练侧行数 = 折内训练姿态数 × exposures_per_pose(默认 1);
+    n_val_views 与改前口径一致(验证侧仍带全部连拍,每姿态 2 张)。"""
+    s = cv_setup
+    report = cv_pose_grouped(s["obs"], s["board"], s["cfg"], s["optimizer_config"])
+    assert report["meta"]["exposures_per_pose"] == 1
+    for m in ("m1", "m2"):
+        for row in report["models"][m]["fold_rows"]:
+            assert row["n_train_views"] == row["n_train_poses"] * 1, (
+                f"训练侧行数应是 训练姿态 {row['n_train_poses']} × 1,实际 {row['n_train_views']}"
+            )
+            assert row["n_val_views"] == row["n_val_poses"] * 2, (
+                f"验证侧必须仍是全连拍(姿态 {row['n_val_poses']} × 2),"
+                f"实际 {row['n_val_views']}"
+            )
+
+
+def test_slices_exempt_from_exposures_per_pose_knob(slice_setup):
+    """slices 豁免回归:默认 / exposures_per_pose=1 / =8 三种配置下,
+    slice_groups_by_index 输出的组数与组内容完全一致(新旋钮不进分组实验)。"""
+    s = slice_setup
+    base = CalibrationConfig()
+    cfg_one = replace(base, evaluate=replace(base.evaluate, exposures_per_pose=1))
+    cfg_eight = replace(base, evaluate=replace(base.evaluate, exposures_per_pose=8))
+    groups_default = slice_groups_by_index(s["obs"], base)
+    groups_one = slice_groups_by_index(s["obs"], cfg_one)
+    groups_eight = slice_groups_by_index(s["obs"], cfg_eight)
+    assert groups_default == groups_one == groups_eight, (
+        "重复张分组实验必须对 exposures_per_pose 完全免疫(它本身就是量连拍效应)"
+    )

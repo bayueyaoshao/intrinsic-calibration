@@ -356,6 +356,11 @@ def smoke_setup(make_true_views, tmp_path):
             cv_n_rounds=2,
             bootstrap_n=4,
             evaluate_max_workers=1,
+            # 训练侧保持每姿态 2 张(2026-10-22 降载前口径):本冒烟考的是
+            # 全链接线不断架,小样合成数据上每姿态 1 张(3 行训练)会让 m2
+            # 触发"实用收敛"误报(小样数据现象);旋钮语义由
+            # test_evaluation_experiments / test_evaluation_split 专项测试另考
+            exposures_per_pose=2,
         ),
     )
     return {
