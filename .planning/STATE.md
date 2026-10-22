@@ -85,6 +85,7 @@ Plan: 6 of 6 完成(05-06 COR-03 连拍各向异性端到端 + 阶段五收口)
 | 261017-mmj | 角点检测最终方案落地:SB 为主、classic 兜底 + 失败帧独立产物 + 清理中间实验产物 | 2026-10-17 | dcd5abe | [261017-mmj-corners-sb-classic-fallback](./quick/261017-mmj-corners-sb-classic-fallback/) |
 | 261017-pub | 存疑帧/连拍点名帧专属复核文件夹:review_suspects(89 张)+ review_burst_flagged(24 张),一个文件夹看完人工复核 | 2026-10-17 | 0be6887 | [261017-pub-calib-corners](./quick/261017-pub-calib-corners/) |
 | 261022-ikq | evaluate 实验降载:训练侧每姿态 1 张(exposures_per_pose 旋钮)+ bootstrap 100→30/50→10 + lopo 30→10,选型结论与旧轮逐一吻合,耗时 118→53.5 分钟 | 2026-10-22 | 4b6234b | [261022-ikq-evaluate-1-bootstrap-lopo](./quick/261022-ikq-evaluate-1-bootstrap-lopo/) |
+| 261022-t9o | 测试套件分两档:6 个真数据文件叠加 realdata 标记(47 用例),白天 `-m "not realdata"` 跳过、夜间全量照跑,not integration 口径逐位不变 | 2026-10-22 | cc57451 | [261022-t9o-realdata-marker](./quick/261022-t9o-realdata-marker/) |
 
 ### Research Flags
 
