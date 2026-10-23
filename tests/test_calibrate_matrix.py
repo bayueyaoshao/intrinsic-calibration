@@ -244,11 +244,17 @@ def test_scipy_refine_no_worse_than_opencv(synthetic_matrix_tree: dict):
 # 日常开发 `uv run pytest -m "not integration"` 自动跳过)
 # ---------------------------------------------------------------------------
 
-# 真实上游产物所在的 run 目录(与仓库当前数据集对应;换数据集后同步更新。
-# 2026-10-21 清理陈旧输出后保留的最新链:corners run_20261020_102709
-# ← ingest run_20261018_163039,与 evaluate run_20261020_103552 同一条血缘)
-_REAL_CORNERS_RUN = "run_20261020_102709"
-_REAL_INGEST_RUN = "run_20261018_163039"
+# 真实上游产物所在的 run 目录:动态取 output/ 下各阶段最新一轮,
+# 不再钉死轮名——及时清理换新链后测试自动跟上,不会再因旧轮删除而断
+def _newest_run(stage_dir: Path) -> str:
+    runs = sorted(p.name for p in stage_dir.iterdir() if p.is_dir() and p.name.startswith("run_"))
+    if not runs:
+        pytest.skip(f"{stage_dir} 下没有任何 run 轮,真数据测试跳过")
+    return runs[-1]
+
+
+_REAL_CORNERS_RUN = _newest_run(REPO_ROOT / "output" / "corners")
+_REAL_INGEST_RUN = _newest_run(REPO_ROOT / "output" / "ingest")
 # 复制进临时树的角点产物(sb 路线的 train/test npz 与 meta 四件)
 _REAL_STAGE_FILES = ("corners_train_sb.npz", "corners_train_sb.meta.json",
                      "corners_test_sb.npz", "corners_test_sb.meta.json")

@@ -304,15 +304,18 @@ def test_analyze_test_xyz_section(analyze_tree: dict):
 
 def test_analyze_sensitivity_section(analyze_tree: dict):
     """ANA-04 真实数据(findings 结论 1/2/3 对账):uniqueness 的 bootstrap
-    最大位移当量 ≈ 1.9943(±1%),多起点数值键在盘;advice 非空且首条
-    点名 k2/k3 软方向、给"补"字手段、带"不自动执行"声明(裁定③);
-    近零参数像素当量低于 0.05px 影响线;quick 档 what_if 为 None 且
-    what_if_note 说明档位;双谱对账夹角有限在 [0,1]。"""
+    最大位移当量在 1–3px 量级带内(谷底解不唯一是数据固有,结论 2/9;
+    精确值随重抽次数口径变:50 次口径 1.9943、10 次口径 1.8330,故锁
+    量级与「远超 0.05px 稳定阈值」两个不变量,不锁单点);多起点数值键
+    在盘;advice 非空且首条点名 k2/k3 软方向、给"补"字手段、带"不自动
+    执行"声明(裁定③);近零参数像素当量低于 0.05px 影响线;quick 档
+    what_if 为 None 且 what_if_note 说明档位;双谱对账夹角有限在 [0,1]。"""
     section = analyze_tree["report"]["sensitivity"]
     uniq = section["uniqueness"]
-    assert uniq["bootstrap_max_disp_px"] == pytest.approx(1.9943, rel=0.01), \
-        f"bootstrap 最大位移 {uniq['bootstrap_max_disp_px']:.4f} 偏离结论 2 " \
-        f"基准 1.9943 超过 1%"
+    max_disp = uniq["bootstrap_max_disp_px"]
+    assert 1.0 <= max_disp <= 3.0, \
+        f"bootstrap 最大位移 {max_disp:.4f} 落在 1–3px 量级带之外," \
+        f"与结论 2/9「谷底滑动 1–2px 级」不符(0.05px 阈值口径下必为 FAIL 级)"
     assert isinstance(uniq["multistart_disp_px"], float)
     assert uniq["multistart_verdict"] in ("consistent", "inconsistent")
     assert "解不唯一" in uniq["note"]
