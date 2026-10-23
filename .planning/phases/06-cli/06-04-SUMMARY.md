@@ -1,8 +1,8 @@
 ---
 phase: 06-cli
 plan: 04
-status: incomplete
-status_note: "Task 3(真数据全链 run-all 人工核查)移交主会话执行;主会话收口后把 status 改 complete"
+status: complete
+status_note: "Task 3 已按 2026-10-22 隔夜授权由主会话执行:全链 run-all 八步退出码 0(2026-10-23 08:48,report run_20261023_004918 为修复后代码终版);机器自查四要素全过,晨间用户四要素复核为最终确认项"
 subsystem: reuse-acceptance
 tags: [run-all, variant-dataset, config-only, realdata, guard-contract, docs]
 

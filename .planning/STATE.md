@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-22T04:00:11.834Z"
+last_updated: "2026-10-23T01:00:00.000Z"
 progress:
   total_phases: 6
-  completed_phases: 5
-  total_plans: 29
-  completed_plans: 29
-  percent: 83
+  completed_phases: 6
+  total_plans: 33
+  completed_plans: 33
+  percent: 100
 ---
 
 # STATE: intrinsic-calibration
@@ -17,26 +17,27 @@ progress:
 ## Project Reference
 
 - **Core Value:** 对给定的一批标定图像,产出可论证为当前数据下最优的内参(held-out 泛化误差最小 + 参数稳定 + 误差逼近 CRLB),并量化"距离数据极限还有多远"
-- **Current Focus:** Phase 5 — 误差预算 + 诊断 + 角点提取寻优
-- **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md
+- **Current Focus:** v1.0 六阶段全部执行完毕——全链 run-all 真数据验证通过,待用户晨间终验
+- **Key Docs:** .planning/PROJECT.md, .planning/REQUIREMENTS.md, .planning/ROADMAP.md, docs/pipeline.md, docs/new-dataset.md
 
 ## Current Position
 
-Phase: 5 (误差预算 + 诊断 + 角点提取寻优) — COMPLETE(6/6 计划收口)
-Plan: 6 of 6 完成(05-06 COR-03 连拍各向异性端到端 + 阶段五收口)
+Phase: 6 (报告组装 + CLI 全流水线 + 可复用性硬化) — COMPLETE(4/4 计划 + 评审修复 + 全链验证)
+Plan: 4 of 4 完成
 
-- **Phase:** 5
-- **Plan:** 6 of 6 完成(05-06 COR-03 连拍各向异性端到端 + 阶段五收口)
-- **Status:** Phase complete(下一步:Phase 6 报告)
+- **Phase:** 6
+- **Plan:** 4 of 4 完成(06-01 报告库层 / 06-02 回环三件 / 06-03 CLI 收口 / 06-04 硬化与验收)
+- **Status:** Phase complete(v1.0 六阶段收官;全量套件后台在途,晨间用户四要素终验为最后一关)
 - **Progress:** [██████████] 100%
-- **备注:** 验收收口 2026-10-22:gsd-verifier 目标倒推 6/6 达标、
-  0 缺口,VERIFICATION.md 在盘(ANA-01..04/COR-02/03 逐条证据对账,
-  关键数字与 findings 结论 6–11 逐位一致);findings 结论 6–11 轮名
-  勘误 025045→044356 + evaluate 降载取代注记(结论 3/5 的 50 次
-  bootstrap 数字保留历史出处);旧 evaluate 轮 131613 已按及时清理
-  删除(降载新轮 071708 选型逐位一致);当天另收两条 quick:evaluate
-  降载(ikq,耗时 118→53.5 分钟)+ 测试分两档(t9o,47 个真数据用例
-  打 realdata 标记,白天 -m "not realdata" 609 个分钟级)
+- **备注:** 隔夜自主执行(2026-10-22 授权):三波执行器 + 评审
+  (0 critical/4 warning 全修 + 3 info)+ 全链 run-all 八步退出码 0
+  (05:20–08:48,噪声注入为最重步);报告九节 + 18 图 + 回环三件 +
+  跨运行对比全部真数据验证;变体小数据守卫即契约裁定(ANA-01 铁律
+  小数据正确触发硬报错,报告照常披露,不放宽守卫);全链确定性重跑
+  与旧轮关键数字同值(m2 当选、test RMS 0.1598px、预算 pass、σ
+  0.008708px),旧轮七个已按及时清理删除,findings 落取代注记;新链
+  血缘完整,阶段五登记的 2 个血缘断链测试预期自愈(全量套件确认中);
+  剔除候选 37 条(lopo 零点名 + 连拍逐帧 + 体检多来源)
 
 ## Performance Metrics
 
